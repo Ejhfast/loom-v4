@@ -466,9 +466,8 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
 /// Load and run one program with the given policy grants.
 fn run_program(options: Options) -> Result<ExitCode, String> {
     let (arena, namespace) = load_artifact(&options.file)?;
-    // The whole machine world lives on one worker thread with a
-    // bounded stack, and only the rendered outcome comes back. That
-    // is the thread-backed baseline of specification 22.12.
+    // One worker thread owns the complete machine world.
+    // Only the rendered outcome returns to this thread.
     let seed = options.rand_seed;
     let grants: Vec<&str> = options.allow.iter().map(|g| g.as_str()).collect();
     let arguments = options.command_args;

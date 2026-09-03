@@ -1,6 +1,6 @@
 //! A supervisor proc that owns a mailbox and drives a child.
 //!
-//! `week10_waits.rs` covers the interleaved case through `select`.
+//! `waits.rs` covers the interleaved case through `select`.
 //! This case checks the plain combination: a proc with a mailbox
 //! can hold and drive a machine.
 

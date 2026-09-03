@@ -1,6 +1,5 @@
-//! Week-5 identity suites: the sectioned container, definition and
-//! module hashes, hash-linked core references, the verified-code
-//! cache, and the interface artifact.
+//! Artifact identity, definition hashes, core references, and the
+//! verified-code cache.
 
 use lm_bytecode::identity::{module_identity, ModuleIdentity};
 use lm_bytecode::{Func, Instr, Module};
@@ -353,7 +352,7 @@ fn hash_equal_noncanonical_code_rejects() {
     assert!(lm_verify::verify_module(&module).is_err());
 }
 
-/// Review regression: a duplicate selector name keeps the semantic
+/// A duplicate selector name keeps the semantic
 /// hash equal, because the canonical encoding replaces a selector
 /// index with its name. The two indices are different dispatch keys,
 /// and only the per-function pass resolved the method. The structural
@@ -397,7 +396,7 @@ fn a_duplicate_selector_name_rejects() {
     assert!(lm_verify::verify_module(&module).is_err());
 }
 
-/// Review regression: the loader computes the identity of untrusted
+/// The loader computes the identity of untrusted
 /// bytes before the verifier runs. A function that makes a closure of
 /// itself is a one-member `MakeClosure` cycle. The cycle marker must
 /// cover it; an unfinished body digest must never panic the loader.

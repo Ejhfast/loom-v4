@@ -1,5 +1,4 @@
-//! Week-5 surface suites: the `sys` casing rule, the `use` keyword
-//! with fixed-binding aliases, and the request pattern.
+//! The `sys` casing rule, `use` aliases, and request patterns.
 
 use lm_testkit::{compile_module_text, run_allowed, run_text, run_world};
 use lm_vm::VmConfig;
@@ -181,8 +180,7 @@ fn use_binding_of_a_group_is_not_a_value_or_callable() {
 #[test]
 fn use_rejects_non_fixed_paths() {
     // A single file carries no compile environment, so a module
-    // import has no root to resolve against. Week 6 changed the
-    // wording: the fix is a package, not a later week.
+    // import has no root to resolve against. A package supplies roots.
     let rendered = compile_module_text("t.lm", "use mathlib.matrix\n1\n").unwrap_err();
     assert!(rendered.starts_with("error[E1052]"), "{rendered}");
     assert!(rendered.contains("package"), "{rendered}");

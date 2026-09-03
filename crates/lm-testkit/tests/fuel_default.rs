@@ -12,10 +12,8 @@ use lm_vm::{NullHost, VmConfig, World, WorldLimits};
 /// Both budgets default to the largest value: the budget of one
 /// machine, and the budget every machine of one world shares.
 ///
-/// The former default of one billion stopped a root program after a
-/// few seconds of work. This case is the regression guard, and it
-/// costs no execution: a case that retires a billion instructions
-/// proves the same fact and slows the suite.
+/// This test reads the limit without execution. A runtime test with
+/// this budget would take too much time.
 #[test]
 fn both_default_budgets_are_the_largest_value() {
     assert_eq!(VmConfig::default().fuel, u64::MAX);

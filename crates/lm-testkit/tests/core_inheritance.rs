@@ -1,8 +1,6 @@
-//! Week 8, part one: a module class may inherit a core class.
+//! Inheritance from classes in the pinned core image.
 //!
-//! Nothing before week 8 inherited a class of the pinned core image.
-//! The proc classes need that path, so these cases prove it on an
-//! ordinary core class first.
+//! These cases cover layout, dispatch, generics, and diagnostics.
 
 use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
@@ -314,7 +312,7 @@ fn the_class_entry_records_the_parent_type_arguments() {
 }
 
 /// The class listing shows the parent instantiation the class table
-/// records, so the new byte format has a readable dump.
+/// records.
 #[test]
 fn the_class_listing_shows_the_parent_type_arguments() {
     let module = compile_module_text(

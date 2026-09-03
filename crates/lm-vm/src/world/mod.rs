@@ -2274,9 +2274,8 @@ mod tests {
     /// A stale generation names a dead proc, never the machine that
     /// took the slot later.
     ///
-    /// A proc slot is not reused today, so no guest program reaches
-    /// this state. The rule is the defense that keeps it that way, so
-    /// it is tested at the record level.
+    /// The allocator does not reuse proc slots. This record-level test
+    /// protects the generation rule.
     #[test]
     fn a_stale_generation_names_a_dead_proc() {
         let loaded = trivial_loaded();

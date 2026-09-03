@@ -1,4 +1,4 @@
-//! Week-6 packages, modules, and the build loop.
+//! Packages, modules, and the build loop.
 //!
 //! Every case builds a real package tree in a temporary directory,
 //! so the tests exercise the same path the `lm` tool uses.
@@ -22,8 +22,10 @@ impl TempTree {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("lm-week6-{label}-{}-{unique}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "lm-package-test-{label}-{}-{unique}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("the temporary tree is created");
         TempTree { root }

@@ -27,12 +27,7 @@ use crate::{DecodeError, Import, ImportKind, Module, NO_CTOR};
 pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
-// Version 17 binds each interface to one immutable ABI bundle.
-// Version 18 adds interface inheritance and bare `Self` contracts.
-// Version 21 adds the binary64 Float type.
-// Version 22 adds generic methods and interface default bindings.
-// Version 23 adds compile-time constants.
-// Version 24 adds character constants.
+// The version covers every encoded interface field and type.
 const VERSION: u16 = 24;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 

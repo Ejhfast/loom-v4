@@ -19,8 +19,8 @@ use lm_vm::{Vm, VmConfig};
 const MAX_CASE_BYTES: usize = 1 << 20;
 
 /// Run one harness body on the supported 8 MiB stack. The parser
-/// depth guard assumes it (week-2 note), and hostile inputs push the
-/// guarded worst case past the smaller default test-thread stack.
+/// depth guard assumes it. Hostile inputs can exhaust the smaller
+/// default test-thread stack.
 fn on_supported_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 << 20)
@@ -76,8 +76,8 @@ impl Prng {
     }
 }
 
-/// The fixed harness seed. Change it only with a note in the week
-/// documentation, because failures reproduce through it.
+/// The fixed harness seed. Record any change in the commit message.
+/// Failures reproduce through this value.
 const SEED: u64 = 0x00c0_ffee_1234_5678;
 
 /// Mutations per input.
@@ -1223,9 +1223,8 @@ fn mutated_sources_never_panic_the_scanner_checker_or_lowering() {
     });
 }
 
-/// The interface decoder is a new byte surface. A mutated interface
-/// must reject or decode without a panic, and a decoded interface
-/// must re-encode to bytes that decode again.
+/// A mutated interface must reject or decode without a panic. A
+/// decoded interface must re-encode to bytes that decode again.
 #[test]
 fn mutated_interfaces_never_panic_the_decoder() {
     use lm_bytecode::interface::{decode_interface, encode_interface};
@@ -1260,8 +1259,8 @@ fn mutated_interfaces_never_panic_the_decoder() {
     });
 }
 
-/// The manifest parser is a new text surface. Every mutation must
-/// produce a manifest or a diagnostic, never a panic.
+/// Every manifest mutation must produce a manifest or a diagnostic.
+/// It must not cause a panic.
 #[test]
 fn mutated_manifests_never_panic_the_parser() {
     on_supported_stack(|| {
@@ -1358,8 +1357,7 @@ fn regenerate_fuzz_corpus() {
         std::fs::write(dir.join(name), lm_bytecode::encode(module)).expect("corpus writes");
     };
     let base_types = || vec![BcType::Unit, BcType::Bool, BcType::Int, BcType::Str];
-    // Week-3 finding 1: `CallVirtualG` with an out-of-range type
-    // application was a host panic before the structural bound.
+    // Reject an out-of-range `CallVirtualG` type application.
     let mut types = base_types();
     types.push(BcType::Class(0));
     write(
@@ -1419,8 +1417,7 @@ fn regenerate_fuzz_corpus() {
             debug: Vec::new(),
         },
     );
-    // Week-3 finding 2: `CastType` between two instantiations of one
-    // generic class forged the argument vector.
+    // Reject a forged `CastType` argument vector.
     let mut types = base_types();
     types.push(BcType::Var(0)); // 4
     types.push(BcType::Inst(0, vec![2])); // 5 Box[Int]
@@ -1482,8 +1479,8 @@ fn regenerate_fuzz_corpus() {
             debug: Vec::new(),
         },
     );
-    // Week-4 finding class: a perform outside the claimed row, and a
-    // first-class operation type with a forged signature.
+    // Reject a perform outside its claimed row.
+    // Reject an operation type with a forged signature.
     let source = "def greet(name: String) with Io.Write\n  print(name)\nend\ngreet(\"x\")\n";
     let mut module = lm_testkit::compile_module_text("seed.lm", source).expect("seed compiles");
     let greet = module
@@ -1501,12 +1498,8 @@ fn regenerate_fuzz_corpus() {
         }
     }
     write("op-type-signature-forgery.lmbc", &module);
-    // The overflow found by this harness: a forged local slot count
-    // sized a multi-gigabyte allocation in the verifier dataflow and
-    // in the initial frame before any bound applied. The count is now
-    // the local-type table length, so the seed patches the encoded
-    // count field; the decoder length guard rejects it before any
-    // allocation.
+    // A forged local-slot count can request a large allocation. The
+    // decoder checks the count against the local-type table first.
     {
         let module = Module {
             strings: vec![],

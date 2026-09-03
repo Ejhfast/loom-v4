@@ -1037,8 +1037,8 @@ pub(crate) fn step(
             if ctx.common_ancestor(vc, tc).is_none() {
                 return Err(fail("type test between unrelated classes".to_string()));
             }
-            // Class arguments are invariant, and every legal nominal
-            // relation in this slice keeps the argument vector. A test
+            // Class arguments are invariant. Every legal nominal
+            // relation keeps the argument vector. A test
             // that changes an argument would forge a generic type.
             if va != ta {
                 return Err(fail("type test changes the generic arguments".to_string()));

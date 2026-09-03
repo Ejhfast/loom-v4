@@ -67,55 +67,6 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// semantics, the canonical identity encoding, the hash domains, or
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
-///
-/// Version 6 adds the parent type arguments of a generic parent to
-/// the canonical class identity encoding. Version 7 adds the
-/// the two snapshot type tags. Version 8 adds the reply
-/// type of the two perform instructions to the instruction encoding
-/// and to the canonical identity encoding. Version 9 adds the three
-/// resource types. Version 10 adds the three byte instructions.
-/// Version 12 adds final class contracts. Version 13 adds native core
-/// class lowering. Version 14 lowers operators through core methods.
-/// Version 15 adds the native String class and String instructions.
-/// Version 16 adds Bytes and nominal builder classes.
-/// Version 17 adds scalar Text, Substring, Char, and builder moves.
-/// Version 18 adds the text extraction and parsing lowering, and it
-/// lowers enum equality to the structural instructions. Version 19
-/// adds two active byte-buffer scan instructions and native TLS
-/// resources with their VM controls. Both landed on separate
-/// branches, so version 20 is the first that carries them together.
-/// Version 22 adds interface contracts, callbacks, and native collection lowering.
-/// Version 23 adds the receiver type to semantic digest instructions.
-/// Version 24 makes direct function parameters nonescaping by default.
-/// Version 25 renames the two guest snapshot types. Version 26 adds
-/// stable slot contracts and specialized slot instructions. Version
-/// 27 removes portable process targets from slot metadata. Version 28
-/// adds dynamic result and public syntax instructions. Version 29
-/// adds complete code slot and VM image controls. Version 30 adds
-/// contract-bound slot identities and Result propagation.
-/// Version 31 binds class slots to constructor contracts and versions.
-/// Version 32 adds portable function and class code instructions.
-/// Version 33 adds portable definition source lookup.
-/// Version 34 adds fault source lookup instructions.
-/// Version 35 publishes static bindings apart from late linkage.
-/// Version 36 makes a class family part of its replacement contract.
-/// Version 37 adds multiple bounds to associated interface types.
-/// Version 38 adds interface inheritance and bare `Self` contracts.
-/// Version 39 lowers general interpolation through `Display`.
-/// Version 40 activates equality hooks through `PartialEq`.
-/// Version 41 adds `Hashable` map paths and stable native hashes.
-/// Version 42 adds conditional conformance contracts.
-/// Version 43 lowers ordered and unordered hash mixing.
-/// Version 44 lowers tombstone-aware map traversal.
-/// Version 45 uses BLAKE3-256 for bytecode identities.
-/// Version 46 lowers text padding and Float text conversions.
-/// Version 48 encodes effect rows with ABI operation and group slots.
-/// Version 49 adds compile-time constants to module surfaces.
-/// Version 50 adds pin-only imports and character literals.
-/// Version 51 lowers borrowed Text insertion into String maps.
-/// Version 52 lowers direct UTF-8 String construction from a byte range.
-/// Version 53 lowers allocate-on-miss byte-range text interning.
-/// Version 54 lowers borrowed Text removal from text maps.
 pub const COMPILER_ABI_VERSION: u32 = 54;
 
 /// The refinement work budget of one component.
@@ -3699,9 +3650,8 @@ mod tag_tests {
     ///
     /// A duplicate makes two instructions encode alike, so two
     /// definitions that differ only in that instruction share one
-    /// structural hash. Nothing else catches it: the opcode table is a
-    /// separate namespace, the verifier reads neither, and a merged
-    /// branch that adds an instruction on each side hits it directly.
+    /// structural hash. The opcode table is a separate namespace, and
+    /// the verifier reads neither table.
     ///
     /// `instr_tag` is one flat table, so the check reads that table
     /// from the source of this file.

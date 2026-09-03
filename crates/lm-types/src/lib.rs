@@ -1,4 +1,4 @@
-//! Interned types for the week-3 language slice.
+//! Interned Loom types.
 //!
 //! The store interns primitive, class, generic-application, tuple,
 //! collection, and function types. Type identity is a dense `TypeId`,

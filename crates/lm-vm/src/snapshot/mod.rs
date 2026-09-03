@@ -47,48 +47,11 @@ pub const MAGIC: [u8; 8] = *b"LMSNAP\0\x01";
 /// The canonical snapshot format version.
 ///
 /// The container is sectioned, and the section table names each
-/// section by kind. A later format may add a section kind, for example
-/// a delta section that names its base image by container hash,
-/// without moving any existing section.
+/// section by kind. Each slot carries its initialization state.
 ///
-/// Version 2 states the initialization of a local slot. A slot that
-/// holds no value spells the uninitialized marker, and version 1
-/// spelled it as a unit value. Admission reads the marker as the
-/// initialization fact, so it cannot admit a version-1 container.
-///
-/// Version 2 also carries the type environment witnesses of section
-/// 5.6: one closed type table, one environment table, and one
-/// environment index for each frame, closure, instance, and machine.
-///
-/// Version 3 carries nested control edges and routed requests.
-/// Version 4 carries bytes and closed file handle values.
-/// Version 5 carries typed wait descriptions and active wait blocks.
-/// Version 6 encodes builders as nominal core class types.
-/// Version 7 adds shared text and byte storage.
-/// Version 8 adds closed TLS stream values.
-/// Version 9 adds native empty `Option` values.
-/// Version 10 adds collection epochs.
-/// Version 11 adds active callback descriptors.
-/// Version 12 preserves spare list and map capacity.
-/// Version 15 stores VM images apart from run machine records.
-/// Version 16 stores current late-bound slot targets in VM images.
-/// Version 18 stores installed code and module instances.
-/// Version 19 stores compiler interfaces with portable code.
-/// Version 21 distinguishes typed run images from full VM images.
-/// Version 22 stores one constructor version in each class slot target.
-/// Version 23 stores optional portable source origins.
-/// Version 24 stores bounded fault execution traces.
-/// Version 25 stores installed function and class binding handles.
-/// Version 26 stores slot versions and pending slot changes.
-/// Version 27 stores the exact ABI bundle digest.
-/// Version 28 stores each map entry semantic hash.
-/// Version 29 stores floating-point values.
-/// Version 30 adds closed terminal and signal resource values.
-/// Version 31 stores homogeneous dynamic wait sets.
-/// Version 32 stores artifact tables and namespace manifests.
-/// Version 33 stores the dynamic result flag of a machine.
-/// Version 34 stores dynamic result references.
-/// Version 35 stores closed effect rows as ABI operation slots.
+/// The container carries closed types, environments, heaps, machines,
+/// code, bindings, resources, waits, effects, and execution traces.
+/// Admission accepts only this exact format version.
 pub const FORMAT_VERSION: u32 = 35;
 
 /// The section kinds, in canonical order.
@@ -1013,8 +976,7 @@ impl Default for LoadLimits {
 ///
 /// The list excludes the policy table. Specification 17.2 excludes
 /// policy tables from a snapshot, so a machine or an object that only
-/// a table-held mock closure names is not snapshot content
-/// (`docs/notes/week8.md`, the week-9 carry-forward).
+/// a table-held mock closure names is not snapshot content.
 pub const SNAPSHOT_ROOT_ORDER: &str = "frame closures, locals, operands, pending arguments, \
 terminal value, mailbox queue, proc body, literals";
 

@@ -1,4 +1,4 @@
-//! Week-10 native collection and iteration behavior.
+//! Native collection and iteration behavior.
 
 use lm_bytecode::{BcInterfaceUse, BcType, ExtendedInstr, Instr};
 use lm_compiler::{compile_module, CompileEnv};

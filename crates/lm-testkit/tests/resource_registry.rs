@@ -1,5 +1,4 @@
-//! Week-7 resource suites: the host resource registry, the snapshot
-//! preflight, and the parent child-machine reservation.
+//! Host resources, snapshot preflight, and child-machine reservations.
 
 use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};

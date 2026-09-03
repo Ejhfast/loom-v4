@@ -1217,9 +1217,7 @@ const CYCLE: &str = "def even(n: Int): Bool\n\
                      \x20 if n == 0\n    false\n  else\n    even(n - 1)\n  end\nend\n\
                      even(4)\n";
 
-/// A rename inside a cyclic component moves no structural hash, in
-/// any direction of the old name order. The week-5 rule that sorted
-/// members by name is gone.
+/// A rename inside a cyclic component moves no structural hash.
 #[test]
 fn a_rename_inside_a_cycle_moves_no_hash() {
     let module = compile_module_text("t.lm", CYCLE).expect("compiles");
@@ -1768,13 +1766,10 @@ fn measure_load_path() {
 }
 
 // ---------------------------------------------------------------
-// Review regressions: the constructor binding must name the
+// A constructor binding must name the
 // construction function of its own class, and nothing else.
 //
-// A key check on its own proved nothing about the target. A binding
-// then named an import slot, a decoy with a matching hash, or an
-// ordinary function, and two providers of one class key merged into
-// one class with two live constructors.
+// The verifier checks the class field and the function target.
 // ---------------------------------------------------------------
 
 /// The two providers of `app.shapes.Dot`, with one field default each.
@@ -2043,12 +2038,9 @@ fn a_selector_or_published_binding_rename_moves_the_verification_hash() {
 /// A snapshot classification change moves the verification hash of
 /// every module.
 ///
-/// `OpDef.snapshot` decides whether a pending instance of one
-/// operation holds live host state, so it changes snapshot and
-/// resource behavior. The operation identity now covers it, the
-/// manifest digest covers the identities, and the verification hash
-/// covers the manifest digest. A verified-code cache and an admitted
-/// snapshot therefore cannot survive that change.
+/// `OpDef.snapshot` decides whether a pending operation holds live
+/// host state. The operation identity covers this field.
+/// The manifest and verification hashes also cover it.
 #[test]
 fn a_snapshot_classification_change_moves_the_verification_hash() {
     use lm_abi::{
@@ -2078,12 +2070,7 @@ fn a_snapshot_classification_change_moves_the_verification_hash() {
     );
 }
 
-/// Every field of one operation definition reaches its identity.
-///
-/// The identity encoder once read `params` and `reply` for a `Fixed`
-/// entry and `schema` for a `VmControl` entry alone. `Vm.SnapshotSelf`
-/// is `VmControl` with a reply the verifier reads, so that reply could
-/// change and move no digest at all.
+/// Every operation-definition field changes its identity.
 #[test]
 fn every_field_of_one_operation_definition_moves_its_identity() {
     use lm_abi::{

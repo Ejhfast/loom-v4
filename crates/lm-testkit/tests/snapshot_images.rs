@@ -1,11 +1,8 @@
-//! Week-9 container suite: the canonical snapshot format, the
-//! decoding rules, and the admission rules of specification 17.8.
+//! Canonical snapshot encoding, decoding, and admission.
 //!
-//! Every new byte surface owes a corruption test. The cases below
-//! damage one rule at a time and state the exact reason the loader
-//! reports, whichever stage owns that rule. A blanket sweep then flips every byte of one container and
-//! proves that the loader either rejects the result or reads a
-//! different but still canonical image. No input panics.
+//! These tests cover snapshot corruption. Each case damages one rule
+//! and checks the loader reason. A sweep flips every container byte.
+//! The loader rejects the result or reads another canonical image.
 
 use lm_bytecode::artifact::Artifact;
 use lm_testkit::{compile_text, publish_artifact, repo_root};
@@ -1089,7 +1086,7 @@ go()
 }
 
 // ---------------------------------------------------------------
-// The security re-review: the whole "underivable type" pattern.
+// Images with underivable value types.
 // ---------------------------------------------------------------
 
 /// A proc that carries a message must have a provable mailbox type.

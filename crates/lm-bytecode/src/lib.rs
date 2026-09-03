@@ -1,4 +1,4 @@
-//! Bytecode formats for the week-3 language slice.
+//! Loom bytecode formats.
 //!
 //! This crate defines two forms:
 //! - a compact serialized byte format for storage and transfer;
@@ -700,7 +700,7 @@ impl NumericInstr {
     }
 }
 
-/// One instruction added after the base dispatch contract.
+/// One instruction in the extended dispatch family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Use one-byte tags to keep extended instructions compact.
 #[repr(u8)]
@@ -1216,12 +1216,8 @@ pub struct FuncBinding {
     pub func: u32,
     /// The class this binding constructs, or `NO_CLASS`.
     ///
-    /// A key alone ties a constructor to nothing. An earlier rule
-    /// proved only that a binding with the constructor key existed, so
-    /// the binding named any function of the module, an import slot
-    /// included. Two providers then hid two constructors behind one
-    /// harmless binding, and the conflict rule never fired. This field
-    /// makes the tie explicit, and the verifier proves it.
+    /// A key alone does not identify a constructor. This field ties
+    /// the binding to its class. The verifier proves the relation.
     pub class: u32,
 }
 
@@ -1826,56 +1822,8 @@ const MAGIC: &[u8; 4] = b"LMBC";
 
 /// The container format version.
 ///
-/// Version 11 adds the `Digest` type and the three digest
-/// instructions. Version 13 adds the snapshot image and typed snapshot
-/// types. Version 14 adds the reply type index of the two perform
-/// instructions. Version 15 adds bytes, file handles, resource
-/// controls, and three byte instructions. Every earlier tag keeps its
-/// byte, so each change adds encodings and moves none. Version 16 adds
-/// final class flags. Version 17 adds the `Int` core role. Version 18
-/// adds the `Bool` core role. Version 19 adds the String core role and
-/// immutable String instructions. Version 20 adds Bytes and builder
-/// core roles. It also adds their native instructions. Version 21
-/// adds Text, Substring, Char, shared storage, and move instructions.
-/// Version 22 adds the text extraction and parsing instructions and
-/// the two structural enum equality instructions. Version 23 adds two
-/// active byte-buffer scan instructions and the native `TlsStream`
-/// class representation. Both landed on separate branches, so version
-/// 24 is the first that carries them together.
-/// Version 30 adds the static receiver type to `Digest`. Version 31
-/// splits persistent VM images from typed runs. Version 32 renames the
-/// two guest snapshot types. Version 33 adds late-bound slot tables
-/// and four specialized slot instructions. Version 34 removes the
-/// invalid portable process target form. Version 35 adds dynamic
-/// result and public syntax instructions. Version 36 adds the
-/// `ClassDef` role and the complete VM image control manifest.
-/// Version 37 adds fallible activation and stable slot lookup.
-/// Version 38 makes class slots select versioned constructors.
-/// Version 39 defines the optional source debug section.
-/// Version 40 adds fault source lookup instructions.
-/// Version 41 adds installed binding core roles. Version 42 stores
-/// each intrinsic definition contract beside its late slot. Version
-/// 43 stores several bounds for each associated interface type.
-/// Version 44 adds deliberate fault instructions.
-/// Version 45 binds each artifact to one ABI bundle digest.
-/// Version 46 adds interface inheritance and bare `Self` contracts.
-/// Version 47 stores conditional conformance premises.
-/// Version 48 adds ordered and unordered hash instructions.
-/// Version 49 adds tombstone-aware map traversal.
-/// Version 50 adds Float, byte literals, and prefixed numeric instructions.
-/// Version 51 adds text padding and Float text conversions.
-/// Version 52 adds selectable host-operation sources.
-/// Version 53 adds terminal and signal core roles.
-/// Version 54 adds file-system boundary roles.
-/// Version 55 adds stream roles and child environment overlays.
-/// Version 56 adds interface defaults and compact interface calls.
-/// Version 57 stores source contracts in the module export section.
-/// Version 58 stores effect rows with ABI operation and group slots.
-/// Version 59 stores typed constants in the module export section.
-/// Version 60 adds pin-only imports and character literals.
-/// Version 61 adds borrowed Text insertion into String maps.
-/// Version 62 adds direct UTF-8 String construction from a byte range.
-/// Version 63 adds allocate-on-miss byte-range text interning.
+/// The format uses append-only tags. Existing tags keep their encoded
+/// values when the format gains a new item.
 pub const VERSION: u16 = 63;
 
 /// The byte length of the container header: the magic, the version,

@@ -1,7 +1,7 @@
-//! Recursive-descent parser for the week-3 language slice.
+//! Recursive-descent parser for Loom source code.
 //!
-//! The parser rejects all constructs outside the slice with a
-//! precise diagnostic. It never accepts a silent fallback form.
+//! The parser rejects invalid constructs with a precise diagnostic.
+//! It never accepts a silent fallback form.
 
 use crate::ast::*;
 use crate::diag::Diagnostic;
@@ -122,10 +122,7 @@ impl Parser<'_> {
     /// Reject a reserved keyword with a precise diagnostic.
     fn reject_reserved(&self) -> Result<(), Diagnostic> {
         if let Tok::KwReserved(word) = self.peek() {
-            return Err(self.error(
-                "E1002",
-                format!("`{word}` is not supported in this language slice"),
-            ));
+            return Err(self.error("E1002", format!("Loom does not support `{word}`")));
         }
         Ok(())
     }

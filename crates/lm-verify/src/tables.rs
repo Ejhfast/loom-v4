@@ -1916,8 +1916,7 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let module = ctx.module;
     let extern_funcs = module.extern_funcs();
     // Validate the declared core role slots. The class table is
-    // validated above, so every field type index is inside the type
-    // table by now.
+    // validated above, so every field type index is inside the table.
     verify_core_roles(module)?;
     // Validate function signatures and the declared local-type
     // tables. The verifier validates the table instead of trusting

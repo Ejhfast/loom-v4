@@ -1,4 +1,4 @@
-//! Tokens for the week-2 language slice.
+//! Tokens for Loom source code.
 
 use crate::span::Span;
 use std::fmt;
@@ -30,7 +30,7 @@ pub enum Tok {
     /// Identifier that is not a keyword.
     Ident(String),
 
-    // Keywords inside the week-2 slice.
+    // Language keywords.
     KwAnd,
     KwOr,
     KwNot,
@@ -71,7 +71,7 @@ pub enum Tok {
     KwFor,
     KwConst,
 
-    /// A reserved keyword outside the current language slice.
+    /// A reserved keyword with no accepted syntax.
     KwReserved(&'static str),
 
     // Punctuation.

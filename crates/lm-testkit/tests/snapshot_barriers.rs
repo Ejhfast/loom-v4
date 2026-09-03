@@ -1,9 +1,6 @@
-//! Week-8 barrier suite: the consistent cut of specification 17.3.
+//! Snapshot barrier behavior for the consistent cut in specification 17.3.
 //!
-//! Week 8 defines no snapshot byte format, so the barrier always
-//! resumes the world. The tests read the closed set, the cut marker,
-//! and the preflight result, which is what the week-9 encoder
-//! consumes.
+//! The tests inspect the closed set, cut marker, and preflight result.
 
 use lm_bytecode::artifact::Artifact;
 use lm_proc::{Barrier, BarrierError, Scheduler};

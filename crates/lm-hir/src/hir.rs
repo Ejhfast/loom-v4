@@ -1,4 +1,4 @@
-//! Typed HIR for the week-3 language slice.
+//! Typed HIR for Loom programs.
 //!
 //! Every expression carries its checked type and its reference
 //! capability. Names are resolved to dense local slots, capture
@@ -14,9 +14,8 @@ use std::collections::BTreeSet;
 
 /// The pinned core definition indices inside one checked module.
 ///
-/// The core image is ordinary source. The compiler records where its
-/// definitions landed so language rules such as `List.get` can name
-/// the pinned `Option` identity.
+/// The core image is ordinary source. The compiler records each core
+/// index so `List.get` can name the pinned `Option` identity.
 #[derive(Debug, Clone, Copy)]
 pub struct CoreIds {
     /// Class index of the `Option` enum parent.

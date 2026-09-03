@@ -1,4 +1,4 @@
-//! The thread-backed scheduler baseline of specification 22.12.
+//! Thread-backed scheduler behavior from specification 22.12.
 //!
 //! The whole machine world is built, driven, and dropped inside one
 //! worker thread with a bounded stack. Only the rendered outcome comes

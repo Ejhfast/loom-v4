@@ -1,5 +1,4 @@
-//! Week-7 closure suites: the brace spelling, trailing closure
-//! arguments, and the brace/pipe disambiguation.
+//! Closure spellings, trailing arguments, and brace disambiguation.
 
 use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
@@ -227,7 +226,7 @@ f({\"a\": 1})
 }
 
 // ---------------------------------------------------------------
-// The new rules reject.
+// Invalid closure forms.
 // ---------------------------------------------------------------
 
 /// A call accepts at most one trailing closure.
@@ -372,8 +371,7 @@ f(42)
 ///
 /// A closure brace may open on its own line or after a comment. The
 /// body then keeps its statement separators, whatever the header
-/// layout is. An earlier version tested the brace twice, in bytes and
-/// in tokens, and the two disagreed across a line end.
+/// layout is.
 #[test]
 fn the_brace_decision_does_not_depend_on_the_header_layout() {
     let bodies = [

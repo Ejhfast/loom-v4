@@ -1,4 +1,4 @@
-//! Typed waits and selectable proc control.
+//! Typed waits and selectable proc control behavior.
 
 use lm_heap::Object;
 use lm_testkit::publish_artifact_bytes;

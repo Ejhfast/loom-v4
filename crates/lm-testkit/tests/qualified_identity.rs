@@ -1,11 +1,9 @@
-//! Identity suites for qualified keys and core-role lookup.
+//! Qualified-key identity and core-role lookup.
 
 use lm_bytecode::identity::module_identity;
 use lm_testkit::compile_module_text;
 
-/// The idiomatic user enum that week 5 could not separate from the
-/// core `IoError`: the same arm name, the same field, and the same
-/// accessor method.
+/// A user enum with the same structure as core `IoError`.
 const MY_ERR: &str = "enum MyErr\n\
                       \x20 Failed(message: String)\n\
                       \n\
@@ -18,9 +16,7 @@ const MY_ERR: &str = "enum MyErr\n\
                       x: MyErr = Failed(\"n\")\n\
                       x.message()\n";
 
-/// The week-5 gap the probe records: a user enum that copies the core
-/// `IoError` exactly. A structural hash carries no name now, so the
-/// separation must come from the qualified key of the referenced arm.
+/// A qualified key separates a user enum from an equal core shape.
 #[test]
 fn the_qualified_key_separates_a_user_enum_from_the_core_family() {
     let module = compile_module_text("t.lm", MY_ERR).expect("compiles");
@@ -54,10 +50,6 @@ fn the_qualified_key_separates_a_user_enum_from_the_core_family() {
 
 /// A class rename through source moves the qualified key. It also moves
 /// every hash that names the class. A published slot key moves too.
-///
-/// An earlier version of this test set `class.name` and left
-/// `class.key`, which the source compiler cannot produce, so it proved
-/// a case that never occurs.
 #[test]
 fn a_class_rename_moves_no_hash_when_the_key_holds() {
     let source = "class Point\n  x: Int = 0\nend\np = Point()\np.x\n";

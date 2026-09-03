@@ -10,11 +10,8 @@ use std::time::{Duration, Instant};
 const BOUND: Duration = Duration::from_secs(30);
 
 fn timed<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
-    // The deep-nesting cases sit near 100 source levels. The
-    // supported guarantee is a standard 8 MiB stack (week-2 note);
-    // the compile pipeline grew with the week-4 surfaces, so the
-    // gate runs on the guaranteed stack instead of the smaller
-    // default test-thread stack.
+    // Deep cases use almost 100 source levels. Run them on the
+    // supported 8 MiB stack instead of the default test stack.
     let start = Instant::now();
     let out = std::thread::Builder::new()
         .stack_size(8 << 20)
@@ -151,7 +148,7 @@ fn nested_pattern_analysis_stays_inside_its_budget() {
 }
 
 #[test]
-fn compile_twice_is_deterministic_for_week3_surfaces() {
+fn typed_examples_compile_deterministically() {
     for example in ["examples/03-types/expr.lm", "examples/03-types/generics.lm"] {
         let source = std::fs::read_to_string(lm_testkit::repo_root().join(example)).unwrap();
         let a = lm_bytecode::encode(&compile_module_text(example, &source).unwrap());

@@ -4374,7 +4374,7 @@ fn link_class_parents(
             if !class.generics.is_empty() {
                 return Err(Diagnostic::new(
                     "E1024",
-                    "a generic class cannot declare a parent in this slice",
+                    "a generic class cannot declare a parent",
                     *pspan,
                 ));
             }
@@ -4436,9 +4436,7 @@ fn link_class_parents(
             }
             if parent >= ctx.import_start {
                 // An imported class carries a signature and no body,
-                // so a subclass cannot reach its `init`. Inheritance
-                // across a module boundary needs a slot kind that
-                // week 6 does not define.
+                // so a subclass cannot reach its `init`.
                 return Err(Diagnostic::new(
                     "E1038",
                     format!(

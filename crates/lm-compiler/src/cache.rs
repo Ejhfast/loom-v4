@@ -1,27 +1,24 @@
 //! The content-addressed build directory.
 //!
-//! The directory holds two stages. Each stage keys on its own
-//! input:
+//! The directory holds two caches. Each cache keys on its own input:
 //!
-//! | Stage | Key | Value |
+//! | Cache | Key | Value |
 //! | --- | --- | --- |
-//! | 1 | the compile key of one module | the module artifact and interface |
-//! | 2 | the root `ArtifactId` | the LMAR artifact bytes |
+//! | Module | the compile key of one module | the module artifact and interface |
+//! | Artifact | the root `ArtifactId` | the LMAR artifact bytes |
 //!
-//! Stage 1 removes a compiler run. Stage 2 reuses artifact bytes.
+//! The module cache removes a compiler run. The artifact cache reuses
+//! encoded artifact bytes.
 //!
-//! Every stage is a trust boundary, because every entry is a file. An
-//! earlier claim here said no stage is one, on the ground that a
-//! damaged file is a miss. That covers damage and never covers
-//! forgery: a writer of the directory builds a well-formed entry under
-//! the correct key.
+//! Every cache is a trust boundary, because every entry is a file. An
+//! untrusted writer can create a valid entry under the correct key.
 //!
 //! Two rules hold the boundary:
 //!
-//! A stage-2 hit checks the stored root identity.
+//! An artifact-cache hit checks the stored root identity.
 //! A damaged entry causes a fresh encoding.
 //!
-//! # Stage 1
+//! # Module cache
 //!
 //! One entry holds the artifact and the interface of one compiled
 //! module, named by the compile key. The key covers everything the

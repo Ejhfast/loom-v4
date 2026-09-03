@@ -1,5 +1,4 @@
-//! Week-8 proc suite: mailboxes, handles, ownership, the scheduler,
-//! and the deterministic model rules.
+//! Proc mailboxes, handles, ownership, and deterministic scheduling.
 //!
 //! Every case runs the deterministic scheduler, so the interleaving
 //! and the result repeat exactly.
@@ -804,7 +803,7 @@ fn one_machine_runs_at_a_time() {
 // ---------------------------------------------------------------
 
 #[test]
-fn week8_examples_have_checked_output() {
+fn process_examples_have_checked_output() {
     let read =
         |path: &str| std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
     assert_eq!(
@@ -938,7 +937,7 @@ fn a_proc_reaches_a_peer_it_learned_from_a_message() {
 }
 
 // ---------------------------------------------------------------
-// The week-8 gates, stated directly.
+// Direct process behavior checks.
 // ---------------------------------------------------------------
 
 /// Message and result types never erase. The manifest schema of every

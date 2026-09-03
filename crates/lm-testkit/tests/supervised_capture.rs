@@ -85,8 +85,7 @@ supervise(c)
     assert!(captured, "the supervisor captured nothing");
 }
 
-/// Two procs surface at once, so the surface holds a queue. This is
-/// the case my new capture restriction refuses.
+/// Two procs surface at once, so the surface holds a queue.
 #[test]
 fn a_supervisor_captures_a_child_with_two_surfacing_procs() {
     let src = r#"

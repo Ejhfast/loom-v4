@@ -1,4 +1,4 @@
-//! Week-10 file handles and snapshot behavior.
+//! File handles and snapshot behavior.
 
 use lm_testkit::publish_artifact_bytes;
 use lm_testkit::{compile_to_bytes, repo_root};

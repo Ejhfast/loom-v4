@@ -957,8 +957,8 @@ pub fn run_world(world: &mut World) -> Outcome {
 
 /// Run one program on a worker thread with a bounded stack.
 ///
-/// This is the thread-backed baseline of specification 22.12. Guest
-/// execution leaves the host thread: the whole machine world is
+/// This is the thread-backed mode from specification 22.12. Guest
+/// execution leaves the host thread. The complete machine world is
 /// built, driven, and dropped inside one worker with an 8 MiB stack,
 /// and only the rendered outcome comes back. Nothing of the world
 /// crosses the boundary, so no guest reference ever leaves it.

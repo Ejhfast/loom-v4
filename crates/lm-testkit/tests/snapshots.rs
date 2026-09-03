@@ -1,8 +1,4 @@
-//! Week-9 snapshot suite: the machine world, the writer, restore, and
-//! branching execution (specification 17).
-//!
-//! The cases below state the week-9 gates of the build order. Each
-//! gate names the case that proves it in `docs/notes/week9.md`.
+//! Machine-world snapshots, restore, and branching execution.
 
 use lm_bytecode::artifact::Artifact;
 use lm_heap::Object;
@@ -110,7 +106,7 @@ fn restore_into(loaded: &TestProgram, image: &lm_vm::snapshot::SnapshotImage) ->
 // ---------------------------------------------------------------
 
 #[test]
-fn week9_examples_have_checked_output() {
+fn snapshot_examples_have_checked_output() {
     let read =
         |path: &str| std::fs::read_to_string(repo_root().join(path)).expect("the example reads");
     assert_eq!(
@@ -531,9 +527,8 @@ fn two_restores_share_nothing_with_each_other_or_the_original() {
 /// A machine that only a table-held mock closure names is not part of
 /// the world, and a restored table is default-deny.
 ///
-/// `docs/notes/week8.md` carries this case forward: the collection
-/// roots hold every `Action::Mock` closure, and specification 17.2
-/// excludes policy tables from a snapshot.
+/// Collection roots hold every `Action::Mock` closure.
+/// Specification 17.2 excludes policy tables from a snapshot.
 #[test]
 fn a_machine_reachable_only_through_a_mock_closure_is_not_in_the_world() {
     let source = "\

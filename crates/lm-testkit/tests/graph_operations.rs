@@ -1,10 +1,6 @@
-//! Week-7 graph suites.
+//! Graph transfer, freeze, digest, and boundary behavior.
 //!
-//! The transfer cases in this file are migration oracles. They ran
-//! against the transfer path that existed before the `lm-graph`
-//! engine, and they keep the same result after the migration. They
-//! cover cycles and shared subgraphs, which the week-4 transfer tests
-//! never reached.
+//! Transfer cases cover cycles and shared subgraphs.
 
 use lm_testkit::{run_allowed, run_text};
 use lm_vm::VmConfig;
@@ -336,11 +332,11 @@ a.digest() != b.digest() and a.digest() != c.digest()
 }
 
 // ---------------------------------------------------------------
-// The Week 7 runnable examples.
+// Runnable graph examples.
 // ---------------------------------------------------------------
 
 #[test]
-fn week7_examples_have_checked_output() {
+fn graph_examples_have_checked_output() {
     let read = |path: &str| {
         std::fs::read_to_string(lm_testkit::repo_root().join(path)).expect("example reads")
     };

@@ -11,7 +11,7 @@
 //! its own table, so the resolution needs nothing outside the bytes.
 //!
 //! The file `core/pinned-core-defs.txt` pins the structural hash of
-//! every core class. It is a determinism gate now, not a resolution
+//! every core class. It is a determinism gate, not a resolution
 //! mechanism: a core edit that moves a hash must be deliberate. The
 //! pin key is the pair `(qualified key, structural hash)`, because a
 //! structural hash covers no name and two arms with equal shapes share

@@ -236,8 +236,8 @@ fn prelude_controls_only_unqualified_names() {
 }
 
 /// The user module cannot see core-internal names that the prelude
-/// does not export; there are none today, so shadowing is the check:
-/// a user `Option` shadows the prelude name without an error.
+/// does not export. A user `Option` shadows the prelude name without
+/// an error.
 #[test]
 fn user_definitions_shadow_the_prelude() {
     let program = "enum Option\n  Empty\n  Full(v: Int)\nend\n\

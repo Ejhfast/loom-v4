@@ -1,5 +1,4 @@
-//! Week-6 import slots inside the artifact: identity, verification,
-//! and the loader rule.
+//! Artifact import-slot identity, verification, and loading.
 
 use lm_bytecode::identity::module_identity;
 use lm_bytecode::{BcType, Func, Import, ImportKind, Instr, Module};

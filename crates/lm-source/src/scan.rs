@@ -1,4 +1,4 @@
-//! Scanner for the week-2 language slice.
+//! Scanner for Loom source code.
 //!
 //! The scanner produces tokens with byte spans. It separates body expressions
 //! with a `Newline` token. It does not emit a `Newline` token inside
@@ -182,7 +182,7 @@ impl<'a> Scanner<'a> {
         if self.text[self.pos..].starts_with("\"\"\"") {
             return Err(self.error(
                 "E0010",
-                "triple-quoted strings are not supported in this language slice",
+                "Loom does not support triple-quoted strings",
                 start,
             ));
         }

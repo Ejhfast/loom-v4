@@ -4,8 +4,7 @@
 //! interface, one artifact, and explicit imports.
 //!
 //! The source-backed catalog compiles each selected module once per
-//! process. A later release bundle can replace the source builder
-//! with decoded artifacts without changing its callers.
+//! process. Its callers depend only on decoded artifacts.
 
 use crate::{compile_module, CompileEnv, CompiledModule};
 use lm_bytecode::artifact::{Artifact, LinkUnit};

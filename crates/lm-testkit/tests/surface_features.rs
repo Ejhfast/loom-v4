@@ -1,3 +1,5 @@
+//! Contextual modifiers, interpolation, characters, and constants.
+
 use lm_compiler::{compile_module, CompileEnv};
 use lm_source::SourceFile;
 use lm_testkit::{bind_compiled_unit, publish_artifact, run_text};

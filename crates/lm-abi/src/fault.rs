@@ -6,9 +6,8 @@
 //! heap, the graph engine, and the VM can all name them without a
 //! dependency on the VM.
 //!
-//! The code set is not part of `manifest_digest` today. The digest
-//! pins the operation ABI, and an artifact carries no fault table, so
-//! adding a code cannot invalidate an artifact.
+//! `manifest_digest` excludes the code set. The digest pins the
+//! operation ABI, and an artifact carries no fault table.
 
 use std::fmt;
 

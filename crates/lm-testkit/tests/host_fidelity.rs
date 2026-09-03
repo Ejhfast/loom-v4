@@ -3,8 +3,7 @@
 //!
 //! `CliHost` serves files and streams on worker threads, so a reply
 //! arrives at a later poll. A test host that answers inside `start`
-//! hides timing bugs: an example once passed here and failed under
-//! `lm run`, because a file is not open until the open completes.
+//! hides timing errors. A file becomes open only after completion.
 
 use lm_source::SourceFile;
 use lm_testkit::{compile_to_bytes, publish_artifact_bytes};

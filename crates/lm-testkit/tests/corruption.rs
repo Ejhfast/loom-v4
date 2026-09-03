@@ -1,6 +1,6 @@
 //! Corruption tests: hand-corrupted bytecode must be rejected before
 //! execution, by the decoder or by the independent verifier. The
-//! cases cover the week-2 table and instruction surfaces.
+//! cases cover tables, instructions, types, and process metadata.
 
 use lm_bytecode::{BcClassKind, BcRow, BcType, Instr};
 use lm_testkit::{compile_module_text, compile_to_bytes};
@@ -51,9 +51,9 @@ sb.append(\"#{d.speak()} #{f(1)} #{counts.len()}\")
 sb.build()
 ";
 
-/// A program that exercises the week-3 surfaces: generics, type
-/// applications, enums, case metadata, tuples, casts, and rows.
-const WEEK3_SOURCE: &str = "enum Shape
+/// A program that exercises generics, type applications, enums,
+/// case metadata, tuples, casts, and rows.
+const TYPED_SOURCE: &str = "enum Shape
   Circle(r: Int)
   Square(side: Int)
 
@@ -97,8 +97,8 @@ fn valid_bytes() -> Vec<u8> {
     lm_bytecode::encode(&compile_module_text("corrupt.lm", SOURCE).unwrap())
 }
 
-fn week3_bytes() -> Vec<u8> {
-    lm_bytecode::encode(&compile_module_text("corrupt.lm", WEEK3_SOURCE).unwrap())
+fn typed_bytes() -> Vec<u8> {
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", TYPED_SOURCE).unwrap())
 }
 
 fn object_bytes() -> Vec<u8> {
@@ -347,8 +347,8 @@ fn entry_with_captures_is_rejected() {
 }
 
 #[test]
-fn valid_week3_bytes_load_and_run() {
-    let bytes = compile_to_bytes("corrupt.lm", WEEK3_SOURCE).unwrap();
+fn valid_typed_bytes_load_and_run() {
+    let bytes = compile_to_bytes("corrupt.lm", TYPED_SOURCE).unwrap();
     let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
     let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
@@ -357,7 +357,7 @@ fn valid_week3_bytes_load_and_run() {
 
 #[test]
 fn app_arity_mismatch_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     assert!(!module.apps.is_empty(), "the sample has applications");
     module.apps[0].types.push(0);
     expect_verify_reject(&lm_bytecode::encode(&module), "arity");
@@ -365,7 +365,7 @@ fn app_arity_mismatch_is_rejected() {
 
 #[test]
 fn app_with_invalid_type_index_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let bad = module.types.len() as u32 + 9;
     module.apps[0].types[0] = bad;
     expect_verify_reject(&lm_bytecode::encode(&module), "type index");
@@ -373,7 +373,7 @@ fn app_with_invalid_type_index_is_rejected() {
 
 #[test]
 fn non_canonical_declared_row_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let target = module
         .funcs
         .iter()
@@ -385,7 +385,7 @@ fn non_canonical_declared_row_is_rejected() {
 
 #[test]
 fn row_variable_outside_the_arity_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let target = module
         .funcs
         .iter()
@@ -425,7 +425,7 @@ fn widened_callee_row_is_rejected() {
 
 #[test]
 fn case_class_with_normal_parent_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let parent = module
         .classes
         .iter()
@@ -444,7 +444,7 @@ fn case_class_with_normal_parent_is_rejected() {
 
 #[test]
 fn allocation_of_an_abstract_parent_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let parent = module
         .classes
         .iter()
@@ -468,7 +468,7 @@ fn allocation_of_an_abstract_parent_is_rejected() {
 
 #[test]
 fn tuple_get_out_of_range_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let mut patched = false;
     'outer: for func in &mut module.funcs {
         for block in &mut func.blocks {
@@ -487,7 +487,7 @@ fn tuple_get_out_of_range_is_rejected() {
 
 #[test]
 fn tuple_new_count_mismatch_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let mut patched = false;
     'outer: for func in &mut module.funcs {
         for block in &mut func.blocks {
@@ -506,7 +506,7 @@ fn tuple_new_count_mismatch_is_rejected() {
 
 #[test]
 fn cast_between_unrelated_classes_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     // Retarget the first IsType/CastType at the Box class, which is
     // unrelated to the Shape family.
     let boxc = module
@@ -539,7 +539,7 @@ fn cast_between_unrelated_classes_is_rejected() {
 
 #[test]
 fn class_arity_flip_is_rejected() {
-    let mut module = lm_bytecode::decode(&week3_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&typed_bytes()).unwrap();
     let boxc = module
         .classes
         .iter()
@@ -563,7 +563,7 @@ fn an_overflowing_interface_arity_is_rejected() {
 
 #[test]
 fn every_truncated_stream_is_rejected_by_the_decoder() {
-    for bytes in [valid_bytes(), object_bytes(), week3_bytes()] {
+    for bytes in [valid_bytes(), object_bytes(), typed_bytes()] {
         for len in 0..bytes.len() {
             assert!(
                 lm_bytecode::decode(&bytes[..len]).is_err(),
@@ -596,9 +596,8 @@ fn unknown_opcode_is_rejected_by_the_decoder() {
     assert!(rejects, "an unknown text extension must reject");
 }
 
-/// Source with a generic virtual call and an enum-arm cast, for the
-/// review-fix attacks on `CallVirtualG` and `CastType`.
-const REVIEW_SOURCE: &str = "
+/// Source with a generic virtual call and an enum-arm cast.
+const GENERIC_CAST_SOURCE: &str = "
 o: Option[Int] = Some(1)
 p: Option[String] = Some(\"x\")
 b = Box(2)
@@ -621,13 +620,13 @@ class Box[T]
 end
 ";
 
-fn review_bytes() -> Vec<u8> {
-    lm_bytecode::encode(&compile_module_text("corrupt.lm", REVIEW_SOURCE).unwrap())
+fn generic_cast_bytes() -> Vec<u8> {
+    lm_bytecode::encode(&compile_module_text("corrupt.lm", GENERIC_CAST_SOURCE).unwrap())
 }
 
 #[test]
-fn valid_review_bytes_load_and_run() {
-    let bytes = compile_to_bytes("corrupt.lm", REVIEW_SOURCE).unwrap();
+fn valid_generic_cast_bytes_load_and_run() {
+    let bytes = compile_to_bytes("corrupt.lm", GENERIC_CAST_SOURCE).unwrap();
     let (arena, namespace) = lm_testkit::publish_artifact_bytes(&bytes).unwrap();
     let mut vm = lm_vm::Vm::new(arena, namespace, lm_vm::VmConfig::default());
     let outcome = vm.run();
@@ -636,7 +635,7 @@ fn valid_review_bytes_load_and_run() {
 
 #[test]
 fn virtual_call_app_out_of_range_is_rejected_not_a_panic() {
-    let mut module = lm_bytecode::decode(&review_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&generic_cast_bytes()).unwrap();
     let mut hit = false;
     for func in &mut module.funcs {
         for block in &mut func.blocks {
@@ -654,7 +653,7 @@ fn virtual_call_app_out_of_range_is_rejected_not_a_panic() {
 
 #[test]
 fn cast_that_changes_generic_arguments_is_rejected() {
-    let mut module = lm_bytecode::decode(&review_bytes()).unwrap();
+    let mut module = lm_bytecode::decode(&generic_cast_bytes()).unwrap();
     // Find one type-test instruction and the instance entry it names.
     let mut target: Option<(usize, Vec<u32>)> = None;
     'search: for func in &module.funcs {
@@ -765,7 +764,7 @@ fn digest_comparison_on_other_types_is_rejected_by_the_verifier() {
 }
 
 // ---------------------------------------------------------------
-// Week-8 formats: the parent type arguments and the proc rules.
+// Parent type arguments and proc metadata.
 // ---------------------------------------------------------------
 
 /// The proc sample: a generic parent, a mailbox, and one spawn.

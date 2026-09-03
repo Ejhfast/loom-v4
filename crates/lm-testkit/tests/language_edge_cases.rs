@@ -1,21 +1,19 @@
-//! Regression tests for the post-week-4 fix set:
-//! declared local-type tables, labeled arguments, sibling inference,
-//! `mut` markers in function types, the constructor-collision note,
-//! and nested exact-arm exhaustiveness.
+//! Edge cases for local types, labeled arguments, sibling
+//! inference, function mutability, and exhaustiveness.
 
 use lm_testkit::{compile_module_text, run_allowed, run_text};
 use lm_vm::{RecordingHost, VmConfig, World};
 
 fn run(source: &str) -> String {
-    run_text("fixes.lm", source, VmConfig::default()).unwrap()
+    run_text("language-edge-cases.lm", source, VmConfig::default()).unwrap()
 }
 
 fn allowed(source: &str, allow: &[&str]) -> String {
-    run_allowed("fixes.lm", source, allow).unwrap()
+    run_allowed("language-edge-cases.lm", source, allow).unwrap()
 }
 
 fn expect_error(source: &str, needle: &str) {
-    let rendered = compile_module_text("fixes.lm", source).unwrap_err();
+    let rendered = compile_module_text("language-edge-cases.lm", source).unwrap_err();
     assert!(
         rendered.contains(needle),
         "expected `{needle}` in:\n{rendered}"
@@ -89,7 +87,7 @@ end
 ";
 
 // ---------------------------------------------------------------
-// Finding 1: the declared local type survives into verification.
+// Declared local types in verification.
 // ---------------------------------------------------------------
 
 #[test]
@@ -163,7 +161,7 @@ fn widened_local_reassigned_in_a_loop() {
 
 fn widened_module() -> lm_bytecode::Module {
     let source = format!("{ANIMALS}a: Animal = Dog()\nif a is Cat\n  1\nelse\n  2\nend\n");
-    compile_module_text("fixes.lm", &source).unwrap()
+    compile_module_text("language-edge-cases.lm", &source).unwrap()
 }
 
 fn expect_load_reject(module: &lm_bytecode::Module, needle: &str) {
@@ -217,7 +215,7 @@ fn out_of_range_local_type_entry_is_rejected() {
 #[test]
 fn local_type_table_shorter_than_parameters_is_rejected() {
     let source = "def double(n: Int): Int\n  if n == 0\n    0\n  else\n    double(n - 1) + 2\n  end\nend\ndouble(4)\n";
-    let mut with_params = compile_module_text("fixes.lm", source).unwrap();
+    let mut with_params = compile_module_text("language-edge-cases.lm", source).unwrap();
     let f = with_params
         .funcs
         .iter()
@@ -226,7 +224,7 @@ fn local_type_table_shorter_than_parameters_is_rejected() {
     with_params.funcs[f].local_types.clear();
     expect_load_reject(&with_params, "more parameters than local slots");
     // A wrong parameter prefix is also rejected.
-    let mut wrong_prefix = compile_module_text("fixes.lm", source).unwrap();
+    let mut wrong_prefix = compile_module_text("language-edge-cases.lm", source).unwrap();
     let f = wrong_prefix
         .funcs
         .iter()
@@ -237,7 +235,7 @@ fn local_type_table_shorter_than_parameters_is_rejected() {
 }
 
 // ---------------------------------------------------------------
-// Finding 2: labeled arguments.
+// Labeled arguments.
 // ---------------------------------------------------------------
 
 const GREET: &str = "def greet(name: String, count: Int): Int
@@ -418,7 +416,7 @@ fn labels_work_on_the_continuation_methods() {
 }
 
 // ---------------------------------------------------------------
-// Finding 3: sibling inference for arm-typed constructors.
+// Sibling inference for enum constructors.
 // ---------------------------------------------------------------
 
 #[test]
@@ -513,7 +511,7 @@ fn ambiguous_siblings_still_error() {
 }
 
 // ---------------------------------------------------------------
-// Finding 4: `mut` markers in function types.
+// `mut` markers in function types.
 // ---------------------------------------------------------------
 
 #[test]
@@ -574,7 +572,7 @@ fn forged_fn_type_mut_flag_is_rejected() {
     // encoded module. The stored closure type then differs from the
     // real one, so the verifier rejects the module.
     let source = "f = { |mut ys: [Int]|: () ys.push(1) }\nxs: [Int] = []\nf(xs)\nxs.len()\n";
-    let mut module = compile_module_text("fixes.lm", source).unwrap();
+    let mut module = compile_module_text("language-edge-cases.lm", source).unwrap();
     let mut hit = false;
     for ty in &mut module.types {
         if let lm_bytecode::BcType::Fn(_, muts, _, _) = ty {
@@ -591,7 +589,8 @@ fn forged_fn_type_mut_flag_is_rejected() {
 #[test]
 fn invalid_mut_flag_byte_is_rejected_by_the_decoder() {
     let source = "f = { |mut ys: [Int]|: () ys.push(1) }\n1\n";
-    let bytes = lm_bytecode::encode(&compile_module_text("fixes.lm", source).unwrap());
+    let bytes =
+        lm_bytecode::encode(&compile_module_text("language-edge-cases.lm", source).unwrap());
     // Flip every byte to 2 in turn; at least one position must be a
     // mut flag and fail with the flag error.
     let mut rejected = false;
@@ -610,7 +609,7 @@ fn invalid_mut_flag_byte_is_rejected_by_the_decoder() {
 }
 
 // ---------------------------------------------------------------
-// Finding 5: the constructor-collision note.
+// Constructor-collision diagnostics.
 // ---------------------------------------------------------------
 
 #[test]
@@ -646,13 +645,10 @@ end
 }
 
 // ---------------------------------------------------------------
-// Finding 6: nested exact-arm exhaustiveness.
+// Nested exact-arm exhaustiveness.
 //
-// This finding is reversed. A constructor now builds a value of the
-// enum and not of the arm it names, so no expression carries an arm
-// type and the recursive injection has nothing to narrow. A nested
-// case covers every arm or uses a wildcard, like every other case.
-// `docs/notes/week4-fixes.md` records the reversal.
+// A constructor builds a value of its enum type, not its arm type.
+// Each nested case covers every arm or uses a wildcard.
 // ---------------------------------------------------------------
 
 #[test]

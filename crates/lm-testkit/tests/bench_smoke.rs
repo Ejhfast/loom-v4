@@ -1,8 +1,7 @@
-//! Micro-benchmark smoke checks for the week-2 hot paths.
+//! Micro-benchmark smoke checks for runtime hot paths.
 //!
 //! These are not real benchmarks. They time a fixed workload on the
-//! production path, print the duration, and assert completion. Real
-//! benchmark infrastructure stays deferred; see docs/notes/week2.md.
+//! production path, print the duration, and assert completion.
 
 use lm_testkit::run_text;
 use lm_vm::VmConfig;
@@ -327,7 +326,7 @@ fn async_wait_smoke() {
 }
 
 // ---------------------------------------------------------------
-// Week-7 graph paths.
+// Graph paths.
 // ---------------------------------------------------------------
 
 #[test]
@@ -381,7 +380,7 @@ fn collection_after_the_graph_engine_smoke() {
 }
 
 // ---------------------------------------------------------------
-// Week-8 proc paths.
+// Proc paths.
 // ---------------------------------------------------------------
 
 /// The mailbox round trip: one send and one receive per message, plus
@@ -515,7 +514,7 @@ fn proc_terminal_publication_smoke() {
 }
 
 // ---------------------------------------------------------------
-// Week-9 snapshot entries, tracked by workload shape.
+// Snapshot entries, tracked by workload shape.
 //
 // Three shapes cover the cost model: one wide heap in one machine,
 // one deep chain in one machine, and one machine world of three

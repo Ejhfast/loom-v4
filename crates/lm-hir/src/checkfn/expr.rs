@@ -234,7 +234,7 @@ impl<'o> FnChecker<'o> {
                     };
                     return Err(Diagnostic::new(
                         "E1018",
-                        format!("the {what} `{name}` is not a value in this language slice"),
+                        format!("the {what} `{name}` is not a value"),
                         expr.span,
                     ));
                 }

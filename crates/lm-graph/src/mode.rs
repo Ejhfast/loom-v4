@@ -516,9 +516,8 @@ impl Visitor for SnapshotCheck {
 
 /// Assign canonical snapshot ordinals to the graph under `roots`.
 ///
-/// This is the traversal half of a snapshot only. Week 7 defines no
-/// snapshot byte format, so the mode produces the ordinal order and
-/// the rejection rule and nothing else.
+/// This function produces the ordinal order and rejects live host
+/// attachments. The snapshot codec writes the returned order.
 pub fn snapshot_ordinals(
     heap: &mut Heap,
     roots: &[ObjRef],

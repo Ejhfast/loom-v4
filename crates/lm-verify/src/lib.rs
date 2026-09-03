@@ -293,37 +293,8 @@ use tables::verify_tables;
 
 /// The verifier version. It takes part in the verified-code cache
 /// key: a rule change invalidates every cached admission.
-///
-/// Version 9 adds byte types, resource types, and their operations.
-/// Version 10 adds final class rules. Version 11 adds the `Int` role.
-/// Version 12 adds the `Bool` role. Version 13 adds the `String` role
-/// and String instructions. Version 14 adds Bytes and builder roles.
-/// Version 15 adds the sealed Text family and immediate Char rules.
-/// Version 16 adds the text extraction rules and structural enum
-/// equality. Version 16 also named native TLS resources and their
-/// service control on a separate branch, so version 17 is the first
-/// that accepts both.
-/// Version 19 verifies interfaces, callbacks, native `Option`, and collection operations.
-/// Version 20 verifies the declared receiver type of each digest.
-/// Version 21 separates persistent VMs from typed runs.
-/// Version 23 verifies late-bound slot contracts and instructions.
-/// Version 24 verifies reified code controls.
-/// Version 25 verifies runtime compiler input classes. Version 26
-/// verifies `ClassDef` and complete VM image controls. Version 27
-/// verifies fallible activation and stable slot discovery.
-/// Version 28 verifies versioned constructors in class slots.
-/// Version 29 verifies portable definition source lookup.
-/// Version 30 verifies fault source lookup instructions.
-/// Version 31 verifies native and interface-backed map paths.
-/// Version 32 verifies conditional conformance premises.
-/// Version 33 verifies ordered and unordered hash mixing.
-/// Version 34 verifies Float and bitwise instructions.
-/// Version 35 verifies text padding and Float text conversions.
-/// Version 36 verifies stream roles and child environment overlays.
-/// Version 37 permits capture contracts on imported closure bodies.
-/// Version 38 verifies ABI operation and group slots in effect rows.
-/// Version 39 verifies typed constant exports and constant pins.
-/// Version 40 verifies borrowed keys for map removal.
+/// The verifier covers every bytecode instruction, table contract,
+/// core role, effect row, and exported constant.
 pub const VERIFIER_VERSION: u32 = 40;
 
 /// Verify a full module. Every table and every function must pass.

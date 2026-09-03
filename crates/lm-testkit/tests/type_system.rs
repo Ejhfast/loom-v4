@@ -1,7 +1,7 @@
-//! Week-3 static rules: generics, tuples, enums, patterns, flow
-//! refinement, casts, and effect rows. Each rule has positive and
-//! negative coverage, plus depth-guard cases for the new recursive
-//! productions.
+//! Static rules for generics, tuples, enums, patterns, flow
+//! refinement, casts, and effect rows.
+//!
+//! Each rule has positive, negative, and depth-limit coverage.
 
 use lm_testkit::{compile_module_text, run_text};
 use lm_vm::VmConfig;
@@ -43,7 +43,7 @@ fn generic_arity_and_application_rules() {
         code_of("class Plain\n  x: Int = 0\nend\np: Plain[Int] = Plain()\np\n"),
         "E1024"
     );
-    // Generic classes stay outside inheritance in this slice.
+    // A generic class cannot use inheritance.
     assert_eq!(
         code_of("class Base\nend\nclass Sub[T] < Base\nend\n1\n"),
         "E1024"
@@ -216,8 +216,7 @@ fn pattern_rules() {
         code_of("case 1\nin true then 1\nin _ then 2\nend\n"),
         "E1041"
     );
-    // Week 4: class constructor patterns destructure the scrutinee
-    // class in declaration order.
+    // Class constructor patterns use declaration order.
     assert_eq!(
         runs("class C\n  x: Int = 7\nend\ncase C()\nin C(x) then x\nend\n"),
         "Done(7)"
@@ -383,10 +382,8 @@ fn row_rules() {
         code_of("def go() with Io\nend\ndef narrow() with Io.Write\n  go()\nend\n1\n"),
         "E1046"
     );
-    // Week 4: the entry collects its row instead of rejecting; the
-    // policy table decides at run time. An unmocked, unpassed
-    // operation faults `PolicyDenied` when performed; here nothing
-    // performs, so the program completes.
+    // The entry collects its row. The policy table decides at run time.
+    // This program declares an operation but does not perform it.
     assert_eq!(runs("def go() with Io.Write\nend\ngo()\n"), "Done(())");
     // Closures declare rows; calling charges the closure row into
     // the collected entry row.
@@ -635,8 +632,7 @@ fn tuple_equality_static_rules() {
 
 #[test]
 fn field_default_with_case_temporaries_runs() {
-    // Review regression: the shifted temporaries of a field default
-    // must move `next_scratch` past their new slots.
+    // Shifted field-default temporaries move `next_scratch` past their slots.
     assert_eq!(
         runs(
             "class C\n  a: Int = case 41 in x then x + 1 end\n  \

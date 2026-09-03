@@ -1,4 +1,4 @@
-//! The artifact build store.
+//! Artifact build-store behavior.
 //!
 //! The store keys an artifact on its exact module inputs.
 //! A rebuild with no source change reuses its bytes.
@@ -110,11 +110,11 @@ fn workspace(tree: &TempTree) {
     );
 }
 
-/// The stage-2 entry files of one build directory.
+/// The artifact-cache entries of one build directory.
 fn artifact_entries(tree: &TempTree) -> Vec<PathBuf> {
     let dir = tree.path("build/cache/artifacts");
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("no stage-2 directory `{}`: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("no artifact-cache directory `{}`: {e}", dir.display()))
         .map(|e| e.expect("entry").path())
         .collect();
     entries.sort();
@@ -125,17 +125,17 @@ fn artifact_entries(tree: &TempTree) -> Vec<PathBuf> {
 // The artifact cache.
 // ---------------------------------------------------------------
 
-/// A second build of one package reuses the stage-2 artifact bytes.
+/// A second build of one package reuses the artifact bytes.
 #[test]
 fn a_second_build_hits_the_artifact_cache() {
-    let tree = TempTree::new("stage2-hit");
+    let tree = TempTree::new("artifact-cache-hit");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
     assert!(
         !first.artifact_cached,
         "the first build reused artifact bytes"
     );
-    assert_eq!(artifact_entries(&tree).len(), 1, "one stage-2 entry");
+    assert_eq!(artifact_entries(&tree).len(), 1, "one artifact-cache entry");
     let second = tree.build("app").expect("builds");
     assert!(
         second.artifact_cached,
@@ -154,7 +154,7 @@ fn a_second_build_hits_the_artifact_cache() {
 /// A source edit moves the root artifact identity.
 #[test]
 fn a_source_edit_misses_the_artifact_cache() {
-    let tree = TempTree::new("stage2-edit");
+    let tree = TempTree::new("artifact-cache-edit");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
     tree.write(
@@ -170,7 +170,7 @@ fn a_source_edit_misses_the_artifact_cache() {
         "the edit did not change the artifact"
     );
     assert_eq!(artifact_entries(&tree).len(), 2, "the edit kept one entry");
-    // The former artifact identity still names the former bytes.
+    // The first artifact identity still names the first byte string.
     tree.write(
         "mathlib/src/matrix.lm",
         &std::fs::read_to_string(tree.path("mathlib/src/matrix.lm"))
@@ -185,7 +185,7 @@ fn a_source_edit_misses_the_artifact_cache() {
 /// A damaged artifact entry causes a fresh encoding.
 #[test]
 fn a_damaged_artifact_entry_is_a_miss() {
-    let tree = TempTree::new("stage2-damaged");
+    let tree = TempTree::new("artifact-cache-damaged");
     workspace(&tree);
     let first = tree.build("app").expect("builds");
     let good = std::fs::read(first.artifact.clone().unwrap()).unwrap();
@@ -218,11 +218,10 @@ fn a_damaged_artifact_entry_is_a_miss() {
     assert!(last.artifact_cached, "the rewritten entry missed");
 }
 
-/// Determinism: the artifact bytes are the same with a stage-2 hit and
-/// with a stage-2 miss, and the same in a second build directory.
+/// Artifact bytes stay equal across cache hits, misses, and build directories.
 #[test]
 fn artifact_bytes_are_stable_with_and_without_a_hit() {
-    let tree = TempTree::new("stage2-deterministic");
+    let tree = TempTree::new("artifact-cache-deterministic");
     workspace(&tree);
     let cold = build_package(&tree.path("app"), &tree.path("build")).expect("builds");
     let hot = build_package(&tree.path("app"), &tree.path("build")).expect("builds");

@@ -897,10 +897,8 @@ impl World {
                 // one-heap path runs the same copy, so a same-heap
                 // install carries the same rule.
                 //
-                // No machine can reach the same-heap branch today: a
-                // table handle comes from a machine handle, and no
-                // operation mints a handle to the performing machine.
-                // `docs/notes/week7.md` records it.
+                // No machine can reach the same-heap branch. A table
+                // handle comes from another machine handle.
                 debug_assert_ne!(target, vm, "a machine cannot hold a table handle to itself");
                 match self.boundary_copy(vm, target, closure) {
                     Ok(value) => match value.as_obj() {

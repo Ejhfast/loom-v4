@@ -682,9 +682,8 @@ fn sample_tier_event(counter: &mut u8) -> bool {
 /// These fields contain the compact machine state from specification 16.4.
 /// `Machine` stores the cold callback arena separately.
 ///
-/// The interpreter still runs as a method of `Machine`, because
-/// allocation needs the policy roots as well. `docs/notes/week7.md`
-/// records that difference from the specification `execute` entry.
+/// The interpreter runs as a method of `Machine` because allocation
+/// also needs the policy roots.
 pub struct VmState {
     pub heap: Heap,
     pub frames: Vec<Frame>,

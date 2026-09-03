@@ -961,8 +961,7 @@ go()
 /// the static type of the call site. A frame inside an overriding
 /// method therefore names a function the static type does not resolve.
 ///
-/// The capture is legal, so it must admit. Before the fix every
-/// snapshot taken inside an override was unrestorable.
+/// A capture inside an overriding method admits and restores.
 #[test]
 fn a_frame_inside_an_overridden_method_admits() {
     let loaded = program(OVERRIDE_SOURCE);
@@ -1569,8 +1568,7 @@ go()
 /// frames it stopped in. Those frames are diagnostic state: the machine
 /// never executes again.
 ///
-/// The capture is legal, so it must admit. Before the fix every world
-/// that held a faulted machine was unrestorable.
+/// A world with a faulted machine admits and restores.
 #[test]
 fn a_faulted_machine_that_holds_frames_admits() {
     let loaded = program(FAULTED_SOURCE);
@@ -1638,9 +1636,7 @@ go()
 /// attachment opens, and the holder answers it. The live attachment
 /// belongs to `Waiting`, and the capture refuses that state.
 ///
-/// The capture is legal, so it must admit. Before the fix a machine
-/// stopped on `Io.Write`, `Io.WriteError`, `Io.ReadBytes`, or `Clock.Sleep`
-/// was unrestorable.
+/// An asked machine on a host operation admits and restores.
 #[test]
 fn an_asked_machine_on_a_host_operation_admits() {
     let loaded = program(ASKED_SOURCE);
@@ -1986,9 +1982,7 @@ fn an_instance_of_an_abstract_class_rejects() {
 // The admission identity.
 // ---------------------------------------------------------------
 
-/// An old container names an older format or ABI version, and
-/// admission rejects it. Version 1 spelled an uninitialized local as a
-/// unit value, so its images have another meaning.
+/// Admission rejects a container with another format or ABI version.
 #[test]
 fn a_container_of_an_older_build_rejects() {
     let loaded = program(INIT_SOURCE);
@@ -2007,8 +2001,7 @@ fn a_container_of_an_older_build_rejects() {
         assert_eq!(error.reason, ImageReason::Version, "field {edit}");
         assert_eq!(error.stage, lm_vm::snapshot::ImageStage::Admission);
     }
-    // The same rule holds at the container stage: an old byte string
-    // never reaches admission.
+    // A container with another version never reaches admission.
     let bytes = codec::encode(&images[0], usize::MAX).expect("the image encodes");
     let mut old = bytes.clone();
     old[8..12].copy_from_slice(&1u32.to_le_bytes());
@@ -2167,13 +2160,13 @@ fn a_nonzero_image_reference_generation_rejects() {
     assert_eq!(error.reason, ImageReason::Reference);
 }
 // ---------------------------------------------------------------
-// The gate: every capture of every shipped program admits.
+// Every capture of every shipped program admits.
 // ---------------------------------------------------------------
 
-/// The grants the gate gives the root of every program.
+/// The grants given to the root of every program.
 ///
 /// A grant widens what one program reaches, so one list serves the
-/// whole corpus and a new program needs no entry here.
+/// whole corpus.
 const GATE_GRANTS: [&str; 11] = [
     "Vm", "Io", "Fs", "Proc", "Clock", "Rand", "Compiler", "Reflect", "Env", "Args", "Entropy",
 ];

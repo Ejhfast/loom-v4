@@ -25,46 +25,8 @@ pub use hash::{hash256, hash256_hex};
 
 /// The manifest ABI version. A signature or membership change must
 /// increment this value.
-///
-/// Version 2 adds the eight proc operations of specification 23.6.
-/// Version 3 adds the four snapshot operations of specification 23.5.
-/// Version 4 hashes every field of one operation definition into its
-/// identity. Version 5 adds immutable bytes, file handles, and the
-/// first six filesystem operations. Version 6 adds holder resource
-/// controls and fuel-bounded snapshot waiting. Version 7 adds typed
-/// waits and selectable drive and receive sources. Version 8 adds
-/// transparent effect sets and the DNS and TCP operations. Version 9
-/// adds the TLS client resource and its effect sets. Version 11 adds
-/// verified code installation and activation controls. Version 12
-/// adds the explicit runtime compiler operation. Version 13 adds
-/// public syntax parsing and syntax compilation. Version 14 adds the
-/// dynamic result value. Version 15 completes code slot and VM image
-/// controls. Version 16 adds stable slot discovery and fallible
-/// activation. It also moves verification into the Compiler group.
-/// Version 17 adds installed function and class binding controls.
-/// Version 18 adds guest snapshot encoding.
-/// Version 19 adds immutable ABI bundles and extension resources.
-/// Version 20 adds command input, output, environment, process, and
-/// entropy operations. Version 21 adds `Args.Get` and moves the
-/// current directory operation into `Fs`.
-/// Version 22 uses BLAKE3-256 for manifest identities.
-/// Version 23 adds Float to the primitive manifest types.
-/// Version 24 adds Float parsing and formatting intrinsics.
-/// Version 25 adds selectable host-operation sources.
-/// Version 26 adds terminal and signal operations.
-/// Version 27 completes the file-system operation group.
-/// Version 28 removes text console operations.
-/// Version 29 adds anonymous pipes and operating-system children.
-/// Version 30 adds the TLS server handshake operation.
-/// Version 31 adds UDP datagram operations.
-/// Version 32 adds exact fault re-raising.
-/// Version 33 adds direct closure proc launch.
-/// Version 34 adds in-memory run branching.
-/// Version 35 adds homogeneous dynamic wait selection.
-/// Version 36 adds answered in-memory run branches.
-/// Version 37 adds dynamic run restoration and run stack inspection.
-/// Version 38 adds direct byte-range text construction.
-/// Version 39 adds allocate-on-miss byte-range text interning.
+/// The version covers operation definitions, groups, resources,
+/// signatures, identities, and slot order.
 pub const ABI_VERSION: u32 = 39;
 
 /// A dense group slot: the index in `GROUPS`.
@@ -678,29 +640,7 @@ impl AbiType {
 }
 
 /// The intrinsic ABI version.
-///
-/// Version 4 adds immutable Bytes operations and nominal builders.
-/// Version 5 adds scalar text, shared views, byte search, and finish moves.
-/// Version 6 adds bounded scans of active byte buffers.
-/// Version 7 adds generic native collection operations.
-/// Version 8 completes the mutable collection leaf operations.
-/// Version 9 adds the list reorder marker.
-/// Version 10 gives collection epoch exhaustion its own fault.
-/// Version 11 adds immutable public syntax traversal.
-/// Version 12 adds dynamic result rendering.
-/// Version 13 adds immutable public syntax construction.
-/// Version 14 adds deliberate guest failure.
-/// Version 15 adds direct integer and Boolean builder appends.
-/// Version 16 adds stable text and byte hashes.
-/// Version 17 adds ordered and unordered hash mixing.
-/// Version 18 adds tombstone-aware map traversal.
-/// Version 19 uses BLAKE3-256 for intrinsic identities.
-/// Version 20 adds Float and bitwise numeric operations.
-/// Version 21 adds text padding and Float text conversions.
-/// Version 22 adds exact fault re-raising.
-/// Version 23 makes text-to-string conversion accept all Text values.
-/// Version 24 adds direct byte-range text construction.
-/// Version 25 adds allocate-on-miss byte-range text interning.
+/// It covers intrinsic names, signatures, identities, and semantics.
 pub const INTRINSIC_ABI_VERSION: u32 = 25;
 
 /// A dense intrinsic slot.
@@ -2178,8 +2118,7 @@ impl OpDef {
     }
 }
 
-/// Dense slots for the week-4 operations. The constants match the
-/// index in `OPS`.
+/// Dense operation slots. Each constant matches its index in `OPS`.
 pub const OP_IO_READ_BYTES: OpSlot = 0;
 pub const OP_IO_WRITE: OpSlot = 1;
 pub const OP_IO_WRITE_ERROR: OpSlot = 2;
@@ -3970,11 +3909,6 @@ fn id_field(out: &mut Vec<u8>, bytes: &[u8]) {
 /// The hash covers every field of `OpDef`, through one common encoder.
 /// The encoder lists the fields of the structure, not the fields one
 /// variant happens to use, so a later variant cannot omit a field.
-///
-/// An earlier encoder read `params` and `reply` for a `Fixed` entry and
-/// `schema` for a `VmControl` entry. `Vm.SnapshotSelf` is `VmControl`
-/// with a reply the verifier reads, so that reply could change and move
-/// no digest.
 ///
 /// The snapshot classification is one field of the same list. It
 /// decides whether a pending instance holds live host state, so it

@@ -1,5 +1,4 @@
-//! Week-4 suites: operations and rows, policy tables, and the three
-//! VM driving modes.
+//! Operations, effect rows, policy tables, and VM driving modes.
 
 use lm_proc::{Scheduler, SchedulerMode};
 use lm_testkit::{compile_module_text, compile_to_bytes, run_allowed, run_text, run_world};
@@ -24,11 +23,11 @@ fn allowed(source: &str, allow: &[&str]) -> String {
 
 #[test]
 fn rows_validate_against_the_manifest() {
-    // A fabricated operation name is a diagnostic now.
+    // A fabricated operation name produces a diagnostic.
     assert_eq!(code_of("def f() with Io.Blast\nend\n1\n"), "E1050");
     assert_eq!(code_of("def f() with Web\nend\n1\n"), "E1050");
     assert_eq!(code_of("def f() with Zzz.Op\nend\n1\n"), "E1050");
-    // Manifest groups without week-4 operations stay valid row names.
+    // Manifest groups without direct operations stay valid row names.
     assert_eq!(runs("def f() with Fs, Net\nend\nf()\n"), "Done(())");
     // Rows inside function types validate too.
     assert_eq!(
@@ -486,8 +485,8 @@ fn reject_installs_the_supplied_fault() {
 
 /// A driver denies one request without a second machine.
 ///
-/// `Clock.Now` replies `Int`, so no error arm exists. Before
-/// `Fault.denied`, the driver had to invent a time.
+/// `Clock.Now` replies `Int`, so no error arm exists. The driver uses
+/// `Fault.denied` as the rejection value.
 const DENY_CLOCK: &str = "def child(): Int with Clock.Now\n  sys.clock.now()\nend\n\
     def go(): String with Vm\n  \
     vm = sys.vm.Vm().activate_or_fault(child, args: ())\n  \
@@ -1192,7 +1191,7 @@ fn rand_int_is_deterministic_and_validated() {
 }
 
 #[test]
-fn week4_examples_have_checked_output() {
+fn vm_examples_have_checked_output() {
     let read = |path: &str| {
         std::fs::read_to_string(lm_testkit::repo_root().join(path)).expect("example reads")
     };
@@ -1252,7 +1251,7 @@ fn week4_examples_have_checked_output() {
 }
 
 #[test]
-fn week4_examples_compile_twice_to_identical_bytes() {
+fn vm_examples_compile_twice_to_identical_bytes() {
     for example in [
         "examples/04-effects/hello.lm",
         "examples/04-effects/blocked.lm",

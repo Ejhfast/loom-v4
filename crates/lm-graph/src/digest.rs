@@ -101,8 +101,7 @@ pub trait CodeIdentity {
 /// Specification 10.3 names BLAKE3-256, and this function calls the
 /// vendored official `blake3` crate. Bytecode identities use the same
 /// algorithm through `lm-bytecode`. The `DOMAIN` prefix above gives
-/// the domain separation that specification 17.9 asks for.
-/// `docs/notes/week7.md` records the decision.
+/// the domain separation that specification 17.9 requires.
 pub fn hash(bytes: &[u8]) -> [u8; 32] {
     lm_abi::hash256(bytes)
 }

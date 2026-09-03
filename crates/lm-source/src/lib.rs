@@ -1,7 +1,7 @@
 //! Source handling for the Loom bootstrap compiler.
 //!
-//! This crate reads UTF-8 source, produces tokens with spans,
-//! parses the week-1 language slice, and renders diagnostics.
+//! This crate reads UTF-8 source, produces tokens with spans, parses
+//! the language, and renders diagnostics.
 
 pub mod ast;
 pub mod diag;

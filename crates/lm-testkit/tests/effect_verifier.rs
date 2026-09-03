@@ -1,6 +1,5 @@
-//! Verifier coverage for the week-4 surfaces: perform row
-//! reconstruction, operation slots, first-class operation types,
-//! table edits, and the `Unreachable` terminator.
+//! Verifier coverage for perform rows, operation slots, operation
+//! types, table edits, and the `Unreachable` terminator.
 
 use lm_bytecode::{BcRow, BcType, ExtendedInstr, Instr, Module, SlotContract, SlotTarget};
 use lm_testkit::compile_module_text;

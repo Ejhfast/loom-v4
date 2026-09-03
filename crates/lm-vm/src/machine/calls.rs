@@ -11,9 +11,8 @@ impl Machine {
 
     /// Push the frame of one generic call.
     ///
-    /// The three generic instructions live outside `exec_instr`, so
-    /// the hot instruction body stays the size it had before the
-    /// witness landed. A monomorphic program never reaches them.
+    /// The three generic instructions use a separate path. This keeps
+    /// monomorphic dispatch small. A monomorphic program never reaches them.
     #[inline(never)]
     pub(super) fn call_generic(
         &mut self,

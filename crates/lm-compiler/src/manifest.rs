@@ -21,9 +21,8 @@
 //! table, no multi-line value, no escape sequence, and no number or
 //! boolean literal.
 //!
-//! Version 0.2 supports path dependencies only. The dependency key is
-//! the local name of that package inside this one, so a name clash is
-//! fixed by renaming the key.
+//! The manifest supports path dependencies only. The dependency key
+//! is the local package name. Rename the key to resolve a name clash.
 
 use std::collections::BTreeMap;
 

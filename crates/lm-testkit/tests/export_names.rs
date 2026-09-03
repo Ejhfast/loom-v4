@@ -1,4 +1,4 @@
-//! Names, qualified keys, and the verifier.
+//! Export names, qualified keys, and verifier identity.
 
 use lm_bytecode::identity::{module_identity, verification_hash};
 fn core_module() -> lm_bytecode::Module {

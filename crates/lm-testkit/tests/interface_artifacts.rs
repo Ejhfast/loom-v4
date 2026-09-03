@@ -1,5 +1,4 @@
-//! The interface artifact: the structural signatures, the two
-//! hashes, the readable dump, and the corruption gates.
+//! Interface signatures, hashes, readable output, and corruption checks.
 
 use lm_bytecode::interface::{
     decode_interface, dump_interface, encode_interface, ExportKind, IfaceItem, IfaceType, Interface,

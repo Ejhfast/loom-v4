@@ -133,7 +133,7 @@ fn run_generics_example_prints_the_tuple() {
 }
 
 #[test]
-fn disasm_covers_week3_surfaces() {
+fn disasm_covers_typed_surfaces() {
     let out = lm(&["disasm", "examples/03-types/generics.lm"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
@@ -579,7 +579,7 @@ fn a_package_command_receives_its_arguments() {
 }
 
 // ---------------------------------------------------------------
-// Week 9: the snapshot tools.
+// Snapshot tools.
 // ---------------------------------------------------------------
 
 #[test]
