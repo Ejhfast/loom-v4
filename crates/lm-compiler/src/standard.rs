@@ -106,52 +106,28 @@ impl StandardCatalog {
 
     /// Select a module and its dependencies in link order.
     pub fn select(self, paths: &[&str]) -> Result<Vec<&'static CompiledModule>, String> {
-        let mut needs_io = false;
-        let mut needs_fs = false;
-        let mut needs_term = false;
-        let mut needs_tls = false;
-        let mut needs_http = false;
-        let mut needs_base64 = false;
-        let mut needs_json = false;
-        let mut needs_time = false;
-        let mut needs_random = false;
-        let mut needs_path = false;
-        let mut needs_url = false;
+        let mut needs = StandardNeeds::default();
         for path in paths {
             match *path {
-                IO_PATH => needs_io = true,
-                FS_PATH => {
-                    needs_fs = true;
-                    needs_path = true;
-                }
-                TERM_PATH => needs_term = true,
-                TLS_PATH => needs_tls = true,
+                IO_PATH => needs.io = true,
+                FS_PATH => needs.fs = true,
+                TERM_PATH => needs.term = true,
+                TLS_PATH => needs.tls = true,
                 HTTP_PATH => {
-                    needs_tls = true;
-                    needs_http = true;
+                    needs.tls = true;
+                    needs.http = true;
+                    needs.url = true;
                 }
-                BASE64_PATH => needs_base64 = true,
-                JSON_PATH => needs_json = true,
-                TIME_PATH => needs_time = true,
-                RANDOM_PATH => needs_random = true,
-                PATH_PATH => needs_path = true,
-                URL_PATH => needs_url = true,
+                BASE64_PATH => needs.base64 = true,
+                JSON_PATH => needs.json = true,
+                TIME_PATH => needs.time = true,
+                RANDOM_PATH => needs.random = true,
+                PATH_PATH => needs.path = true,
+                URL_PATH => needs.url = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
-        Ok(selected_modules(
-            needs_io,
-            needs_fs,
-            needs_term,
-            needs_tls,
-            needs_http,
-            needs_base64,
-            needs_json,
-            needs_time,
-            needs_random,
-            needs_path,
-            needs_url,
-        ))
+        Ok(selected_modules(needs))
     }
 
     /// Bind selected standard units into one compile environment.
@@ -209,7 +185,7 @@ fn io() -> &'static CompiledModule {
 }
 
 fn fs() -> &'static CompiledModule {
-    FS.get_or_init(|| compile_bundled(FS_PATH, "std/fs.lm", FS_SOURCE, &[path_module()]))
+    FS.get_or_init(|| compile_bundled(FS_PATH, "std/fs.lm", FS_SOURCE, &[]))
 }
 
 fn term() -> &'static CompiledModule {
@@ -217,7 +193,14 @@ fn term() -> &'static CompiledModule {
 }
 
 fn http() -> &'static CompiledModule {
-    HTTP.get_or_init(|| compile_bundled(HTTP_PATH, "std/http.lm", HTTP_SOURCE, &[tls()]))
+    HTTP.get_or_init(|| {
+        compile_bundled(
+            HTTP_PATH,
+            "std/http.lm",
+            HTTP_SOURCE,
+            &[tls(), url_module()],
+        )
+    })
 }
 
 fn base64() -> &'static CompiledModule {
@@ -263,104 +246,83 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
 }
 
-fn selected_modules(
-    needs_io: bool,
-    needs_fs: bool,
-    needs_term: bool,
-    needs_tls: bool,
-    needs_http: bool,
-    needs_base64: bool,
-    needs_json: bool,
-    needs_time: bool,
-    needs_random: bool,
-    needs_path: bool,
-    needs_url: bool,
-) -> Vec<&'static CompiledModule> {
+#[derive(Default)]
+struct StandardNeeds {
+    io: bool,
+    fs: bool,
+    term: bool,
+    tls: bool,
+    http: bool,
+    base64: bool,
+    json: bool,
+    time: bool,
+    random: bool,
+    path: bool,
+    url: bool,
+}
+
+fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
-    if needs_path {
+    if needs.path {
         modules.push(path_module());
     }
-    if needs_io {
+    if needs.io {
         modules.push(io());
     }
-    if needs_fs {
+    if needs.fs {
         modules.push(fs());
     }
-    if needs_term {
+    if needs.term {
         modules.push(term());
     }
-    if needs_tls {
+    if needs.tls {
         modules.push(tls());
     }
-    if needs_http {
+    if needs.url {
+        modules.push(url_module());
+    }
+    if needs.http {
         modules.push(http());
     }
-    if needs_base64 {
+    if needs.base64 {
         modules.push(base64());
     }
-    if needs_json {
+    if needs.json {
         modules.push(json());
     }
-    if needs_time {
+    if needs.time {
         modules.push(time());
     }
-    if needs_random {
+    if needs.random {
         modules.push(random());
-    }
-    if needs_url {
-        modules.push(url_module());
     }
     modules
 }
 
 /// Select the standard-module closure named by source `use` paths.
 pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledModule> {
-    let mut needs_io = false;
-    let mut needs_fs = false;
-    let mut needs_term = false;
-    let mut needs_tls = false;
-    let mut needs_http = false;
-    let mut needs_base64 = false;
-    let mut needs_json = false;
-    let mut needs_time = false;
-    let mut needs_random = false;
-    let mut needs_path = false;
-    let mut needs_url = false;
+    let mut needs = StandardNeeds::default();
     for path in uses {
         match module_for_use(path) {
-            Some(IO_PATH) => needs_io = true,
-            Some(FS_PATH) => {
-                needs_fs = true;
-                needs_path = true;
-            }
-            Some(TERM_PATH) => needs_term = true,
-            Some(TLS_PATH) => needs_tls = true,
+            Some(IO_PATH) => needs.io = true,
+            Some(FS_PATH) => needs.fs = true,
+            Some(TERM_PATH) => needs.term = true,
+            Some(TLS_PATH) => needs.tls = true,
             Some(HTTP_PATH) => {
-                needs_tls = true;
-                needs_http = true;
+                needs.tls = true;
+                needs.http = true;
+                needs.url = true;
             }
-            Some(BASE64_PATH) => needs_base64 = true,
-            Some(JSON_PATH) => needs_json = true,
-            Some(TIME_PATH) => needs_time = true,
-            Some(RANDOM_PATH) => needs_random = true,
-            Some(PATH_PATH) => needs_path = true,
-            Some(URL_PATH) => needs_url = true,
+            Some(BASE64_PATH) => needs.base64 = true,
+            Some(JSON_PATH) => needs.json = true,
+            Some(TIME_PATH) => needs.time = true,
+            Some(RANDOM_PATH) => needs.random = true,
+            Some(PATH_PATH) => needs.path = true,
+            Some(URL_PATH) => needs.url = true,
             _ => {}
         }
     }
-    selected_modules(
-        needs_io,
-        needs_fs,
-        needs_term,
-        needs_tls,
-        needs_http,
-        needs_base64,
-        needs_json,
-        needs_time,
-        needs_random,
-        needs_path,
-        needs_url,
-    )
+    selected_modules(needs)
 }
 
 /// Compile one source module and link its requested standard modules.
@@ -439,7 +401,7 @@ mod tests {
         assert!(modules_for_uses(&[]).is_empty());
         let selected = catalog.select(&[HTTP_PATH]).expect("the module exists");
         let paths: Vec<&str> = selected.iter().map(|module| module.path.as_str()).collect();
-        assert_eq!(paths, &[TLS_PATH, HTTP_PATH]);
+        assert_eq!(paths, &[TLS_PATH, URL_PATH, HTTP_PATH]);
         assert!(catalog.select(&["std.missing"]).is_err());
     }
 
@@ -473,8 +435,10 @@ mod tests {
 
     #[test]
     fn file_source_selects_only_file_helpers() {
-        let compiled = compile("use std.fs.read_dir_sorted\nread_dir_sorted(\".\", 4)\n");
-        assert_eq!(compiled.standard_modules, &[PATH_PATH, FS_PATH]);
+        let compiled = compile(
+            "use std.fs.read_dir_sorted\nread_dir_sorted(Path(\".\", PathStyle.Posix), 4)\n",
+        );
+        assert_eq!(compiled.standard_modules, &[FS_PATH]);
     }
 
     #[test]
@@ -486,7 +450,7 @@ mod tests {
     #[test]
     fn http_source_selects_its_dependency_closure() {
         let compiled = compile("use std.http.Http\nHttp().default_limits().max_headers\n");
-        assert_eq!(compiled.standard_modules, &[TLS_PATH, HTTP_PATH]);
+        assert_eq!(compiled.standard_modules, &[TLS_PATH, URL_PATH, HTTP_PATH]);
     }
 
     #[test]
@@ -515,9 +479,7 @@ mod tests {
 
     #[test]
     fn path_source_selects_only_path() {
-        let compiled = compile(
-            "use std.path.PathStyle\nuse std.path.normalize\nnormalize(\"a\", PathStyle.Posix)\n",
-        );
+        let compiled = compile("use std.path.normalize\nnormalize(Path(\"a\", PathStyle.Posix))\n");
         assert_eq!(compiled.standard_modules, &[PATH_PATH]);
     }
 

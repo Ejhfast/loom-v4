@@ -295,7 +295,7 @@ fn a_dynamic_run_keeps_its_result_view_across_a_snapshot() {
     // restore delivers the result as a `DynValue`, because the flag
     // rides in the image.
     let source = "def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close\n\
-      file = sys.fs.open(\"program.lms\", ReadOnly).map_error() {\n\
+      file = sys.fs.open(Path(\"program.lms\", PathStyle.Posix), ReadOnly).map_error() {\n\
         |problem: FsError| display(problem)\n\
       }?\n\
       bytes = file.read(1048576).map_error() {\n\
@@ -391,7 +391,7 @@ fn a_debugger_that_holds_a_foreign_result_snapshots_and_restores() {
     let debuggee = "class Box\n  value: Int = 41\nend\n\
       def calculate(): Box with Clock.Now\n  sys.clock.now()\n  Box()\nend\ncalculate()\n";
     let debugger = "def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close\n\
-      file = sys.fs.open(\"program.lms\", ReadOnly).map_error() {\n\
+      file = sys.fs.open(Path(\"program.lms\", PathStyle.Posix), ReadOnly).map_error() {\n\
         |problem: FsError| display(problem)\n\
       }?\n\
       bytes = file.read(1048576).map_error() {\n\

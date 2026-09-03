@@ -888,7 +888,7 @@ class Worker < Proc[Int]
 end
 
 def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("fuzz-slots.lmbc", ReadOnly)
+  case sys.fs.open(Path("fuzz-slots.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(bytes) then bytes

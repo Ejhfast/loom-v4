@@ -1926,7 +1926,7 @@ fn loom_verifies_installs_and_activates_an_artifact() {
     let artifact = compile_to_bytes("installed.lm", "42\n").expect("the artifact compiles");
     let source = r#"
 def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("installed.lmbc", ReadOnly)
+  case sys.fs.open(Path("installed.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(bytes) then bytes
@@ -1994,7 +1994,7 @@ fn a_replaced_function_fault_uses_the_new_source_revision() {
     let second = revision_artifact("10 / (value - 1)");
     let source = r#"
 def read_module(path: String): Result[VerifiedModule, String] with Fs.Open, Fs.Read, Fs.Close, Vm.Artifact, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2266,7 +2266,7 @@ fn a_slot_replacement_changes_later_calls_only() {
     let second = revision_artifact("value + 10");
     let source = r#"
 def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2361,7 +2361,7 @@ fn a_class_replacement_changes_future_construction() {
     let second = class_revision_artifact(50, 2);
     let source = r#"
 def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2466,7 +2466,7 @@ fn a_class_replacement_changes_future_proc_construction() {
     let second = proc_class_revision_artifact(50, 2);
     let source = r#"
 def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2560,7 +2560,7 @@ fn an_image_proc_uses_initial_and_replaced_slot_targets() {
     let second = proc_revision_artifact("value + 100");
     let source = r#"
 def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2704,7 +2704,7 @@ class Collector < Proc[Int]
 end
 
 def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open(path, ReadOnly)
+  bytes = case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2911,7 +2911,7 @@ fn cross_vm_definition_activation_returns_a_code_error() {
     let artifact = compile_to_bytes("cross-vm.lm", "42\n").expect("the artifact compiles");
     let source = r#"
 def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open("cross-vm.lmbc", ReadOnly)
+  bytes = case sys.fs.open(Path("cross-vm.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -2987,7 +2987,7 @@ class Worker < Proc[Int]
 end
 
 def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  bytes = case sys.fs.open(Path("slot-kinds.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -3114,7 +3114,7 @@ fn a_value_change_commits_and_a_stale_change_publishes_nothing() {
     let artifact = complete_slot_artifact();
     let source = r#"
 def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  bytes = case sys.fs.open(Path("slot-kinds.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -3216,7 +3216,7 @@ class Worker < Proc[Int]
 end
 
 def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open("slot-kinds.lmbc", ReadOnly)
+  bytes = case sys.fs.open(Path("slot-kinds.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -3328,7 +3328,7 @@ fn loom_captures_and_restores_a_complete_vm() {
     let artifact = compile_to_bytes("full-vm.lm", "42\n").expect("the artifact compiles");
     let source = r#"
 def read_artifact(): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
-  bytes = case sys.fs.open("full-vm.lmbc", ReadOnly)
+  bytes = case sys.fs.open(Path("full-vm.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(data) then data
@@ -3439,7 +3439,7 @@ execute()
 fn loom_loads_an_external_snapshot_as_a_typed_result() {
     let source = r#"
 def read_snapshot(): Bytes with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("seed.lms", ReadOnly)
+  case sys.fs.open(Path("seed.lms", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(bytes) then bytes
@@ -3512,7 +3512,7 @@ fn installed_code_and_handles_survive_an_external_snapshot() {
     let artifact = compile_to_bytes("installed.lm", "42\n").expect("the artifact compiles");
     let source = r#"
 def artifact_bytes(): Bytes with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("installed.lmbc", ReadOnly)
+  case sys.fs.open(Path("installed.lmbc", PathStyle.Posix), ReadOnly)
   in Ok(file)
     value = case file.read(1048576)
     in Ok(bytes) then bytes

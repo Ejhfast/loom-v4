@@ -10,7 +10,7 @@
 # Use `10-checkpoint-background-work.lm` when a background proc holds it.
 
 def read_message(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("message.txt", ReadOnly)
+  case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     case file.read(1024)
     in Ok(bytes)

@@ -52,6 +52,8 @@ pub struct CoreLayout {
     pub string_builder: Option<u32>,
     /// The core method table of ByteBuffer values.
     pub byte_buffer: Option<u32>,
+    /// The core class of portable filesystem paths.
+    pub path: Option<u32>,
     /// The core method table of unit values.
     pub unit: Option<u32>,
     /// Native tuple method tables indexed by arity.
@@ -295,7 +297,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 257] = [
+pub const PINNED_LABELS: [&str; 258] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -553,6 +555,7 @@ pub const PINNED_LABELS: [&str; 257] = [
     "RestoreError.IncompatibleImage",
     "Regex",
     "RegexMatch",
+    "Path",
 ];
 
 /// The core role of immediate integer values.
@@ -808,6 +811,8 @@ pub const ROLE_RESTORE_INCOMPATIBLE_IMAGE: usize = 254;
 pub const ROLE_REGEX: usize = 255;
 /// The core role of regular-expression matches.
 pub const ROLE_REGEX_MATCH: usize = 256;
+/// The core role of portable filesystem paths.
+pub const ROLE_PATH: usize = 257;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1116,6 +1121,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "UdpSocket" => &mut layout.udp_socket,
         "Regex" => &mut layout.regex,
         "RegexMatch" => &mut layout.regex_match,
+        "Path" => &mut layout.path,
         _ => unreachable!("only known labels enter the map"),
     }
 }

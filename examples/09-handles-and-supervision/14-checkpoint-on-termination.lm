@@ -3,7 +3,7 @@
 
 use std.io.write_all_to
 
-def checkpoint(path: String): String with Signal, Wait, Vm, Fs
+def checkpoint(path: Path): String with Signal, Wait, Vm, Fs
   signals = Signal().open([SignalKind.Interrupt, SignalKind.Terminate]).expect("the signal stream opens")
   received = signals.next_wait().wait().expect("the shutdown signal arrives")
 
@@ -24,4 +24,4 @@ def checkpoint(path: String): String with Signal, Wait, Vm, Fs
   "saved #{bytes.len()} bytes after #{kind}"
 end
 
-checkpoint("shutdown.lms")
+checkpoint(Path("shutdown.lms", PathStyle.Posix))

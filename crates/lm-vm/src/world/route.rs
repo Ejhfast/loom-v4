@@ -867,6 +867,26 @@ impl World {
                             .map(HostArg::SocketAddress)
                     }
                     Object::Instance { class, fields, .. }
+                        if Some(*class) == self.core_of(vm).path =>
+                    {
+                        match fields.as_slice() {
+                            [Value::Obj(text), Value::Bool(windows)] => {
+                                let Object::Str(text) = m.vm.heap.get(*text) else {
+                                    return Err(FaultCode::TypeMismatch);
+                                };
+                                Ok(HostArg::Path(crate::HostPath {
+                                    text: text.clone(),
+                                    style: if *windows {
+                                        crate::HostPathStyle::Windows
+                                    } else {
+                                        crate::HostPathStyle::Posix
+                                    },
+                                }))
+                            }
+                            _ => Err(FaultCode::TypeMismatch),
+                        }
+                    }
+                    Object::Instance { class, fields, .. }
                         if Some(*class) == self.core_of(vm).shutdown_read && fields.is_empty() =>
                     {
                         Ok(HostArg::Shutdown(crate::HostShutdown::Read))

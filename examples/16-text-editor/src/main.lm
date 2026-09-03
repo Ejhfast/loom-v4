@@ -101,7 +101,7 @@ def read_input_soon(): Bytes with Io.ReadBytes, Clock.Sleep, Wait
 end
 
 def read_file(path: String): Result[Bytes, FsError] with Fs
-  with_file(path, OpenOptions.ReadOnly) { |file: FileHandle|
+  with_file(Path(path, PathStyle.Posix), OpenOptions.ReadOnly) { |file: FileHandle|
     buffer = ByteBuffer()
     loop do
       chunk = file.read(65536)?

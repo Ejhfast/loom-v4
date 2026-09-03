@@ -13,7 +13,7 @@
 # request without any debuggee definition.
 
 def read_snapshot(): Result[Bytes, String] with Fs.Open, Fs.Read, Fs.Close
-  file = sys.fs.open("program.lms", ReadOnly).map_error() {
+  file = sys.fs.open(Path("program.lms", PathStyle.Posix), ReadOnly).map_error() {
     |problem: FsError| display(problem)
   }?
   bytes = file.read(1048576).map_error() {

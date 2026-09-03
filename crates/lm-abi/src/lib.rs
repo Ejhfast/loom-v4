@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 42;
+pub const ABI_VERSION: u32 = 43;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -182,6 +182,7 @@ pub enum AbiCore {
     Char,
     StringBuilder,
     ByteBuffer,
+    Path,
     OpenOptions,
     SeekFrom,
     FileKind,
@@ -236,6 +237,7 @@ impl AbiCore {
             AbiCore::Char => "Char",
             AbiCore::StringBuilder => "StringBuilder",
             AbiCore::ByteBuffer => "ByteBuffer",
+            AbiCore::Path => "Path",
             AbiCore::OpenOptions => "OpenOptions",
             AbiCore::SeekFrom => "SeekFrom",
             AbiCore::FileKind => "FileKind",
@@ -374,6 +376,7 @@ impl AbiType {
     pub const CHAR: AbiType = AbiType::Core(AbiCore::Char);
     pub const STRING_BUILDER: AbiType = AbiType::Core(AbiCore::StringBuilder);
     pub const BYTE_BUFFER: AbiType = AbiType::Core(AbiCore::ByteBuffer);
+    pub const PATH: AbiType = AbiType::Core(AbiCore::Path);
     pub const OPEN_OPTIONS: AbiType = AbiType::Core(AbiCore::OpenOptions);
     pub const SEEK_FROM: AbiType = AbiType::Core(AbiCore::SeekFrom);
     pub const FILE_KIND: AbiType = AbiType::Core(AbiCore::FileKind);
@@ -456,8 +459,8 @@ impl AbiType {
             AbiType::ENV_ERROR,
         ],
     );
-    pub const RESULT_STR_FS_ERROR: AbiType =
-        AbiType::Apply(AbiConstructor::Result, &[AbiType::STR, AbiType::FS_ERROR]);
+    pub const RESULT_PATH_FS_ERROR: AbiType =
+        AbiType::Apply(AbiConstructor::Result, &[AbiType::PATH, AbiType::FS_ERROR]);
     pub const RESULT_BYTES_ENTROPY_ERROR: AbiType = AbiType::Apply(
         AbiConstructor::Result,
         &[AbiType::BYTES, AbiType::ENTROPY_ERROR],
@@ -2968,7 +2971,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "Open",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR, AbiType::OPEN_OPTIONS],
+        params: &[AbiType::PATH, AbiType::OPEN_OPTIONS],
         reply: AbiType::RESULT_FILE_HANDLE_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3733,7 +3736,7 @@ pub const OPS: [OpDef; 148] = [
         member: "CurrentDir",
         kind: OpKind::Fixed,
         params: &[],
-        reply: AbiType::RESULT_STR_FS_ERROR,
+        reply: AbiType::RESULT_PATH_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::MachineState,
     },
@@ -3822,7 +3825,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "Stat",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
+        params: &[AbiType::PATH],
         reply: AbiType::RESULT_FILE_INFO_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3831,7 +3834,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "ReadDir",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR, AbiType::INT],
+        params: &[AbiType::PATH, AbiType::INT],
         reply: AbiType::RESULT_DIR_ENTRIES_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3840,7 +3843,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "CreateDir",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
+        params: &[AbiType::PATH],
         reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3849,7 +3852,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "RemoveFile",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
+        params: &[AbiType::PATH],
         reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3858,7 +3861,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "RemoveDir",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
+        params: &[AbiType::PATH],
         reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3867,7 +3870,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "Rename",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR, AbiType::STR, AbiType::RENAME_MODE],
+        params: &[AbiType::PATH, AbiType::PATH, AbiType::RENAME_MODE],
         reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,
@@ -3885,7 +3888,7 @@ pub const OPS: [OpDef; 148] = [
         group: "Fs",
         member: "SyncDir",
         kind: OpKind::Fixed,
-        params: &[AbiType::STR],
+        params: &[AbiType::PATH],
         reply: AbiType::RESULT_UNIT_FS_ERROR,
         schema: "",
         snapshot: SnapshotClass::HostAttachment,

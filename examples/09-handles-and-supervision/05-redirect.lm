@@ -8,7 +8,7 @@
 # supervisor's handle too.
 
 def read_config(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("config.txt", ReadOnly)
+  case sys.fs.open(Path("config.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     text = case file.read(1024)
     in Ok(bytes)  then bytes.text()
@@ -38,7 +38,7 @@ def redirect(child: Run[String], approved: FileHandle): String with Vm
   end
 end
 
-case sys.fs.open("message.txt", ReadOnly)
+case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
 in Ok(approved)
   child = sys.vm.Vm().activate_or_fault(read_config, args: ())
   # Reads and closes on the shared entry reach the host.

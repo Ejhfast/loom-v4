@@ -8,7 +8,7 @@
 # and it never reopens a path by itself.
 
 def read_with_recovery(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("message.txt", ReadOnly)
+  case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     case file.read(1024)
     in Ok(bytes)
@@ -16,7 +16,7 @@ def read_with_recovery(): String with Fs.Open, Fs.Read, Fs.Close
       bytes.text()
     in Err(Closed)
       # The supervisor took this file. Open a fresh one.
-      case sys.fs.open("message.txt", ReadOnly)
+      case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
       in Ok(again)
         text = case again.read(1024)
         in Ok(bytes)  then bytes.text()

@@ -91,6 +91,7 @@ impl<'o> FnChecker<'o> {
                     lm_abi::AbiCore::Char => "Char",
                     lm_abi::AbiCore::StringBuilder => "StringBuilder",
                     lm_abi::AbiCore::ByteBuffer => "ByteBuffer",
+                    lm_abi::AbiCore::Path => "Path",
                     lm_abi::AbiCore::OpenOptions => "OpenOptions",
                     lm_abi::AbiCore::SeekFrom => "SeekFrom",
                     lm_abi::AbiCore::FileKind => "FileKind",

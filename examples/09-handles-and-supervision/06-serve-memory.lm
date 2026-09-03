@@ -17,7 +17,7 @@
 # reaches the root host instead gives the child an `FsError`.
 
 def read_settings(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("settings.txt", ReadOnly)
+  case sys.fs.open(Path("settings.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     text = case file.read(1024)
     in Ok(bytes)  then bytes.text()

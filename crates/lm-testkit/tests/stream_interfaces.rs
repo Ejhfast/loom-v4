@@ -65,7 +65,7 @@ fn standard_write_all_uses_file_and_pipe_conformances() {
 use std.io.write_all_to
 
 def go(): String with Fs, Pipe
-  file = sys.fs.open("saved.bin", CreateTruncate).expect("the file opens")
+  file = sys.fs.open(Path("saved.bin", PathStyle.Posix), CreateTruncate).expect("the file opens")
   write_all_to(file, b"file-data").expect("the file writes")
   file.close().expect("the file closes")
 

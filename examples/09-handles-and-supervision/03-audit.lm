@@ -4,7 +4,7 @@
 # only watches.
 
 def read_message(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("message.txt", ReadOnly)
+  case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     text = case file.read(1024)
     in Ok(bytes)  then bytes.text()
@@ -24,7 +24,7 @@ def audit(child: Run[String], mut opened: [String]): String with Vm
     in Asked(request)
       case request
       in Call(Fs.Open, _, (path, _))
-        opened.push(path)
+        opened.push(path.value)
       in _ then ()
       end
       # `dispatch` returns the request to the normal policy.

@@ -1,6 +1,6 @@
 # Read one file through an explicit file handle.
 
-def read_file(path: String): String with Fs.Open, Fs.Read, Fs.Close
+def read_file(path: Path): String with Fs.Open, Fs.Read, Fs.Close
   case sys.fs.open(path, ReadOnly)
   in Ok(file)
     case file.read(1024)
@@ -17,4 +17,4 @@ def read_file(path: String): String with Fs.Open, Fs.Read, Fs.Close
   end
 end
 
-read_file("message.txt")
+read_file(Path("message.txt", PathStyle.Posix))

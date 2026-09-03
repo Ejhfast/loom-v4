@@ -32,10 +32,10 @@ pub use executor::{
 pub use host::{
     CoreCtor, Host, HostArg, HostChildEnv, HostChildInput, HostChildOutput, HostCompileDefinition,
     HostCompileEnv, HostCompileModule, HostCompileOptions, HostCompileSlot, HostCompletion,
-    HostExecSpec, HostIpAddress, HostOpenOptions, HostParseStatus, HostRenameMode, HostResource,
-    HostSeekFrom, HostShutdown, HostSignalKind, HostSocketAddress, HostStart, HostStdStream,
-    HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, HostWake,
-    NullHost, RecordingHost,
+    HostExecSpec, HostIpAddress, HostOpenOptions, HostParseStatus, HostPath, HostPathStyle,
+    HostRenameMode, HostResource, HostSeekFrom, HostShutdown, HostSignalKind, HostSocketAddress,
+    HostStart, HostStdStream, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource, HostValue,
+    HostWaitCancel, HostWake, NullHost, RecordingHost,
 };
 pub use machine::{
     Block, FaultRec, FunctionVersionId, MachineExecutionMetrics, MachineState, Mailbox, Ownership,

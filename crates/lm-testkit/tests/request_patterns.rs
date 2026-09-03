@@ -7,7 +7,7 @@
 use lm_testkit::run_allowed;
 
 const CHILD: &str = "do ||: String with Fs.Open, Fs.Read, Fs.Close\n\
-                     \x20 case sys.fs.open(\"memory.txt\", ReadOnly)\n\
+                     \x20 case sys.fs.open(Path(\"memory.txt\", PathStyle.Posix), ReadOnly)\n\
                      \x20 in Ok(f)\n\
                      \x20   text = case f.read(6)\n\
                      \x20   in Ok(b)  then b.text()\n\

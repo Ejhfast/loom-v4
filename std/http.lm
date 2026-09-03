@@ -2,6 +2,7 @@
 
 use std.tls.Tls
 use std.tls.TlsClientConfig
+use std.url.Url
 
 enum HttpError implements Error
   InvalidRequest(message: String)
@@ -1396,6 +1397,65 @@ final class Http
       in Ok(_)      then Ok(response)
       in Err(error) then Err(HttpError.Network(error))
       end
+    end
+  end
+
+  def send_url(
+    self,
+    url: Url,
+    request: HttpRequest,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError] with Http.Client
+    scheme = url.scheme()
+    if scheme != "http" and scheme != "https"
+      return Err(HttpError.InvalidRequest("the URL scheme is not HTTP"))
+    end
+    authority = case url.authority()
+    in Some(value) then value
+    in None
+      return Err(HttpError.InvalidRequest("the URL has no authority"))
+    end
+    if authority.has_userinfo
+      return Err(HttpError.InvalidRequest("the HTTP URL contains user information"))
+    end
+    if authority.host.is_empty()
+      return Err(HttpError.InvalidRequest("the HTTP URL has no host"))
+    end
+    port = if authority.has_port
+      authority.port
+    elsif scheme == "https"
+      443
+    else
+      80
+    end
+    target_builder = StringBuilder()
+    if url.path().is_empty()
+      target_builder.append("/")
+    else
+      target_builder.append(url.path())
+    end
+    case url.query()
+    in Some(query)
+      target_builder.append("?")
+      target_builder.append(query)
+    in None then ()
+    end
+    target_request = HttpRequest(
+      request.method,
+      target_builder.finish(),
+      request.headers,
+      request.body
+    )
+    if scheme == "https"
+      self.send_secure(
+        authority.host,
+        port,
+        target_request,
+        Tls().default_config(authority.host),
+        limits
+      )
+    else
+      self.send(authority.host, port, target_request, limits)
     end
   end
 

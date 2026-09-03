@@ -5,7 +5,7 @@ def close_after_error(file: FileHandle, error: FsError): String with Fs.Close
   display(error)
 end
 
-def round_trip(path: String): String with Fs.Open, Fs.Write, Fs.Flush, Fs.Seek, Fs.Read, Fs.Close
+def round_trip(path: Path): String with Fs.Open, Fs.Write, Fs.Flush, Fs.Seek, Fs.Read, Fs.Close
   case sys.fs.open(path, CreateTruncate)
   in Ok(file)
     case file.write(Bytes("hello"))
@@ -40,4 +40,4 @@ def round_trip(path: String): String with Fs.Open, Fs.Write, Fs.Flush, Fs.Seek, 
   end
 end
 
-round_trip("round-trip.txt")
+round_trip(Path("round-trip.txt", PathStyle.Posix))

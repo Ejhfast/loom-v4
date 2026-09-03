@@ -242,7 +242,7 @@ class BufReader
 end
 
 def count_lines(path: String): Int with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open(path, ReadOnly)
+  case sys.fs.open(Path(path, PathStyle.Posix), ReadOnly)
   in Ok(f)
     r = BufReader(f)
     n = 0
@@ -277,7 +277,7 @@ fn bench_filesystem_operations() {
         &format!(
             "def go(): Int with Fs.Open, Fs.Close\n\
              \x20 n = 0\n  i = 0\n  while i < 2000\n\
-             \x20   n = n + case sys.fs.open(\"{data}\", ReadOnly)\n\
+             \x20   n = n + case sys.fs.open(Path(\"{data}\", PathStyle.Posix), ReadOnly)\n\
              \x20   in Ok(f)\n      case f.close() in Ok(_) then 1 in Err(_) then 0 end\n\
              \x20   in Err(_) then 0\n    end\n    i = i + 1\n  end\n  n\nend\ngo()\n"
         ),
@@ -291,7 +291,7 @@ fn bench_filesystem_operations() {
         2_000,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{data}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{data}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 2000\n\
              \x20     n = n + case f.read(1024) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -307,7 +307,7 @@ fn bench_filesystem_operations() {
         100,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{data}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{data}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 100\n\
              \x20     n = n + case f.read(65536) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -324,7 +324,7 @@ fn bench_filesystem_operations() {
         1_000,
         &format!(
             "def once(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{small}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{small}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = case f.read(8192) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20   f.close()\n    n\n  in Err(_) then 0\n  end\nend\n\
              def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
@@ -340,7 +340,7 @@ fn bench_filesystem_operations() {
         2_000,
         &format!(
             "def go(): Int with Fs.Open, Fs.Write, Fs.Close\n\
-             \x20 case sys.fs.open(\"{out}\", CreateTruncate)\n\
+             \x20 case sys.fs.open(Path(\"{out}\", PathStyle.Posix), CreateTruncate)\n\
              \x20 in Ok(f)\n    chunk = \"{}\".bytes()\n    n = 0\n    i = 0\n    while i < 2000\n\
              \x20     n = n + case f.write(chunk) in Ok(w) then w in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -356,7 +356,7 @@ fn bench_filesystem_operations() {
         "fs_read_1k_memory",
         2_000,
         "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-         \x20 case sys.fs.open(\"mem.bin\", ReadOnly)\n\
+         \x20 case sys.fs.open(Path(\"mem.bin\", PathStyle.Posix), ReadOnly)\n\
          \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 2000\n\
          \x20     n = n + case f.read(1024) in Ok(b) then b.len() in Err(_) then 0 end\n\
          \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -407,7 +407,7 @@ fn bench_filesystem_operations() {
         64 * 1024 * 1024,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{big}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{big}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 1024\n\
              \x20     n = n + case f.read(65536) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -420,7 +420,7 @@ fn bench_filesystem_operations() {
         64 * 1024 * 1024,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{big}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{big}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 64\n\
              \x20     n = n + case f.read(1048576) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -434,10 +434,10 @@ fn bench_filesystem_operations() {
         64 * 1024 * 1024,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Write, Fs.Close\n\
-             \x20 chunk = case sys.fs.open(\"{big}\", ReadOnly)\n\
+             \x20 chunk = case sys.fs.open(Path(\"{big}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(src)\n    c = case src.read(65536) in Ok(b) then b in Err(_) then \"\".bytes() end\n\
              \x20   src.close()\n    c\n  in Err(_) then \"\".bytes()\n  end\n\
-             \x20 case sys.fs.open(\"{sink}\", CreateTruncate)\n\
+             \x20 case sys.fs.open(Path(\"{sink}\", PathStyle.Posix), CreateTruncate)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 1024\n\
              \x20     n = n + case f.write(chunk) in Ok(w) then w in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -455,7 +455,7 @@ fn bench_filesystem_operations() {
         &big,
         &format!(
             "def go(): Int with Fs.Open, Fs.Read, Fs.Close\n\
-             \x20 case sys.fs.open(\"{big}\", ReadOnly)\n\
+             \x20 case sys.fs.open(Path(\"{big}\", PathStyle.Posix), ReadOnly)\n\
              \x20 in Ok(f)\n    n = 0\n    i = 0\n    while i < 64\n\
              \x20     n = n + case f.read(1048576) in Ok(b) then b.len() in Err(_) then 0 end\n\
              \x20     i = i + 1\n    end\n    f.close()\n    n\n\
@@ -470,7 +470,7 @@ fn bench_filesystem_operations() {
         2_000,
         "def go(): Int with Fs.Open, Fs.Close\n\
          \x20 n = 0\n  i = 0\n  while i < 2000\n\
-         \x20   n = n + case sys.fs.open(\"mem.bin\", ReadOnly)\n\
+         \x20   n = n + case sys.fs.open(Path(\"mem.bin\", PathStyle.Posix), ReadOnly)\n\
          \x20   in Ok(f)\n      case f.close() in Ok(_) then 1 in Err(_) then 0 end\n\
          \x20   in Err(_) then 0\n    end\n    i = i + 1\n  end\n  n\nend\ngo()\n",
         "mem.bin",

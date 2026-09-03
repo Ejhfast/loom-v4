@@ -13,6 +13,20 @@ use std::sync::Arc;
 /// One scheduler wake callback for asynchronous host readiness.
 pub type HostWake = Arc<dyn Fn() + Send + Sync>;
 
+/// One portable filesystem path style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostPathStyle {
+    Posix,
+    Windows,
+}
+
+/// One portable filesystem path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostPath {
+    pub text: SharedText,
+    pub style: HostPathStyle,
+}
+
 /// One plain-data operation argument.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostArg {
@@ -21,6 +35,7 @@ pub enum HostArg {
     Int(i64),
     Float(u64),
     Str(SharedText),
+    Path(HostPath),
     Bytes(SharedBytes),
     File(u64),
     OpenOptions(HostOpenOptions),
@@ -259,6 +274,7 @@ pub enum CoreCtor {
     FileKindOther,
     FileInfo,
     DirEntry,
+    Path,
     NetInvalidInput,
     NetNameNotFound,
     NetUnavailable,
@@ -1518,6 +1534,20 @@ fn memory_name(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, name)| name)
 }
 
+fn memory_path(path: &HostPath) -> Result<String, &'static str> {
+    if path.style != HostPathStyle::Posix {
+        return Err("the in-memory host accepts only Posix paths");
+    }
+    if path.text.contains('\0') {
+        return Err("the path contains a null byte");
+    }
+    Ok(path.text.to_string())
+}
+
+fn memory_path_error(message: &str) -> HostStart {
+    HostStart::Completed(fs_named_error(CoreCtor::FsErrorInvalidInput, message))
+}
+
 fn fs_case(ctor: CoreCtor, message: impl Into<String>) -> HostValue {
     HostValue::Ctor(ctor, vec![HostValue::Str(message.into().into())])
 }
@@ -1661,9 +1691,13 @@ impl RecordingHost {
                     .unwrap_or_else(|| HostValue::Ctor(CoreCtor::None, vec![]));
                 HostStart::Completed(core_ok(value))
             }
-            lm_abi::OP_FS_CURRENT_DIR => {
-                HostStart::Completed(core_ok(HostValue::Str(self.current_dir.clone().into())))
-            }
+            lm_abi::OP_FS_CURRENT_DIR => HostStart::Completed(core_ok(HostValue::Ctor(
+                CoreCtor::Path,
+                vec![
+                    HostValue::Str(self.current_dir.clone().into()),
+                    HostValue::Bool(false),
+                ],
+            ))),
             lm_abi::OP_ARGS_GET => HostStart::Completed(HostValue::List(
                 self.arguments
                     .iter()
@@ -1715,10 +1749,14 @@ impl RecordingHost {
                 HostStart::Completed(HostValue::Int(value))
             }
             lm_abi::OP_FS_OPEN => {
-                let (Some(HostArg::Str(path)), Some(HostArg::OpenOptions(options))) =
+                let (Some(HostArg::Path(path)), Some(HostArg::OpenOptions(options))) =
                     (args.first(), args.get(1))
                 else {
                     return HostStart::Failed("Fs.Open needs a path and options".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 let (readable, writable, append, create, truncate, exclusive) = match options {
                     HostOpenOptions::ReadOnly => (true, false, false, false, false, false),
@@ -1747,7 +1785,7 @@ impl RecordingHost {
                         "file open did not find the path",
                     ));
                 }
-                if create && !self.directories.contains(memory_parent(path)) {
+                if create && !self.directories.contains(memory_parent(&path)) {
                     return HostStart::Completed(fs_named_error(
                         CoreCtor::FsErrorNotFound,
                         "file open did not find the parent directory",
@@ -1920,8 +1958,12 @@ impl RecordingHost {
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }
             lm_abi::OP_FS_STAT => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.Stat needs a path".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 let kind = if let Some(bytes) = self.files.get(path.as_str()) {
                     Some((CoreCtor::FileKindFile, bytes.len()))
@@ -1953,10 +1995,14 @@ impl RecordingHost {
                 )))
             }
             lm_abi::OP_FS_READ_DIR => {
-                let (Some(HostArg::Str(path)), Some(HostArg::Int(max_entries))) =
+                let (Some(HostArg::Path(path)), Some(HostArg::Int(max_entries))) =
                     (args.first(), args.get(1))
                 else {
                     return HostStart::Failed("Fs.ReadDir needs a path and limit".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 let Ok(max_entries) = usize::try_from(*max_entries) else {
                     return HostStart::Completed(fs_named_error(
@@ -2013,8 +2059,12 @@ impl RecordingHost {
                 HostStart::Completed(fs_ok(HostValue::List(entries)))
             }
             lm_abi::OP_FS_CREATE_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.CreateDir needs a path".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 if self.files.contains_key(path.as_str())
                     || self.directories.contains(path.as_str())
@@ -2024,7 +2074,7 @@ impl RecordingHost {
                         "directory creation found an existing path",
                     ));
                 }
-                if !self.directories.contains(memory_parent(path)) {
+                if !self.directories.contains(memory_parent(&path)) {
                     return HostStart::Completed(fs_named_error(
                         CoreCtor::FsErrorNotFound,
                         "directory creation did not find its parent",
@@ -2034,8 +2084,12 @@ impl RecordingHost {
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }
             lm_abi::OP_FS_REMOVE_FILE => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.RemoveFile needs a path".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 if self.directories.contains(path.as_str()) {
                     return HostStart::Completed(fs_named_error(
@@ -2052,8 +2106,12 @@ impl RecordingHost {
                 HostStart::Completed(fs_ok(HostValue::Unit))
             }
             lm_abi::OP_FS_REMOVE_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.RemoveDir needs a path".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 if self.files.contains_key(path.as_str()) {
                     return HostStart::Completed(fs_named_error(
@@ -2083,16 +2141,24 @@ impl RecordingHost {
             }
             lm_abi::OP_FS_RENAME => {
                 let (
-                    Some(HostArg::Str(from)),
-                    Some(HostArg::Str(to)),
+                    Some(HostArg::Path(from)),
+                    Some(HostArg::Path(to)),
                     Some(HostArg::RenameMode(mode)),
                 ) = (args.first(), args.get(1), args.get(2))
                 else {
                     return HostStart::Failed("Fs.Rename needs two paths and one mode".to_string());
                 };
+                let from = match memory_path(from) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
+                };
+                let to = match memory_path(to) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
+                };
                 let target_exists =
                     self.files.contains_key(to.as_str()) || self.directories.contains(to.as_str());
-                if !self.directories.contains(memory_parent(to)) {
+                if !self.directories.contains(memory_parent(&to)) {
                     return HostStart::Completed(fs_named_error(
                         CoreCtor::FsErrorNotFound,
                         "rename did not find the target parent",
@@ -2176,8 +2242,12 @@ impl RecordingHost {
                 ))
             }
             lm_abi::OP_FS_SYNC_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.SyncDir needs a path".to_string());
+                };
+                let path = match memory_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return memory_path_error(message),
                 };
                 if !self.directories.contains(path.as_str()) {
                     let ctor = if self.files.contains_key(path.as_str()) {

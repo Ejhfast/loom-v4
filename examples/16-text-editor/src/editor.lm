@@ -371,7 +371,7 @@ end
 
 # Write the document text to `path`.
 def write_document(path: String, data: Bytes): Result[Int, FsError] with Fs
-  file = sys.fs.open(path, OpenOptions.CreateTruncate)?
+  file = sys.fs.open(Path(path, PathStyle.Posix), OpenOptions.CreateTruncate)?
   written = case write_file_all(file, data)
   in Err(error) then Err(error)
   in Ok(_)      then file.flush()

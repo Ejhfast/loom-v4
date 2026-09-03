@@ -1323,7 +1323,7 @@ class Busy < Proc
 end
 
 busy = Busy.spawn()
-case sys.fs.open("message.txt", ReadOnly)
+case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
 in Ok(file)
   child = sys.vm.Vm().activate_or_fault(index_file, args: (file,))
   child.table().pass(Fs.Read)

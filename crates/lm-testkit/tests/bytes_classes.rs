@@ -380,7 +380,7 @@ fn the_verifier_rejects_native_class_allocation() {
 fn file_operations_preserve_arbitrary_bytes() {
     let source = r#"
 def round_trip(): String with Fs.Open, Fs.Write, Fs.Seek, Fs.Read, Fs.Close
-  case sys.fs.open("binary.dat", CreateTruncate)
+  case sys.fs.open(Path("binary.dat", PathStyle.Posix), CreateTruncate)
   in Ok(file)
     buffer = ByteBuffer()
     buffer.append(0).append(255).append(65)

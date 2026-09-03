@@ -371,6 +371,38 @@ end
 }
 
 #[test]
+fn the_url_client_uses_the_url_endpoint_and_client_effect_set() {
+    let source = r#"
+use std.url.parse_url
+
+def fetch(): Result[HttpResponse, HttpError] with Http.Client
+  url = parse_url("https://localhost/items?q=one#ignored").expect("the URL is valid")
+  request = HttpRequest("GET", "/ignored", [], Bytes())
+  Http().send_url(url, request, Http().default_limits())
+end
+
+0
+"#;
+    compile_to_bytes("http_url_effect_set.lm", &with_http(source))
+        .expect("the URL client effect set checks");
+}
+
+#[test]
+fn the_url_client_rejects_another_scheme_before_network_access() {
+    let source = r#"
+use std.url.parse_url
+
+url = parse_url("ftp://example.test/file").expect("the URL is valid")
+request = HttpRequest("GET", "/", [], Bytes())
+case Http().send_url(url, request, Http().default_limits())
+in Ok(_) then "accepted"
+in Err(error) then display(error)
+end
+"#;
+    assert_eq!(run(source), "Done(\"the URL scheme is not HTTP\")");
+}
+
+#[test]
 fn the_secure_client_rejects_another_alpn_before_network_access() {
     let source = r#"
 config = TlsClientConfig(

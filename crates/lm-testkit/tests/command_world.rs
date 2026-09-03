@@ -21,7 +21,7 @@ def go(): (Int, String, String, Int, Int, Int) with Io.ReadBytes, Io.Write, Env.
   arguments.push("local")
   original = sys.args()
   write_all(input).expect("output works")
-  (input.len(), name, directory, entropy.len(), arguments.len(), original.len())
+  (input.len(), name, directory.value, entropy.len(), arguments.len(), original.len())
 end
 go()
 "#;

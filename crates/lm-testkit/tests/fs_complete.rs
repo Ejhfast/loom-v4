@@ -12,10 +12,14 @@ use std.fs.durable_replace
 use std.fs.read_dir_sorted
 
 def go(): Result[(Int, Bool), FsError] with Fs.CreateDir, Fs.Open, Fs.Write, Fs.Flush, Fs.Sync, Fs.Close, Fs.RemoveFile, Fs.RemoveDir, Fs.Rename, Fs.SyncDir, Fs.Stat, Fs.ReadDir
-  sys.fs.create_dir("data")?
-  durable_replace("data", "data/.message.tmp", "data/message.bin", b"hello")?
-  info = sys.fs.stat("data/message.bin")?
-  entries = read_dir_sorted("data", 16)?
+  data = Path("data", PathStyle.Posix)
+  temporary = Path("data/.message.tmp", PathStyle.Posix)
+  message = Path("data/message.bin", PathStyle.Posix)
+  final_path = Path("data/final.bin", PathStyle.Posix)
+  sys.fs.create_dir(data)?
+  durable_replace(data, temporary, message, b"hello")?
+  info = sys.fs.stat(message)?
+  entries = read_dir_sorted(data, 16)?
   found = false
   for item in entries
     case item
@@ -26,9 +30,9 @@ def go(): Result[(Int, Bool), FsError] with Fs.CreateDir, Fs.Open, Fs.Write, Fs.
     in Err(_) then ()
     end
   end
-  sys.fs.rename("data/message.bin", "data/final.bin", RenameMode.NoReplace)?
-  sys.fs.remove_file("data/final.bin")?
-  sys.fs.remove_dir("data")?
+  sys.fs.rename(message, final_path, RenameMode.NoReplace)?
+  sys.fs.remove_file(final_path)?
+  sys.fs.remove_dir(data)?
   Ok((info.byte_length, found))
 end
 
@@ -77,9 +81,10 @@ fn durable_replacement_uses_the_required_sync_order() {
 fn create_new_reports_an_existing_path() {
     let source = r#"
 def go(): Result[Bool, FsError] with Fs.Open, Fs.Close
-  first = sys.fs.open("one.bin", CreateNew)?
+  path = Path("one.bin", PathStyle.Posix)
+  first = sys.fs.open(path, CreateNew)?
   first.close()?
-  case sys.fs.open("one.bin", CreateNew)
+  case sys.fs.open(path, CreateNew)
   in Err(FsError.AlreadyExists(_)) then Ok(true)
   in Err(error) then Err(error)
   in Ok(file)
@@ -99,12 +104,17 @@ go()
 fn the_recording_host_renames_a_directory_tree() {
     let source = r#"
 def go(): Result[Bool, FsError] with Fs.CreateDir, Fs.Open, Fs.Close, Fs.Rename, Fs.Stat
-  sys.fs.create_dir("old")?
-  sys.fs.create_dir("old/child")?
-  file = sys.fs.open("old/child/value.bin", CreateNew)?
+  old = Path("old", PathStyle.Posix)
+  child = Path("old/child", PathStyle.Posix)
+  value = Path("old/child/value.bin", PathStyle.Posix)
+  destination = Path("new", PathStyle.Posix)
+  moved = Path("new/child/value.bin", PathStyle.Posix)
+  sys.fs.create_dir(old)?
+  sys.fs.create_dir(child)?
+  file = sys.fs.open(value, CreateNew)?
   file.close()?
-  sys.fs.rename("old", "new", RenameMode.NoReplace)?
-  info = sys.fs.stat("new/child/value.bin")?
+  sys.fs.rename(old, destination, RenameMode.NoReplace)?
+  info = sys.fs.stat(moved)?
   case info.kind
   in FileKind.File then Ok(true)
   in _ then Ok(false)
@@ -158,7 +168,8 @@ fn a_non_utf8_directory_entry_crosses_the_guest_boundary() {
     let source = format!(
         r#"
 def go(): Result[Bool, FsError] with Fs.ReadDir
-  entries = sys.fs.read_dir("{directory_text}", 8)?
+  path = Path("{directory_text}", PathStyle.Posix)
+  entries = sys.fs.read_dir(path, 8)?
   for entry in entries
     case entry
     in Err(FsError.InvalidEncoding(_)) then return Ok(true)
@@ -193,8 +204,11 @@ go()
 
 #[test]
 fn the_verifier_checks_new_file_boundary_roles() {
-    let mut module =
-        compile_module_text("file_roles.lm", "sys.fs.stat(\".\")\n").expect("the probe compiles");
+    let mut module = compile_module_text(
+        "file_roles.lm",
+        "sys.fs.stat(Path(\".\", PathStyle.Posix))\n",
+    )
+    .expect("the probe compiles");
     let file_info = module.core_roles[ROLE_FILE_INFO] as usize;
     let int_ty = module
         .types

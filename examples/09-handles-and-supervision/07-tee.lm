@@ -12,7 +12,7 @@
 # file, so the child sees genuine bytes and the supervisor sees sizes.
 
 def read_twice(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("input.txt", ReadOnly)
+  case sys.fs.open(Path("input.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     first = case file.read(6)
     in Ok(bytes)  then bytes.text()
@@ -69,7 +69,7 @@ def tee(
   end
 end
 
-case sys.fs.open("message.txt", ReadOnly)
+case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
 in Ok(backing)
   child = sys.vm.Vm().activate_or_fault(read_twice, args: ())
   case child.drive()

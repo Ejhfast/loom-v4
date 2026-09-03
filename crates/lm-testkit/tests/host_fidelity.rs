@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 const SRC: &str = r##"
 def worker(): String with Fs.Open, Fs.Read, Fs.Close
-  case sys.fs.open("message.txt", ReadOnly)
+  case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     case file.read(1024)
     in Ok(b)

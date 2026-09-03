@@ -281,6 +281,7 @@ impl World {
                     CoreCtor::FileKindOther => self.core_of(vm).file_kind_other,
                     CoreCtor::FileInfo => self.core_of(vm).file_info,
                     CoreCtor::DirEntry => self.core_of(vm).dir_entry,
+                    CoreCtor::Path => self.core_of(vm).path,
                     CoreCtor::NetInvalidInput => self.core_of(vm).net_invalid_input,
                     CoreCtor::NetNameNotFound => self.core_of(vm).net_name_not_found,
                     CoreCtor::NetUnavailable => self.core_of(vm).net_unavailable,

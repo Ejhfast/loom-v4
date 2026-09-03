@@ -3810,21 +3810,21 @@ Diagnostic reporting treats its own closed pipe as a completed report.
 ### 23.2 File system
 
 ```text
-Fs.Open        (String, OpenOptions) -> Result[FileHandle, FsError]
+Fs.Open        (Path, OpenOptions) -> Result[FileHandle, FsError]
 Fs.Read        (FileHandle, Int) -> Result[Bytes, FsError]
 Fs.Write       (FileHandle, Bytes) -> Result[Int, FsError]
 Fs.Seek        (FileHandle, SeekFrom) -> Result[Int, FsError]
 Fs.Flush       (FileHandle) -> Result[(), FsError]
 Fs.Sync        (FileHandle) -> Result[(), FsError]
 Fs.Close       (FileHandle) -> Result[(), FsError]
-Fs.CurrentDir  () -> Result[String, FsError]
-Fs.Stat        (String) -> Result[FileInfo, FsError]
-Fs.ReadDir     (String, Int) -> Result[List[Result[DirEntry, FsError]], FsError]
-Fs.CreateDir   (String) -> Result[(), FsError]
-Fs.RemoveFile  (String) -> Result[(), FsError]
-Fs.RemoveDir   (String) -> Result[(), FsError]
-Fs.Rename      (String, String, RenameMode) -> Result[(), FsError]
-Fs.SyncDir     (String) -> Result[(), FsError]
+Fs.CurrentDir  () -> Result[Path, FsError]
+Fs.Stat        (Path) -> Result[FileInfo, FsError]
+Fs.ReadDir     (Path, Int) -> Result[List[Result[DirEntry, FsError]], FsError]
+Fs.CreateDir   (Path) -> Result[(), FsError]
+Fs.RemoveFile  (Path) -> Result[(), FsError]
+Fs.RemoveDir   (Path) -> Result[(), FsError]
+Fs.Rename      (Path, Path, RenameMode) -> Result[(), FsError]
+Fs.SyncDir     (Path) -> Result[(), FsError]
 ```
 
 A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. Raw file handles have no checkpoint contract.
@@ -5048,7 +5048,15 @@ Digest equality alone is not proof.
 
 ### 24.9 Paths, I/O, and files
 
-The first release uses `String` values for file-system paths.
+Core defines `Path` and `PathStyle` because filesystem operations use their nominal identity.
+
+A `Path` stores exact text and either POSIX or Windows syntax.
+
+The default host accepts only its native style.
+
+A custom filesystem driver defines its accepted styles.
+
+The `Fs` grant supplies authority. A `Path` supplies no authority.
 
 `std/io` contains thin wrappers:
 
@@ -5125,9 +5133,11 @@ Host-backed selection uses the exact `Rand.Int` row. Secure bytes and entropy se
 
 `std.path` provides lexical path operations with explicit POSIX or Windows rules.
 
-`std.fs` accepts `Path` through typed helper functions. The core filesystem operations keep their portable `String` ABI.
+Filesystem access preserves the supplied spelling.
 
-Path normalization removes `.` segments and resolves possible `..` segments. It does not access a filesystem.
+Call `normalize` explicitly to remove `.` segments and resolve possible `..` segments.
+
+Normalization does not access a filesystem.
 
 Path normalization is not an authorization check. Filesystem policy must validate the resolved host resource.
 
@@ -5140,6 +5150,10 @@ Core network code defines DNS, TCP, and native TLS stream operations.
 `std.tls` wraps TLS configuration and client operations.
 
 `std.http` implements bounded HTTP/1.1 messages and direct clients.
+
+`Http.send_url` accepts an absolute HTTP or HTTPS `Url`.
+
+It derives the host, port, request target, and default TLS server name.
 
 `std.term` contains pure terminal control bytes and bounded key decoding.
 

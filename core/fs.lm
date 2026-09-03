@@ -1,5 +1,40 @@
 # Core: portable file operation values.
 
+enum PathStyle
+  Posix
+  Windows
+end
+
+frozen class Path implements Display, Hashable
+  value: String
+  windows: Bool
+
+  def init(mut self, value: String, style: PathStyle)
+    self.value = value
+    self.windows = case style
+    in PathStyle.Posix then false
+    in PathStyle.Windows then true
+    end
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.value)
+  end
+
+  def __eq__(self, other: Path): Bool
+    self.value == other.value and self.windows == other.windows
+  end
+
+  def __hash__(self): Int
+    style_hash = if self.windows then 1 else 0 end
+    hash_combine(style_hash, hash_of(self.value))
+  end
+
+  def style(self): PathStyle
+    if self.windows then PathStyle.Windows else PathStyle.Posix end
+  end
+end
+
 enum FsError implements Error
   Closed
   InvalidInput(message: String)

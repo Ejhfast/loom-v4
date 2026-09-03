@@ -48,7 +48,7 @@ def run_filter() with Io.ReadBytes, Io.Write, Env.Get, Fs.CurrentDir, Entropy.By
   end
 
   directory = sys.fs.current_dir().expect("the current directory is available")
-  assert_message(directory.len() > 0, "the current directory is empty")
+  assert_message(directory.value.len() > 0, "the current directory is empty")
 
   entropy = sys.entropy.bytes(16).expect("secure entropy is available")
   assert_message(entropy.len() == 16, "the entropy result has the wrong size")

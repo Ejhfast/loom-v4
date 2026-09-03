@@ -156,7 +156,7 @@ fn a_driver_observes_every_read_of_a_served_file() {
 #[test]
 fn a_successful_mock_close_retires_every_alias() {
     let text = r#"
-case sys.fs.open("message.txt", ReadOnly)
+case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
 in Ok(parent_file)
   child = sys.vm.Vm().activate_or_fault(do |file: FileHandle|: Bool with Fs.Close
     file.close().is_ok()
@@ -216,7 +216,7 @@ fn a_supervisor_steps_the_child_to_a_quiet_capture_point() {
 fn driver_termination_closes_its_served_files() {
     let text = r#"
 child = sys.vm.Vm().activate_or_fault(do ||: Int with Fs.Open
-  case sys.fs.open("memory.txt", ReadOnly)
+  case sys.fs.open(Path("memory.txt", PathStyle.Posix), ReadOnly)
   in Ok(_)  then 1
   in Err(_) then 0
   end
@@ -326,7 +326,7 @@ class Closer < Proc
   end
 end
 
-case sys.fs.open("message.txt", ReadOnly)
+case sys.fs.open(Path("message.txt", PathStyle.Posix), ReadOnly)
 in Ok(file)
   worker = Worker.spawn(file)
   case worker.pause()

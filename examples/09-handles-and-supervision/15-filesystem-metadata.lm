@@ -3,7 +3,7 @@
 
 use std.fs.read_dir_sorted
 
-def inspect(path: String): Result[(Bool, Bool), FsError] with Fs.Stat, Fs.ReadDir
+def inspect(path: Path): Result[(Bool, Bool), FsError] with Fs.Stat, Fs.ReadDir
   info = sys.fs.stat(path)?
   entries = read_dir_sorted(path, 10000)?
   directory = case info.kind
@@ -15,4 +15,4 @@ def inspect(path: String): Result[(Bool, Bool), FsError] with Fs.Stat, Fs.ReadDi
   Ok((directory, not entries.is_empty()))
 end
 
-inspect(".")
+inspect(Path(".", PathStyle.Posix))

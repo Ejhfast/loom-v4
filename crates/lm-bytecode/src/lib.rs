@@ -58,7 +58,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 257;
+pub const CORE_ROLE_COUNT: usize = 258;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -1942,7 +1942,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 66;
+pub const VERSION: u16 = 67;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.

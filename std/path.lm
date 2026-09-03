@@ -1,9 +1,4 @@
-# Standard library: platform-explicit lexical paths.
-
-enum PathStyle
-  Posix
-  Windows
-end
+# Standard library: platform-explicit lexical path operations.
 
 enum PathError implements Error
   ContainsNul
@@ -15,57 +10,6 @@ enum PathError implements Error
     in InvalidWindowsPrefix then "the Windows path prefix is invalid"
     end
     builder.append(text)
-  end
-end
-
-frozen class Path implements Display, Hashable
-  value: String
-  windows: Bool
-
-  def init(mut self, value: String, style: PathStyle)
-    self.value = value
-    self.windows = style == PathStyle.Windows
-  end
-
-  def append_to(self, mut builder: StringBuilder)
-    builder.append(self.value)
-  end
-
-  def __eq__(self, other: Path): Bool
-    self.value == other.value and self.windows == other.windows
-  end
-
-  def __hash__(self): Int
-    style_hash = if self.windows then 1 else 0 end
-    hash_combine(style_hash, hash_of(self.value))
-  end
-
-  def style(self): PathStyle
-    if self.windows then PathStyle.Windows else PathStyle.Posix end
-  end
-
-  def is_absolute(self): Bool
-    is_absolute(self.value, self.style())
-  end
-
-  def join(self, child: Text): Result[Path, PathError]
-    join(self.value, child, self.style())
-  end
-
-  def parent(self): Option[Path]
-    parent(self.value, self.style())
-  end
-
-  def file_name(self): Option[String]
-    file_name(self.value, self.style())
-  end
-
-  def extension(self): Option[String]
-    extension(self.value, self.style())
-  end
-
-  def stem(self): Option[String]
-    stem(self.value, self.style())
   end
 end
 
@@ -108,22 +52,39 @@ def _has_windows_drive(text: Text): Bool
   source.len() >= 2 and _is_ascii_letter(source.at(0)) and source.at(1) == 58
 end
 
-def is_absolute(text: Text, style: PathStyle): Bool
-  source = text.bytes()
+def parse(text: Text, style: PathStyle): Result[Path, PathError]
+  if _contains_nul(text)
+    Err(PathError.ContainsNul)
+  elsif style == PathStyle.Windows and text.bytes().len() >= 2 and
+    _is_separator(text.bytes().at(0), style) and
+    _is_separator(text.bytes().at(1), style) and
+    normalize(Path(text.to_string(), style)).is_err()
+    Err(PathError.InvalidWindowsPrefix)
+  else
+    Ok(Path(text.to_string(), style))
+  end
+end
+
+def is_absolute(path: Path): Bool
+  source = path.value.bytes()
   if source.is_empty()
     return false
   end
+  style = path.style()
   case style
   in PathStyle.Posix
     source.at(0) == 47
   in PathStyle.Windows
-    (_has_windows_drive(text) and source.len() >= 3 and _is_separator(source.at(2), style)) or
+    (_has_windows_drive(path.value) and source.len() >= 3 and
+      _is_separator(source.at(2), style)) or
       (source.len() >= 2 and _is_separator(source.at(0), style) and
         _is_separator(source.at(1), style))
   end
 end
 
-def normalize(text: Text, style: PathStyle): Result[Path, PathError]
+def normalize(path: Path): Result[Path, PathError]
+  text = path.value
+  style = path.style()
   if _contains_nul(text)
     return Err(PathError.ContainsNul)
   end
@@ -211,21 +172,23 @@ def normalize(text: Text, style: PathStyle): Result[Path, PathError]
   Ok(Path(builder.finish(), style))
 end
 
-def join(base: Text, child: Text, style: PathStyle): Result[Path, PathError]
-  if is_absolute(child, style) or (style == PathStyle.Windows and _has_windows_drive(child))
-    return normalize(child, style)
+def join(base: Path, child: Text): Result[Path, PathError]
+  style = base.style()
+  child_path = Path(child.to_string(), style)
+  if is_absolute(child_path) or (style == PathStyle.Windows and _has_windows_drive(child))
+    return parse(child, style)
   end
-  if base.is_empty()
-    return normalize(child, style)
+  if base.value.is_empty()
+    return parse(child, style)
   end
   builder = StringBuilder()
-  builder.append(base)
-  source = base.bytes()
+  builder.append(base.value)
+  source = base.value.bytes()
   if source.len() > 0 and not _is_separator(source.at(source.len() - 1), style)
     builder.append(_separator(style))
   end
   builder.append(child)
-  normalize(builder.finish(), style)
+  parse(builder.finish(), style)
 end
 
 def _last_separator(text: Text, style: PathStyle): Int
@@ -240,41 +203,37 @@ def _last_separator(text: Text, style: PathStyle): Int
   -1
 end
 
-def parent(text: Text, style: PathStyle): Option[Path]
-  normalized = case normalize(text, style)
-  in Ok(value) then value
-  in Err(_) then return None
-  end
-  if normalized.value == "." or normalized.is_absolute() and
-    _last_separator(normalized.value, style) == normalized.value.byte_len() - 1
+def parent(path: Path): Option[Path]
+  text = path.value
+  style = path.style()
+  if text == "." or is_absolute(path) and
+    _last_separator(text, style) == text.byte_len() - 1
     return None
   end
-  at = _last_separator(normalized.value, style)
+  at = _last_separator(text, style)
   if at < 0
     Some(Path(".", style))
   elsif at == 0
     Some(Path(_separator(style), style))
-  elsif style == PathStyle.Windows and at == 2 and _has_windows_drive(normalized.value)
-    Some(Path(_text_part(normalized.value, 0, 3), style))
+  elsif style == PathStyle.Windows and at == 2 and _has_windows_drive(text)
+    Some(Path(_text_part(text, 0, 3), style))
   else
-    Some(Path(_text_part(normalized.value, 0, at), style))
+    Some(Path(_text_part(text, 0, at), style))
   end
 end
 
-def file_name(text: Text, style: PathStyle): Option[String]
-  normalized = case normalize(text, style)
-  in Ok(value) then value
-  in Err(_) then return None
-  end
-  if normalized.value == "."
+def file_name(path: Path): Option[String]
+  text = path.value
+  style = path.style()
+  if text == "."
     return None
   end
-  at = _last_separator(normalized.value, style)
+  at = _last_separator(text, style)
   start = at + 1
-  if start >= normalized.value.byte_len()
+  if start >= text.byte_len()
     None
   else
-    Some(_text_part(normalized.value, start, normalized.value.byte_len() - start))
+    Some(_text_part(text, start, text.byte_len() - start))
   end
 end
 
@@ -290,8 +249,8 @@ def _last_dot(text: Text): Int
   -1
 end
 
-def extension(text: Text, style: PathStyle): Option[String]
-  name = case file_name(text, style)
+def extension(path: Path): Option[String]
+  name = case file_name(path)
   in Some(value) then value
   in None then return None
   end
@@ -303,8 +262,8 @@ def extension(text: Text, style: PathStyle): Option[String]
   end
 end
 
-def stem(text: Text, style: PathStyle): Option[String]
-  name = case file_name(text, style)
+def stem(path: Path): Option[String]
+  name = case file_name(path)
   in Some(value) then value
   in None then return None
   end

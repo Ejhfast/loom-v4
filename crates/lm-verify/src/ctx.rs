@@ -1259,6 +1259,7 @@ impl<'m> Ctx<'m> {
                     lm_abi::AbiCore::Char => (self.core.char_value, "Char"),
                     lm_abi::AbiCore::StringBuilder => (self.core.string_builder, "StringBuilder"),
                     lm_abi::AbiCore::ByteBuffer => (self.core.byte_buffer, "ByteBuffer"),
+                    lm_abi::AbiCore::Path => (self.core.path, "Path"),
                     lm_abi::AbiCore::OpenOptions => (self.core.open_options, "OpenOptions"),
                     lm_abi::AbiCore::SeekFrom => (self.core.seek_from, "SeekFrom"),
                     lm_abi::AbiCore::FileKind => (self.core.file_kind, "FileKind"),

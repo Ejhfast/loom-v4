@@ -10,58 +10,60 @@ fn run(source: &str) -> String {
 #[test]
 fn posix_paths_normalize_and_split_lexically() {
     let source = r#"
-use std.path.PathStyle
+use std.path.extension
+use std.path.file_name
+use std.path.is_absolute
 use std.path.join
 use std.path.normalize
+use std.path.parent
+use std.path.stem
 
-path = normalize("/srv/./loom/../data/file.tar.gz", PathStyle.Posix).expect("valid path")
-joined = join("a/b", "../c", PathStyle.Posix).expect("valid join")
+path = normalize(Path("/srv/./loom/../data/file.tar.gz", PathStyle.Posix)).expect("valid path")
+joined = join(Path("a/b", PathStyle.Posix), "../c").expect("valid join")
 (
   path.value,
-  path.is_absolute(),
-  path.parent().expect("a parent exists").value,
-  path.file_name().expect("a name exists"),
-  path.extension().expect("an extension exists"),
-  path.stem().expect("a stem exists"),
+  is_absolute(path),
+  parent(path).expect("a parent exists").value,
+  file_name(path).expect("a name exists"),
+  extension(path).expect("an extension exists"),
+  stem(path).expect("a stem exists"),
   joined.value
 )
 "#;
 
     assert_eq!(
         run(source),
-        "Done((\"/srv/data/file.tar.gz\", true, \"/srv/data\", \"file.tar.gz\", \"gz\", \"file.tar\", \"a/c\"))"
+        "Done((\"/srv/data/file.tar.gz\", true, \"/srv/data\", \"file.tar.gz\", \"gz\", \"file.tar\", \"a/b/../c\"))"
     );
 }
 
 #[test]
-fn windows_paths_preserve_roots_and_use_one_separator() {
+fn windows_paths_preserve_roots_and_child_spelling() {
     let source = r#"
-use std.path.PathStyle
 use std.path.join
+use std.path.is_absolute
 use std.path.normalize
 
-drive = normalize("C:/work\\loom/../data", PathStyle.Windows).expect("valid drive path")
-unc = normalize("\\\\server\\share\\a\\..\\b", PathStyle.Windows).expect("valid UNC path")
-joined = join("C:\\work", "src/main.lm", PathStyle.Windows).expect("valid join")
-(drive.value, drive.is_absolute(), unc.value, joined.value)
+drive = normalize(Path("C:/work\\loom/../data", PathStyle.Windows)).expect("valid drive path")
+unc = normalize(Path("\\\\server\\share\\a\\..\\b", PathStyle.Windows)).expect("valid UNC path")
+joined = join(Path("C:\\work", PathStyle.Windows), "src/main.lm").expect("valid join")
+(drive.value, is_absolute(drive), unc.value, joined.value)
 "#;
 
     assert_eq!(
         run(source),
-        "Done((\"C:\\\\work\\\\data\", true, \"\\\\\\\\server\\\\share\\\\b\", \"C:\\\\work\\\\src\\\\main.lm\"))"
+        "Done((\"C:\\\\work\\\\data\", true, \"\\\\\\\\server\\\\share\\\\b\", \"C:\\\\work\\\\src/main.lm\"))"
     );
 }
 
 #[test]
 fn filesystem_helpers_accept_typed_paths() {
     let source = r#"
-use std.fs.read_path_sorted
-use std.path.PathStyle
-use std.path.normalize
+use std.fs.read_dir_sorted
 
 def go(): Int with Fs.ReadDir
-  path = normalize("/loom/.", PathStyle.Posix).expect("valid path")
-  read_path_sorted(path, 4).expect("the directory exists").len()
+  path = Path("/loom", PathStyle.Posix)
+  read_dir_sorted(path, 4).expect("the directory exists").len()
 end
 go()
 "#;

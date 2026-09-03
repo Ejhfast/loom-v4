@@ -4,7 +4,7 @@
 # refusal like any other file error.
 
 def read_secret(): String with Fs.Open, Fs.Close
-  case sys.fs.open("secret.txt", ReadOnly)
+  case sys.fs.open(Path("secret.txt", PathStyle.Posix), ReadOnly)
   in Ok(file)
     file.close()
     "the child opened the secret"
@@ -18,7 +18,7 @@ def allow_only(child: Run[String], permitted: String): String with Vm
     in Asked(request)
       case request
       in Call(Fs.Open, call, (path, _))
-        if path == permitted
+        if path.value == permitted
           child.dispatch(request)
         else
           child.answer(call, Err(Failed("#{path} is not permitted")))

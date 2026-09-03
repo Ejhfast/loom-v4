@@ -19,8 +19,8 @@ use compiler_service::{CompileRequest, CompilerService};
 use io_service::{FileRequest, IoService, StreamRequest};
 use lm_vm::{
     CompletionKey, CoreCtor, Host, HostArg, HostChildEnv, HostCompletion, HostExecSpec,
-    HostParseStatus, HostSignalKind, HostStart, HostSyntaxDiagnostic, HostTcpKind, HostTcpResource,
-    HostValue, HostWaitCancel, HostWake, SharedBytes,
+    HostParseStatus, HostPath, HostPathStyle, HostSignalKind, HostStart, HostSyntaxDiagnostic,
+    HostTcpKind, HostTcpResource, HostValue, HostWaitCancel, HostWake, SharedBytes,
 };
 use network_service::{
     NetworkService, TcpRequest, TlsClientSettings, TlsRequest, TlsServerSettings, UdpRequest,
@@ -534,6 +534,25 @@ fn current_dir_error(error: std::io::Error) -> HostValue {
     error_value(ctor, Some(message))
 }
 
+fn system_path(path: &HostPath) -> Result<String, &'static str> {
+    let native_style = if cfg!(windows) {
+        HostPathStyle::Windows
+    } else {
+        HostPathStyle::Posix
+    };
+    if path.style != native_style {
+        return Err("the path style does not match the host");
+    }
+    if path.text.contains('\0') {
+        return Err("the path contains a null byte");
+    }
+    Ok(path.text.to_string())
+}
+
+fn invalid_path(message: &str) -> HostStart {
+    HostStart::Completed(error_value(CoreCtor::FsErrorInvalidInput, Some(message)))
+}
+
 fn tty_error(error: terminal::TerminalError) -> HostValue {
     let (ctor, message) = match error {
         terminal::TerminalError::Closed => (CoreCtor::TtyClosed, None),
@@ -761,7 +780,10 @@ impl Host for CliHost {
             }
             lm_abi::OP_FS_CURRENT_DIR => match std::env::current_dir() {
                 Ok(path) => match path.into_os_string().into_string() {
-                    Ok(path) => HostStart::Completed(ok_value(HostValue::Str(path.into()))),
+                    Ok(path) => HostStart::Completed(ok_value(HostValue::Ctor(
+                        CoreCtor::Path,
+                        vec![HostValue::Str(path.into()), HostValue::Bool(cfg!(windows))],
+                    ))),
                     Err(_) => HostStart::Completed(error_value(
                         CoreCtor::FsErrorInvalidEncoding,
                         Some("the current directory is not valid UTF-8"),
@@ -1087,10 +1109,14 @@ impl Host for CliHost {
                 HostStart::Completed(HostValue::Int(value))
             }
             lm_abi::OP_FS_OPEN => {
-                let (Some(HostArg::Str(path)), Some(HostArg::OpenOptions(options))) =
+                let (Some(HostArg::Path(path)), Some(HostArg::OpenOptions(options))) =
                     (args.first(), args.get(1))
                 else {
                     return HostStart::Failed("Fs.Open needs a path and options".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 let file = self.next_file;
                 let Some(next) = file.checked_add(1) else {
@@ -1179,8 +1205,12 @@ impl Host for CliHost {
                 self.start_file(key, FileRequest::Close { file: *token })
             }
             lm_abi::OP_FS_STAT => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.Stat needs a path".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -1190,10 +1220,14 @@ impl Host for CliHost {
                 )
             }
             lm_abi::OP_FS_READ_DIR => {
-                let (Some(HostArg::Str(path)), Some(HostArg::Int(max_entries))) =
+                let (Some(HostArg::Path(path)), Some(HostArg::Int(max_entries))) =
                     (args.first(), args.get(1))
                 else {
                     return HostStart::Failed("Fs.ReadDir needs a path and limit".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 let Ok(max_entries) = usize::try_from(*max_entries) else {
                     return HostStart::Completed(error_value(
@@ -1216,8 +1250,12 @@ impl Host for CliHost {
                 )
             }
             lm_abi::OP_FS_CREATE_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.CreateDir needs a path".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -1227,8 +1265,12 @@ impl Host for CliHost {
                 )
             }
             lm_abi::OP_FS_REMOVE_FILE => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.RemoveFile needs a path".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -1238,8 +1280,12 @@ impl Host for CliHost {
                 )
             }
             lm_abi::OP_FS_REMOVE_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.RemoveDir needs a path".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -1250,12 +1296,20 @@ impl Host for CliHost {
             }
             lm_abi::OP_FS_RENAME => {
                 let (
-                    Some(HostArg::Str(from)),
-                    Some(HostArg::Str(to)),
+                    Some(HostArg::Path(from)),
+                    Some(HostArg::Path(to)),
                     Some(HostArg::RenameMode(mode)),
                 ) = (args.first(), args.get(1), args.get(2))
                 else {
                     return HostStart::Failed("Fs.Rename needs two paths and one mode".to_string());
+                };
+                let from = match system_path(from) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
+                };
+                let to = match system_path(to) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -1267,8 +1321,12 @@ impl Host for CliHost {
                 )
             }
             lm_abi::OP_FS_SYNC_DIR => {
-                let Some(HostArg::Str(path)) = args.first() else {
+                let Some(HostArg::Path(path)) = args.first() else {
                     return HostStart::Failed("Fs.SyncDir needs a path".to_string());
+                };
+                let path = match system_path(path) {
+                    Ok(path) => path,
+                    Err(message) => return invalid_path(message),
                 };
                 self.start_file(
                     key,
@@ -2141,6 +2199,17 @@ mod tests {
         HostArg::Tcp(HostTcpResource { kind, token })
     }
 
+    fn test_path(text: impl Into<String>) -> HostArg {
+        HostArg::Path(HostPath {
+            text: text.into().into(),
+            style: if cfg!(windows) {
+                HostPathStyle::Windows
+            } else {
+                HostPathStyle::Posix
+            },
+        })
+    }
+
     fn start_token(host: &mut CliHost, op: u32, args: Vec<HostArg>) -> u64 {
         match host.start(completion(), op, args) {
             HostStart::Waiting(token) => token,
@@ -2304,7 +2373,11 @@ mod tests {
         ));
         assert_eq!(missing, HostValue::Ctor(CoreCtor::None, vec![]));
         let directory = unwrap_ok_value(run_host(&mut host, lm_abi::OP_FS_CURRENT_DIR, vec![]));
-        assert!(matches!(directory, HostValue::Str(path) if !path.is_empty()));
+        assert!(matches!(
+            directory,
+            HostValue::Ctor(CoreCtor::Path, fields)
+                if matches!(fields.as_slice(), [HostValue::Str(path), HostValue::Bool(_)] if !path.is_empty())
+        ));
         let arguments = run_host(&mut host, lm_abi::OP_ARGS_GET, vec![]);
         assert_eq!(
             arguments,
@@ -2555,7 +2628,7 @@ mod tests {
             &mut host,
             lm_abi::OP_FS_OPEN,
             vec![
-                HostArg::Str(path_text.into()),
+                test_path(path_text),
                 HostArg::OpenOptions(HostOpenOptions::CreateTruncate),
             ],
         )) {
@@ -2626,13 +2699,13 @@ mod tests {
         unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_CREATE_DIR,
-            vec![HostArg::Str(directory_text.clone().into())],
+            vec![test_path(directory_text.clone())],
         ));
         let file = match unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_OPEN,
             vec![
-                HostArg::Str(temporary_text.clone().into()),
+                test_path(temporary_text.clone()),
                 HostArg::OpenOptions(HostOpenOptions::CreateNew),
             ],
         )) {
@@ -2656,20 +2729,20 @@ mod tests {
             &mut host,
             lm_abi::OP_FS_RENAME,
             vec![
-                HostArg::Str(temporary_text.into()),
-                HostArg::Str(target_text.clone().into()),
+                test_path(temporary_text),
+                test_path(target_text.clone()),
                 HostArg::RenameMode(HostRenameMode::Replace),
             ],
         ));
         unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_SYNC_DIR,
-            vec![HostArg::Str(directory_text.clone().into())],
+            vec![test_path(directory_text.clone())],
         ));
         let info = unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_STAT,
-            vec![HostArg::Str(target_text.clone().into())],
+            vec![test_path(target_text.clone())],
         ));
         assert!(matches!(
             info,
@@ -2682,12 +2755,12 @@ mod tests {
         unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_REMOVE_FILE,
-            vec![HostArg::Str(target_text.into())],
+            vec![test_path(target_text)],
         ));
         unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_REMOVE_DIR,
-            vec![HostArg::Str(directory_text.into())],
+            vec![test_path(directory_text)],
         ));
         assert!(!directory.0.exists());
     }
@@ -2712,7 +2785,7 @@ mod tests {
         let entries = unwrap_ok_value(run_host(
             &mut host,
             lm_abi::OP_FS_READ_DIR,
-            vec![HostArg::Str(path.into()), HostArg::Int(8)],
+            vec![test_path(path), HostArg::Int(8)],
         ));
 
         assert!(matches!(
