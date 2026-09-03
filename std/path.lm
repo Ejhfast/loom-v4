@@ -1,0 +1,317 @@
+# Standard library: platform-explicit lexical paths.
+
+enum PathStyle
+  Posix
+  Windows
+end
+
+enum PathError implements Error
+  ContainsNul
+  InvalidWindowsPrefix
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in ContainsNul          then "the path contains a null byte"
+    in InvalidWindowsPrefix then "the Windows path prefix is invalid"
+    end
+    builder.append(text)
+  end
+end
+
+frozen class Path implements Display, Hashable
+  value: String
+  windows: Bool
+
+  def init(mut self, value: String, style: PathStyle)
+    self.value = value
+    self.windows = style == PathStyle.Windows
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.value)
+  end
+
+  def __eq__(self, other: Path): Bool
+    self.value == other.value and self.windows == other.windows
+  end
+
+  def __hash__(self): Int
+    style_hash = if self.windows then 1 else 0 end
+    hash_combine(style_hash, hash_of(self.value))
+  end
+
+  def style(self): PathStyle
+    if self.windows then PathStyle.Windows else PathStyle.Posix end
+  end
+
+  def is_absolute(self): Bool
+    is_absolute(self.value, self.style())
+  end
+
+  def join(self, child: Text): Result[Path, PathError]
+    join(self.value, child, self.style())
+  end
+
+  def parent(self): Option[Path]
+    parent(self.value, self.style())
+  end
+
+  def file_name(self): Option[String]
+    file_name(self.value, self.style())
+  end
+
+  def extension(self): Option[String]
+    extension(self.value, self.style())
+  end
+
+  def stem(self): Option[String]
+    stem(self.value, self.style())
+  end
+end
+
+def _is_separator(byte: Int, style: PathStyle): Bool
+  case style
+  in PathStyle.Posix then byte == 47
+  in PathStyle.Windows then byte == 47 or byte == 92
+  end
+end
+
+def _separator(style: PathStyle): String
+  case style
+  in PathStyle.Posix then "/"
+  in PathStyle.Windows then "\\"
+  end
+end
+
+def _is_ascii_letter(byte: Int): Bool
+  (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+end
+
+def _contains_nul(text: Text): Bool
+  source = text.bytes()
+  index = 0
+  while index < source.len()
+    if source.at(index) == 0
+      return true
+    end
+    index = index + 1
+  end
+  false
+end
+
+def _text_part(text: Text, start: Int, length: Int): String
+  text.slice_bytes(start, length).expect("the path slice is valid").to_string()
+end
+
+def _has_windows_drive(text: Text): Bool
+  source = text.bytes()
+  source.len() >= 2 and _is_ascii_letter(source.at(0)) and source.at(1) == 58
+end
+
+def is_absolute(text: Text, style: PathStyle): Bool
+  source = text.bytes()
+  if source.is_empty()
+    return false
+  end
+  case style
+  in PathStyle.Posix
+    source.at(0) == 47
+  in PathStyle.Windows
+    (_has_windows_drive(text) and source.len() >= 3 and _is_separator(source.at(2), style)) or
+      (source.len() >= 2 and _is_separator(source.at(0), style) and
+        _is_separator(source.at(1), style))
+  end
+end
+
+def normalize(text: Text, style: PathStyle): Result[Path, PathError]
+  if _contains_nul(text)
+    return Err(PathError.ContainsNul)
+  end
+  source = text.bytes()
+  segments = List[String]()
+  prefix = ""
+  rooted = false
+  protected = 0
+  index = 0
+
+  case style
+  in PathStyle.Posix
+    if source.len() > 0 and source.at(0) == 47
+      rooted = true
+      index = 1
+    end
+  in PathStyle.Windows
+    if _has_windows_drive(text)
+      prefix = _text_part(text, 0, 2)
+      index = 2
+      if index < source.len() and _is_separator(source.at(index), style)
+        rooted = true
+        index = index + 1
+      end
+    elsif source.len() >= 2 and _is_separator(source.at(0), style) and
+      _is_separator(source.at(1), style)
+      rooted = true
+      prefix = "\\\\"
+      index = 2
+      protected = 2
+    elsif source.len() > 0 and _is_separator(source.at(0), style)
+      rooted = true
+      index = 1
+    end
+  end
+
+  while index <= source.len()
+    start = index
+    while index < source.len() and not _is_separator(source.at(index), style)
+      index = index + 1
+    end
+    if index > start
+      part = _text_part(text, start, index - start)
+      if part == "."
+        ()
+      elsif part == ".."
+        if segments.len() > protected and segments.last() != Some("..")
+          segments.pop()
+        elsif not rooted
+          segments.push(part)
+        end
+      else
+        segments.push(part)
+      end
+    end
+    while index < source.len() and _is_separator(source.at(index), style)
+      index = index + 1
+    end
+    if index == source.len()
+      break
+    end
+  end
+
+  if style == PathStyle.Windows and prefix == "\\\\" and segments.len() < 2
+    return Err(PathError.InvalidWindowsPrefix)
+  end
+
+  builder = StringBuilder()
+  builder.append(prefix)
+  separator = _separator(style)
+  if rooted and prefix != "\\\\"
+    builder.append(separator)
+  end
+  segment_index = 0
+  while segment_index < segments.len()
+    if segment_index > 0
+      builder.append(separator)
+    end
+    builder.append(segments.at(segment_index))
+    segment_index = segment_index + 1
+  end
+  if not rooted and prefix == "" and segments.is_empty()
+    builder.append(".")
+  end
+  Ok(Path(builder.finish(), style))
+end
+
+def join(base: Text, child: Text, style: PathStyle): Result[Path, PathError]
+  if is_absolute(child, style) or (style == PathStyle.Windows and _has_windows_drive(child))
+    return normalize(child, style)
+  end
+  if base.is_empty()
+    return normalize(child, style)
+  end
+  builder = StringBuilder()
+  builder.append(base)
+  source = base.bytes()
+  if source.len() > 0 and not _is_separator(source.at(source.len() - 1), style)
+    builder.append(_separator(style))
+  end
+  builder.append(child)
+  normalize(builder.finish(), style)
+end
+
+def _last_separator(text: Text, style: PathStyle): Int
+  source = text.bytes()
+  index = source.len() - 1
+  while index >= 0
+    if _is_separator(source.at(index), style)
+      return index
+    end
+    index = index - 1
+  end
+  -1
+end
+
+def parent(text: Text, style: PathStyle): Option[Path]
+  normalized = case normalize(text, style)
+  in Ok(value) then value
+  in Err(_) then return None
+  end
+  if normalized.value == "." or normalized.is_absolute() and
+    _last_separator(normalized.value, style) == normalized.value.byte_len() - 1
+    return None
+  end
+  at = _last_separator(normalized.value, style)
+  if at < 0
+    Some(Path(".", style))
+  elsif at == 0
+    Some(Path(_separator(style), style))
+  elsif style == PathStyle.Windows and at == 2 and _has_windows_drive(normalized.value)
+    Some(Path(_text_part(normalized.value, 0, 3), style))
+  else
+    Some(Path(_text_part(normalized.value, 0, at), style))
+  end
+end
+
+def file_name(text: Text, style: PathStyle): Option[String]
+  normalized = case normalize(text, style)
+  in Ok(value) then value
+  in Err(_) then return None
+  end
+  if normalized.value == "."
+    return None
+  end
+  at = _last_separator(normalized.value, style)
+  start = at + 1
+  if start >= normalized.value.byte_len()
+    None
+  else
+    Some(_text_part(normalized.value, start, normalized.value.byte_len() - start))
+  end
+end
+
+def _last_dot(text: Text): Int
+  source = text.bytes()
+  index = source.len() - 1
+  while index >= 0
+    if source.at(index) == 46
+      return index
+    end
+    index = index - 1
+  end
+  -1
+end
+
+def extension(text: Text, style: PathStyle): Option[String]
+  name = case file_name(text, style)
+  in Some(value) then value
+  in None then return None
+  end
+  at = _last_dot(name)
+  if at <= 0 or at + 1 >= name.byte_len()
+    None
+  else
+    Some(_text_part(name, at + 1, name.byte_len() - at - 1))
+  end
+end
+
+def stem(text: Text, style: PathStyle): Option[String]
+  name = case file_name(text, style)
+  in Some(value) then value
+  in None then return None
+  end
+  at = _last_dot(name)
+  if at <= 0
+    Some(name)
+  else
+    Some(_text_part(name, 0, at))
+  end
+end

@@ -5123,6 +5123,18 @@ Its integer sampling uses rejection. It does not use biased remainder reduction.
 
 Host-backed selection uses the exact `Rand.Int` row. Secure bytes and entropy seeding use `Entropy.Bytes`.
 
+`std.path` provides lexical path operations with explicit POSIX or Windows rules.
+
+`std.fs` accepts `Path` through typed helper functions. The core filesystem operations keep their portable `String` ABI.
+
+Path normalization removes `.` segments and resolves possible `..` segments. It does not access a filesystem.
+
+Path normalization is not an authorization check. Filesystem policy must validate the resolved host resource.
+
+`std.url` parses RFC 3986 URI references and absolute URLs. It preserves encoded components.
+
+URL resolution removes dot segments according to RFC 3986. Percent decoding has separate byte and UTF-8 forms.
+
 Core network code defines DNS, TCP, and native TLS stream operations.
 
 `std.tls` wraps TLS configuration and client operations.

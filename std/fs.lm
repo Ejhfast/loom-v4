@@ -1,5 +1,7 @@
 # Standard library: scoped and durable file helpers.
 
+use std.path.Path
+
 def with_file[T, effect e](
   path: String,
   options: OpenOptions,
@@ -16,6 +18,14 @@ def with_file[T, effect e](
     in Err(error) then Err(error)
     end
   end
+end
+
+def with_path[T, effect e](
+  path: Path,
+  options: OpenOptions,
+  body: (FileHandle) -> Result[T, FsError] with e
+): Result[T, FsError] with e, Fs.Open, Fs.Close
+  with_file(path.value, options, body)
 end
 
 def read_dir_sorted(
@@ -43,6 +53,13 @@ def read_dir_sorted(
     result.push(Err(error))
   end
   Ok(result)
+end
+
+def read_path_sorted(
+  path: Path,
+  max_entries: Int
+): Result[List[Result[DirEntry, FsError]], FsError] with Fs.ReadDir
+  read_dir_sorted(path.value, max_entries)
 end
 
 def write_file_all(
@@ -100,4 +117,13 @@ def durable_replace(
   in Ok(_)
     sys.fs.sync_dir(directory)
   end
+end
+
+def durable_replace_paths(
+  directory: Path,
+  temporary_path: Path,
+  target_path: Path,
+  bytes: Bytes
+): Result[(), FsError] with Fs.Open, Fs.Write, Fs.Flush, Fs.Sync, Fs.Close, Fs.RemoveFile, Fs.Rename, Fs.SyncDir
+  durable_replace(directory.value, temporary_path.value, target_path.value, bytes)
 end

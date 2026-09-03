@@ -1,0 +1,594 @@
+# Standard library: RFC 3986 URI references and absolute URLs.
+
+enum UrlError implements Error
+  InvalidSyntax
+  InvalidScheme
+  InvalidAuthority
+  InvalidPort
+  InvalidEncoding
+  InvalidUtf8
+  RelativeReference
+
+  def append_to(self, mut builder: StringBuilder)
+    text = case self
+    in InvalidSyntax     then "the URI reference has invalid syntax"
+    in InvalidScheme     then "the URI scheme is invalid"
+    in InvalidAuthority  then "the URI authority is invalid"
+    in InvalidPort       then "the URI port is invalid"
+    in InvalidEncoding   then "the percent encoding is invalid"
+    in InvalidUtf8       then "the decoded text is not valid UTF-8"
+    in RelativeReference then "the URI reference has no scheme"
+    end
+    builder.append(text)
+  end
+end
+
+frozen class Authority implements Display, Hashable
+  userinfo: String
+  has_userinfo: Bool
+  host: String
+  bracketed_host: Bool
+  port: Int
+  has_port: Bool
+
+  def init(
+    mut self,
+    userinfo: String,
+    has_userinfo: Bool,
+    host: String,
+    bracketed_host: Bool,
+    port: Int,
+    has_port: Bool
+  )
+    self.userinfo = userinfo
+    self.has_userinfo = has_userinfo
+    self.host = host
+    self.bracketed_host = bracketed_host
+    self.port = port
+    self.has_port = has_port
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    if self.has_userinfo
+      builder.append(self.userinfo)
+      builder.append("@")
+    end
+    if self.bracketed_host
+      builder.append("[")
+    end
+    builder.append(self.host)
+    if self.bracketed_host
+      builder.append("]")
+    end
+    if self.has_port
+      builder.append(":")
+      builder.append_int(self.port)
+    end
+  end
+
+  def __eq__(self, other: Authority): Bool
+    self.userinfo == other.userinfo and self.has_userinfo == other.has_userinfo and
+      self.host == other.host and self.bracketed_host == other.bracketed_host and
+      self.port == other.port and self.has_port == other.has_port
+  end
+
+  def __hash__(self): Int
+    value = hash_combine(hash_of(self.userinfo), hash_of(self.host))
+    value = hash_combine(value, self.port)
+    hash_combine(value, if self.has_port then 1 else 0 end)
+  end
+end
+
+frozen class UriReference implements Display, Hashable
+  scheme: String
+  has_scheme: Bool
+  authority: Authority
+  has_authority: Bool
+  path: String
+  query: String
+  has_query: Bool
+  fragment: String
+  has_fragment: Bool
+
+  def init(
+    mut self,
+    scheme: String,
+    has_scheme: Bool,
+    authority: Authority,
+    has_authority: Bool,
+    path: String,
+    query: String,
+    has_query: Bool,
+    fragment: String,
+    has_fragment: Bool
+  )
+    self.scheme = scheme
+    self.has_scheme = has_scheme
+    self.authority = authority
+    self.has_authority = has_authority
+    self.path = path
+    self.query = query
+    self.has_query = has_query
+    self.fragment = fragment
+    self.has_fragment = has_fragment
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    if self.has_scheme
+      builder.append(self.scheme)
+      builder.append(":")
+    end
+    if self.has_authority
+      builder.append("//")
+      self.authority.append_to(builder)
+    end
+    builder.append(self.path)
+    if self.has_query
+      builder.append("?")
+      builder.append(self.query)
+    end
+    if self.has_fragment
+      builder.append("#")
+      builder.append(self.fragment)
+    end
+  end
+
+  def __eq__(self, other: UriReference): Bool
+    self.scheme == other.scheme and self.has_scheme == other.has_scheme and
+      self.authority == other.authority and self.has_authority == other.has_authority and
+      self.path == other.path and self.query == other.query and
+      self.has_query == other.has_query and self.fragment == other.fragment and
+      self.has_fragment == other.has_fragment
+  end
+
+  def __hash__(self): Int
+    value = hash_combine(hash_of(self.scheme), hash_of(self.authority))
+    value = hash_combine(value, hash_of(self.path))
+    value = hash_combine(value, hash_of(self.query))
+    hash_combine(value, hash_of(self.fragment))
+  end
+end
+
+frozen class Url implements Display, Hashable
+  reference: UriReference
+
+  def init(mut self, reference: UriReference)
+    self.reference = reference
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    self.reference.append_to(builder)
+  end
+
+  def __eq__(self, other: Url): Bool
+    self.reference == other.reference
+  end
+
+  def __hash__(self): Int
+    hash_of(self.reference)
+  end
+
+  def scheme(self): String
+    self.reference.scheme
+  end
+
+  def authority(self): Option[Authority]
+    if self.reference.has_authority then Some(self.reference.authority) else None end
+  end
+
+  def path(self): String
+    self.reference.path
+  end
+
+  def query(self): Option[String]
+    if self.reference.has_query then Some(self.reference.query) else None end
+  end
+
+  def fragment(self): Option[String]
+    if self.reference.has_fragment then Some(self.reference.fragment) else None end
+  end
+end
+
+def _empty_authority(): Authority
+  Authority("", false, "", false, 0, false)
+end
+
+def _url_part(text: Text, start: Int, stop: Int): String
+  text.slice_bytes(start, stop - start).expect("the URI slice is valid").to_string()
+end
+
+def _url_hex_value(byte: Int): Int
+  if byte >= 48 and byte <= 57
+    byte - 48
+  elsif byte >= 65 and byte <= 70
+    byte - 55
+  elsif byte >= 97 and byte <= 102
+    byte - 87
+  else
+    -1
+  end
+end
+
+def _url_is_alpha(byte: Int): Bool
+  (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+end
+
+def _url_is_unreserved(byte: Int): Bool
+  _url_is_alpha(byte) or (byte >= 48 and byte <= 57) or byte == 45 or
+    byte == 46 or byte == 95 or byte == 126
+end
+
+def _url_is_sub_delimiter(byte: Int): Bool
+  byte == 33 or byte == 36 or byte == 38 or byte == 39 or byte == 40 or
+    byte == 41 or byte == 42 or byte == 43 or byte == 44 or byte == 59 or byte == 61
+end
+
+def _validate_url_range(
+  source: Bytes,
+  start: Int,
+  stop: Int,
+  kind: Int
+): Result[(), UrlError]
+  index = start
+  while index < stop
+    byte = source.at(index)
+    if byte == 37
+      if index + 2 >= stop or _url_hex_value(source.at(index + 1)) < 0 or
+        _url_hex_value(source.at(index + 2)) < 0
+        return Err(UrlError.InvalidEncoding)
+      end
+      index = index + 3
+    else
+      common = _url_is_unreserved(byte) or _url_is_sub_delimiter(byte)
+      allowed = if kind == 0
+        common or byte == 58 or byte == 64 or byte == 47
+      elsif kind == 1
+        common or byte == 58 or byte == 64 or byte == 47 or byte == 63
+      elsif kind == 2
+        common or byte == 58
+      elsif kind == 3
+        common
+      else
+        _url_is_alpha(byte) or (byte >= 48 and byte <= 57) or byte == 58 or byte == 46
+      end
+      if not allowed
+        return Err(UrlError.InvalidSyntax)
+      end
+      index = index + 1
+    end
+  end
+  Ok(())
+end
+
+def _parse_authority(text: Text, start: Int, stop: Int): Result[Authority, UrlError]
+  source = text.bytes()
+  at = -1
+  index = start
+  while index < stop
+    if source.at(index) == 64
+      at = index
+    end
+    index = index + 1
+  end
+  host_start = start
+  userinfo = ""
+  has_userinfo = at >= 0
+  if has_userinfo
+    _validate_url_range(source, start, at, 2)?
+    userinfo = _url_part(text, start, at)
+    host_start = at + 1
+  end
+
+  host = ""
+  bracketed = false
+  port = 0
+  has_port = false
+  if host_start < stop and source.at(host_start) == 91
+    bracketed = true
+    close = host_start + 1
+    while close < stop and source.at(close) != 93
+      close = close + 1
+    end
+    if close >= stop
+      return Err(UrlError.InvalidAuthority)
+    end
+    _validate_url_range(source, host_start + 1, close, 4)?
+    host = _url_part(text, host_start + 1, close)
+    if close + 1 < stop
+      if source.at(close + 1) != 58
+        return Err(UrlError.InvalidAuthority)
+      end
+      has_port = true
+      port_text = _url_part(text, close + 2, stop)
+      port = case port_text.parse_int(10)
+      in Ok(value) then value
+      in Err(_) then return Err(UrlError.InvalidPort)
+      end
+    end
+  else
+    colon = -1
+    index = host_start
+    while index < stop
+      if source.at(index) == 58
+        if colon >= 0
+          return Err(UrlError.InvalidAuthority)
+        end
+        colon = index
+      end
+      index = index + 1
+    end
+    host_stop = if colon >= 0 then colon else stop end
+    _validate_url_range(source, host_start, host_stop, 3)?
+    host = _url_part(text, host_start, host_stop)
+    if colon >= 0
+      has_port = true
+      port_text = _url_part(text, colon + 1, stop)
+      port = case port_text.parse_int(10)
+      in Ok(value) then value
+      in Err(_) then return Err(UrlError.InvalidPort)
+      end
+    end
+  end
+  if has_port and (port < 0 or port > 65535)
+    return Err(UrlError.InvalidPort)
+  end
+  Ok(Authority(userinfo, has_userinfo, host, bracketed, port, has_port))
+end
+
+def parse_reference(text: Text): Result[UriReference, UrlError]
+  source = text.bytes()
+  scheme = ""
+  has_scheme = false
+  cursor = 0
+  colon = -1
+  index = 0
+  while index < source.len() and source.at(index) != 47 and source.at(index) != 63 and
+    source.at(index) != 35
+    if source.at(index) == 58
+      colon = index
+      break
+    end
+    index = index + 1
+  end
+  if colon >= 0
+    if colon == 0 or not _url_is_alpha(source.at(0))
+      return Err(UrlError.InvalidScheme)
+    end
+    index = 1
+    while index < colon
+      byte = source.at(index)
+      if not (_url_is_alpha(byte) or (byte >= 48 and byte <= 57) or byte == 43 or
+        byte == 45 or byte == 46)
+        return Err(UrlError.InvalidScheme)
+      end
+      index = index + 1
+    end
+    scheme = _url_part(text, 0, colon).to_lower_ascii()
+    has_scheme = true
+    cursor = colon + 1
+  end
+
+  authority = _empty_authority()
+  has_authority = false
+  if cursor + 1 < source.len() and source.at(cursor) == 47 and source.at(cursor + 1) == 47
+    has_authority = true
+    cursor = cursor + 2
+    stop = cursor
+    while stop < source.len() and source.at(stop) != 47 and source.at(stop) != 63 and
+      source.at(stop) != 35
+      stop = stop + 1
+    end
+    authority = _parse_authority(text, cursor, stop)?
+    cursor = stop
+  end
+
+  path_stop = cursor
+  while path_stop < source.len() and source.at(path_stop) != 63 and source.at(path_stop) != 35
+    path_stop = path_stop + 1
+  end
+  _validate_url_range(source, cursor, path_stop, 0)?
+  path = _url_part(text, cursor, path_stop)
+  cursor = path_stop
+
+  query = ""
+  has_query = false
+  if cursor < source.len() and source.at(cursor) == 63
+    has_query = true
+    cursor = cursor + 1
+    query_stop = cursor
+    while query_stop < source.len() and source.at(query_stop) != 35
+      query_stop = query_stop + 1
+    end
+    _validate_url_range(source, cursor, query_stop, 1)?
+    query = _url_part(text, cursor, query_stop)
+    cursor = query_stop
+  end
+
+  fragment = ""
+  has_fragment = false
+  if cursor < source.len() and source.at(cursor) == 35
+    has_fragment = true
+    cursor = cursor + 1
+    _validate_url_range(source, cursor, source.len(), 1)?
+    fragment = _url_part(text, cursor, source.len())
+  end
+  Ok(UriReference(
+    scheme,
+    has_scheme,
+    authority,
+    has_authority,
+    path,
+    query,
+    has_query,
+    fragment,
+    has_fragment
+  ))
+end
+
+def parse_url(text: Text): Result[Url, UrlError]
+  reference = parse_reference(text)?
+  if not reference.has_scheme
+    Err(UrlError.RelativeReference)
+  else
+    Ok(Url(reference))
+  end
+end
+
+def _remove_dot_segments(path: Text): String
+  parts = path.split("/")
+  output = List[String]()
+  absolute = path.starts_with("/")
+  index = 0
+  while index < parts.len()
+    part = parts.at(index).to_string()
+    final_part = index + 1 == parts.len()
+    if part == "."
+      if final_part
+        output.push("")
+      end
+    elsif part == ".."
+      minimum = if absolute then 1 else 0 end
+      if output.len() > minimum
+        output.pop()
+      end
+      if final_part
+        output.push("")
+      end
+    else
+      output.push(part)
+    end
+    index = index + 1
+  end
+  builder = StringBuilder()
+  index = 0
+  while index < output.len()
+    if index > 0
+      builder.append("/")
+    end
+    builder.append(output.at(index))
+    index = index + 1
+  end
+  builder.finish()
+end
+
+def _merge_url_path(base: UriReference, path: Text): String
+  if base.has_authority and base.path.is_empty()
+    return "/" + path
+  end
+  source = base.path.bytes()
+  slash = -1
+  index = 0
+  while index < source.len()
+    if source.at(index) == 47
+      slash = index
+    end
+    index = index + 1
+  end
+  if slash < 0
+    path.to_string()
+  else
+    _url_part(base.path, 0, slash + 1) + path
+  end
+end
+
+def resolve(base: Url, relative: UriReference): Result[Url, UrlError]
+  if relative.has_scheme
+    return Ok(Url(UriReference(
+      relative.scheme,
+      true,
+      relative.authority,
+      relative.has_authority,
+      _remove_dot_segments(relative.path),
+      relative.query,
+      relative.has_query,
+      relative.fragment,
+      relative.has_fragment
+    )))
+  end
+  origin = base.reference
+  authority = if relative.has_authority then relative.authority else origin.authority end
+  has_authority = relative.has_authority or origin.has_authority
+  path = if relative.has_authority
+    _remove_dot_segments(relative.path)
+  elsif relative.path.is_empty()
+    origin.path
+  elsif relative.path.starts_with("/")
+    _remove_dot_segments(relative.path)
+  else
+    _remove_dot_segments(_merge_url_path(origin, relative.path))
+  end
+  query = if relative.has_query
+    relative.query
+  elsif relative.path.is_empty() and origin.has_query
+    origin.query
+  else
+    ""
+  end
+  has_query = relative.has_query or (relative.path.is_empty() and origin.has_query)
+  Ok(Url(UriReference(
+    origin.scheme,
+    true,
+    authority,
+    has_authority,
+    path,
+    query,
+    has_query,
+    relative.fragment,
+    relative.has_fragment
+  )))
+end
+
+def _url_hex_digit(value: Int): Int
+  if value < 10 then value + 48 else value + 55 end
+end
+
+def percent_encode_component(text: Text): String
+  source = text.bytes()
+  output = ByteBuffer()
+  index = 0
+  while index < source.len()
+    byte = source.at(index)
+    if _url_is_unreserved(byte)
+      output.append(byte)
+    else
+      output.append(37)
+      output.append(_url_hex_digit(byte >> 4))
+      output.append(_url_hex_digit(byte & 15))
+    end
+    index = index + 1
+  end
+  output.finish().text()
+end
+
+def percent_decode_bytes(text: Text): Result[Bytes, UrlError]
+  source = text.bytes()
+  output = ByteBuffer()
+  index = 0
+  while index < source.len()
+    byte = source.at(index)
+    if byte == 37
+      if index + 2 >= source.len()
+        return Err(UrlError.InvalidEncoding)
+      end
+      high = _url_hex_value(source.at(index + 1))
+      low = _url_hex_value(source.at(index + 2))
+      if high < 0 or low < 0
+        return Err(UrlError.InvalidEncoding)
+      end
+      output.append((high << 4) | low)
+      index = index + 3
+    else
+      output.append(byte)
+      index = index + 1
+    end
+  end
+  Ok(output.finish())
+end
+
+def percent_decode(text: Text): Result[String, UrlError]
+  decoded = percent_decode_bytes(text)?
+  case decoded.utf8()
+  in Ok(value) then Ok(value)
+  in Err(_) then Err(UrlError.InvalidUtf8)
+  end
+end

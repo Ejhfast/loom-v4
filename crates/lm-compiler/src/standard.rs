@@ -20,6 +20,8 @@ const BASE64_PATH: &str = "std.base64";
 const JSON_PATH: &str = "std.json";
 const TIME_PATH: &str = "std.time";
 const RANDOM_PATH: &str = "std.random";
+const PATH_PATH: &str = "std.path";
+const URL_PATH: &str = "std.url";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
@@ -30,6 +32,8 @@ const BASE64_SOURCE: &str = include_str!("../../../std/base64.lm");
 const JSON_SOURCE: &str = include_str!("../../../std/json.lm");
 const TIME_SOURCE: &str = include_str!("../../../std/time.lm");
 const RANDOM_SOURCE: &str = include_str!("../../../std/random.lm");
+const PATH_SOURCE: &str = include_str!("../../../std/path.lm");
+const URL_SOURCE: &str = include_str!("../../../std/url.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
@@ -40,6 +44,8 @@ static BASE64: OnceLock<CompiledModule> = OnceLock::new();
 static JSON: OnceLock<CompiledModule> = OnceLock::new();
 static TIME: OnceLock<CompiledModule> = OnceLock::new();
 static RANDOM: OnceLock<CompiledModule> = OnceLock::new();
+static PATH: OnceLock<CompiledModule> = OnceLock::new();
+static URL: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
@@ -73,6 +79,8 @@ impl StandardCatalog {
             JSON_PATH,
             TIME_PATH,
             RANDOM_PATH,
+            PATH_PATH,
+            URL_PATH,
         ]
     }
 
@@ -90,6 +98,8 @@ impl StandardCatalog {
             JSON_PATH => Some(json()),
             TIME_PATH => Some(time()),
             RANDOM_PATH => Some(random()),
+            PATH_PATH => Some(path_module()),
+            URL_PATH => Some(url_module()),
             _ => None,
         }
     }
@@ -105,10 +115,15 @@ impl StandardCatalog {
         let mut needs_json = false;
         let mut needs_time = false;
         let mut needs_random = false;
+        let mut needs_path = false;
+        let mut needs_url = false;
         for path in paths {
             match *path {
                 IO_PATH => needs_io = true,
-                FS_PATH => needs_fs = true,
+                FS_PATH => {
+                    needs_fs = true;
+                    needs_path = true;
+                }
                 TERM_PATH => needs_term = true,
                 TLS_PATH => needs_tls = true,
                 HTTP_PATH => {
@@ -119,6 +134,8 @@ impl StandardCatalog {
                 JSON_PATH => needs_json = true,
                 TIME_PATH => needs_time = true,
                 RANDOM_PATH => needs_random = true,
+                PATH_PATH => needs_path = true,
+                URL_PATH => needs_url = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
@@ -132,6 +149,8 @@ impl StandardCatalog {
             needs_json,
             needs_time,
             needs_random,
+            needs_path,
+            needs_url,
         ))
     }
 
@@ -190,7 +209,7 @@ fn io() -> &'static CompiledModule {
 }
 
 fn fs() -> &'static CompiledModule {
-    FS.get_or_init(|| compile_bundled(FS_PATH, "std/fs.lm", FS_SOURCE, &[]))
+    FS.get_or_init(|| compile_bundled(FS_PATH, "std/fs.lm", FS_SOURCE, &[path_module()]))
 }
 
 fn term() -> &'static CompiledModule {
@@ -217,6 +236,14 @@ fn random() -> &'static CompiledModule {
     RANDOM.get_or_init(|| compile_bundled(RANDOM_PATH, "std/random.lm", RANDOM_SOURCE, &[]))
 }
 
+fn path_module() -> &'static CompiledModule {
+    PATH.get_or_init(|| compile_bundled(PATH_PATH, "std/path.lm", PATH_SOURCE, &[]))
+}
+
+fn url_module() -> &'static CompiledModule {
+    URL.get_or_init(|| compile_bundled(URL_PATH, "std/url.lm", URL_SOURCE, &[]))
+}
+
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
     [
@@ -229,6 +256,8 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
         JSON_PATH,
         TIME_PATH,
         RANDOM_PATH,
+        PATH_PATH,
+        URL_PATH,
     ]
     .into_iter()
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
@@ -244,8 +273,13 @@ fn selected_modules(
     needs_json: bool,
     needs_time: bool,
     needs_random: bool,
+    needs_path: bool,
+    needs_url: bool,
 ) -> Vec<&'static CompiledModule> {
     let mut modules = Vec::new();
+    if needs_path {
+        modules.push(path_module());
+    }
     if needs_io {
         modules.push(io());
     }
@@ -273,6 +307,9 @@ fn selected_modules(
     if needs_random {
         modules.push(random());
     }
+    if needs_url {
+        modules.push(url_module());
+    }
     modules
 }
 
@@ -287,10 +324,15 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
     let mut needs_json = false;
     let mut needs_time = false;
     let mut needs_random = false;
+    let mut needs_path = false;
+    let mut needs_url = false;
     for path in uses {
         match module_for_use(path) {
             Some(IO_PATH) => needs_io = true,
-            Some(FS_PATH) => needs_fs = true,
+            Some(FS_PATH) => {
+                needs_fs = true;
+                needs_path = true;
+            }
             Some(TERM_PATH) => needs_term = true,
             Some(TLS_PATH) => needs_tls = true,
             Some(HTTP_PATH) => {
@@ -301,6 +343,8 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
             Some(JSON_PATH) => needs_json = true,
             Some(TIME_PATH) => needs_time = true,
             Some(RANDOM_PATH) => needs_random = true,
+            Some(PATH_PATH) => needs_path = true,
+            Some(URL_PATH) => needs_url = true,
             _ => {}
         }
     }
@@ -314,6 +358,8 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
         needs_json,
         needs_time,
         needs_random,
+        needs_path,
+        needs_url,
     )
 }
 
@@ -386,6 +432,8 @@ mod tests {
                 JSON_PATH,
                 TIME_PATH,
                 RANDOM_PATH,
+                PATH_PATH,
+                URL_PATH,
             ]
         );
         assert!(modules_for_uses(&[]).is_empty());
@@ -426,7 +474,7 @@ mod tests {
     #[test]
     fn file_source_selects_only_file_helpers() {
         let compiled = compile("use std.fs.read_dir_sorted\nread_dir_sorted(\".\", 4)\n");
-        assert_eq!(compiled.standard_modules, &[FS_PATH]);
+        assert_eq!(compiled.standard_modules, &[PATH_PATH, FS_PATH]);
     }
 
     #[test]
@@ -463,5 +511,19 @@ mod tests {
     fn random_source_selects_only_random() {
         let compiled = compile("use std.random.seeded\nseeded(1).next_bits()\n");
         assert_eq!(compiled.standard_modules, &[RANDOM_PATH]);
+    }
+
+    #[test]
+    fn path_source_selects_only_path() {
+        let compiled = compile(
+            "use std.path.PathStyle\nuse std.path.normalize\nnormalize(\"a\", PathStyle.Posix)\n",
+        );
+        assert_eq!(compiled.standard_modules, &[PATH_PATH]);
+    }
+
+    #[test]
+    fn url_source_selects_only_url() {
+        let compiled = compile("use std.url.parse_url\nparse_url(\"https://example.com\")\n");
+        assert_eq!(compiled.standard_modules, &[URL_PATH]);
     }
 }
