@@ -1,0 +1,44 @@
+def near(left: Float, right: Float): Bool
+  (left - right).abs() < 0.000000000001
+end
+
+def math_surface(): Bool
+  checks = [
+    5.5 % 2.0 == 1.5,
+    3.0.copy_sign(-1.0) == -3.0,
+    2.0.mul_add(3.0, 4.0) == 10.0,
+    2.0.pow(10.0) == 1024.0,
+    near(1.0.exp(), 2.718281828459045),
+    3.0.exp2() == 8.0,
+    0.0.exp_m1() == 0.0,
+    near(2.718281828459045.ln(), 1.0),
+    8.0.log2() == 3.0,
+    1000.0.log10() == 3.0,
+    near(1.718281828459045.ln_1p(), 1.0),
+    27.0.cbrt() == 3.0,
+    3.0.hypot(4.0) == 5.0,
+    0.0.sin() == 0.0,
+    0.0.cos() == 1.0,
+    0.0.tan() == 0.0,
+    0.0.asin() == 0.0,
+    1.0.acos() == 0.0,
+    0.0.atan() == 0.0,
+    0.0.atan2(1.0) == 0.0,
+    0.0.sinh() == 0.0,
+    0.0.cosh() == 1.0,
+    0.0.tanh() == 0.0,
+    0.0.asinh() == 0.0,
+    1.0.acosh() == 0.0,
+    0.0.atanh() == 0.0,
+    (-1.0).ln().bits() == 9221120237041090560,
+    (-4.0 % 2.0).bits() == (-0.0).bits()
+  ]
+  for check in checks
+    if not check
+      return false
+    end
+  end
+  true
+end
+
+math_surface()

@@ -125,6 +125,78 @@ pub(super) fn emit_numeric_instruction(
             let value = canonical_float(builder, value);
             push_static(builder, stack, ScalarKind::Float, value)?;
         }
+        NumericInstr::FloatRem
+        | NumericInstr::FloatCopySign
+        | NumericInstr::FloatPow
+        | NumericInstr::FloatHypot
+        | NumericInstr::FloatAtan2 => {
+            let right = float_value(builder, pop_native(stack)?);
+            let left = float_value(builder, pop_native(stack)?);
+            let function = match operation {
+                NumericInstr::FloatRem => values.math.remainder,
+                NumericInstr::FloatCopySign => values.math.copy_sign,
+                NumericInstr::FloatPow => values.math.pow,
+                NumericInstr::FloatHypot => values.math.hypot,
+                NumericInstr::FloatAtan2 => values.math.atan2,
+                _ => unreachable!(),
+            };
+            let value = emit_math_call(builder, function, &[left, right])?;
+            push_static(builder, stack, ScalarKind::Float, value)?;
+        }
+        NumericInstr::FloatMulAdd => {
+            let addend = float_value(builder, pop_native(stack)?);
+            let multiplier = float_value(builder, pop_native(stack)?);
+            let value = float_value(builder, pop_native(stack)?);
+            let value = emit_math_call(builder, values.math.mul_add, &[value, multiplier, addend])?;
+            push_static(builder, stack, ScalarKind::Float, value)?;
+        }
+        NumericInstr::FloatExp
+        | NumericInstr::FloatExp2
+        | NumericInstr::FloatExpM1
+        | NumericInstr::FloatLn
+        | NumericInstr::FloatLog2
+        | NumericInstr::FloatLog10
+        | NumericInstr::FloatLn1P
+        | NumericInstr::FloatCbrt
+        | NumericInstr::FloatSin
+        | NumericInstr::FloatCos
+        | NumericInstr::FloatTan
+        | NumericInstr::FloatAsin
+        | NumericInstr::FloatAcos
+        | NumericInstr::FloatAtan
+        | NumericInstr::FloatSinh
+        | NumericInstr::FloatCosh
+        | NumericInstr::FloatTanh
+        | NumericInstr::FloatAsinh
+        | NumericInstr::FloatAcosh
+        | NumericInstr::FloatAtanh => {
+            let input = float_value(builder, pop_native(stack)?);
+            let function = match operation {
+                NumericInstr::FloatExp => values.math.exp,
+                NumericInstr::FloatExp2 => values.math.exp2,
+                NumericInstr::FloatExpM1 => values.math.exp_m1,
+                NumericInstr::FloatLn => values.math.ln,
+                NumericInstr::FloatLog2 => values.math.log2,
+                NumericInstr::FloatLog10 => values.math.log10,
+                NumericInstr::FloatLn1P => values.math.ln_1p,
+                NumericInstr::FloatCbrt => values.math.cbrt,
+                NumericInstr::FloatSin => values.math.sin,
+                NumericInstr::FloatCos => values.math.cos,
+                NumericInstr::FloatTan => values.math.tan,
+                NumericInstr::FloatAsin => values.math.asin,
+                NumericInstr::FloatAcos => values.math.acos,
+                NumericInstr::FloatAtan => values.math.atan,
+                NumericInstr::FloatSinh => values.math.sinh,
+                NumericInstr::FloatCosh => values.math.cosh,
+                NumericInstr::FloatTanh => values.math.tanh,
+                NumericInstr::FloatAsinh => values.math.asinh,
+                NumericInstr::FloatAcosh => values.math.acosh,
+                NumericInstr::FloatAtanh => values.math.atanh,
+                _ => unreachable!(),
+            };
+            let value = emit_math_call(builder, function, &[input])?;
+            push_static(builder, stack, ScalarKind::Float, value)?;
+        }
         NumericInstr::FloatMin | NumericInstr::FloatMax => {
             let right = float_value(builder, pop_native(stack)?);
             let left = float_value(builder, pop_native(stack)?);
@@ -242,6 +314,19 @@ pub(super) fn emit_numeric_instruction(
         }
     }
     Ok(())
+}
+
+fn emit_math_call(
+    builder: &mut FunctionBuilder<'_>,
+    function: ir::FuncRef,
+    arguments: &[ir::Value],
+) -> Result<ir::Value, CompileError> {
+    let call = builder.ins().call(function, arguments);
+    let value = *builder
+        .inst_results(call)
+        .first()
+        .ok_or(CompileError::Backend)?;
+    Ok(canonical_float(builder, value))
 }
 
 pub(super) fn float_is_finite(builder: &mut FunctionBuilder<'_>, bits: ir::Value) -> ir::Value {

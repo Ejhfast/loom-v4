@@ -485,6 +485,7 @@ dependencies = [
  "lm-abi",
  "lm-bytecode",
  "lm-heap",
+ "lm-math",
  "lm-value",
  "lm-verify",
 ]
@@ -538,6 +539,7 @@ dependencies = [
  "lm-host",
  "lm-jit",
  "lm-link",
+ "lm-math",
  "lm-proc",
  "lm-source",
  "lm-types",
@@ -576,6 +578,7 @@ dependencies = [
  "lm-heap",
  "lm-jit",
  "lm-link",
+ "lm-math",
  "lm-value",
  "lm-verify",
 ]

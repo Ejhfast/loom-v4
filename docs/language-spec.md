@@ -1173,7 +1173,19 @@ Other classes use reference identity for direct equality unless they implement `
 
 `and` and `or` remain control-flow operators. They evaluate the right operand only when required.
 
-For `Int`, `+`, `-`, and `*` are checked; `/` truncates toward zero; `%` has the dividend's sign; divide-by-zero and the one overflowing division case fault. For `Float`, `+`, `-`, `*`, and `/` follow the deterministic binary64 rules in section 2.4; division by zero produces the corresponding infinity or NaN and `%` is not defined. There is no implicit numeric conversion.
+`Int` uses checked `+`, `-`, and `*` operations.
+
+Its `/` truncates toward zero. Its `%` keeps the dividend's sign.
+
+Division by zero faults. The one overflowing division case also faults.
+
+`Float` arithmetic follows the binary64 rules in section 2.4.
+
+Float division by zero produces infinity or NaN.
+
+Float remainder uses truncating division and keeps the dividend's sign.
+
+There is no implicit numeric conversion.
 
 The `Int` operators `&`, `|`, `^`, and `~` use all 64 payload bits.
 
@@ -1228,6 +1240,14 @@ They select negative zero for a minimum and positive zero for a maximum.
 `Float.sqrt`, `floor`, `ceil`, and `trunc` use their binary64 operations.
 
 `Float.round` rounds to the nearest integer value. A tie rounds to the even value.
+
+Advanced Float operations use the pinned `lm-math` algorithm revision. Version 0.2 uses `libm` 0.2.16 without architecture-specific routines.
+
+`Float.mul_add` performs one fused operation. It does not round the multiplication separately.
+
+`Float.atan2` treats its receiver as the vertical coordinate. Its argument is the horizontal coordinate.
+
+Every advanced operation canonicalizes a NaN result. Finite rounding can differ between target architectures.
 
 `Float.is_finite` rejects infinities and NaN.
 
@@ -4799,6 +4819,31 @@ floor() -> Float
 ceil() -> Float
 round() -> Float
 trunc() -> Float
+copy_sign(sign: Float) -> Float
+mul_add(multiplier: Float, addend: Float) -> Float
+pow(exponent: Float) -> Float
+exp() -> Float
+exp2() -> Float
+exp_m1() -> Float
+ln() -> Float
+log2() -> Float
+log10() -> Float
+ln_1p() -> Float
+cbrt() -> Float
+hypot(other: Float) -> Float
+sin() -> Float
+cos() -> Float
+tan() -> Float
+asin() -> Float
+acos() -> Float
+atan() -> Float
+atan2(other: Float) -> Float
+sinh() -> Float
+cosh() -> Float
+tanh() -> Float
+asinh() -> Float
+acosh() -> Float
+atanh() -> Float
 bits() -> Int
 to_int() -> Result[Int,FloatToIntError]
 fixed(digits: Int) -> String

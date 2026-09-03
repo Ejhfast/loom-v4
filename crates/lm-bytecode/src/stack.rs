@@ -235,6 +235,26 @@ fn numeric_stack_effect(instruction: NumericInstr) -> (usize, usize) {
         | NumericInstr::FloatCeil
         | NumericInstr::FloatRound
         | NumericInstr::FloatTrunc
+        | NumericInstr::FloatExp
+        | NumericInstr::FloatExp2
+        | NumericInstr::FloatExpM1
+        | NumericInstr::FloatLn
+        | NumericInstr::FloatLog2
+        | NumericInstr::FloatLog10
+        | NumericInstr::FloatLn1P
+        | NumericInstr::FloatCbrt
+        | NumericInstr::FloatSin
+        | NumericInstr::FloatCos
+        | NumericInstr::FloatTan
+        | NumericInstr::FloatAsin
+        | NumericInstr::FloatAcos
+        | NumericInstr::FloatAtan
+        | NumericInstr::FloatSinh
+        | NumericInstr::FloatCosh
+        | NumericInstr::FloatTanh
+        | NumericInstr::FloatAsinh
+        | NumericInstr::FloatAcosh
+        | NumericInstr::FloatAtanh
         | NumericInstr::FloatIsNan
         | NumericInstr::FloatIsFinite
         | NumericInstr::FloatIsInfinite
@@ -269,11 +289,17 @@ fn numeric_stack_effect(instruction: NumericInstr) -> (usize, usize) {
         | NumericInstr::FloatGe
         | NumericInstr::FloatMin
         | NumericInstr::FloatMax
+        | NumericInstr::FloatRem
+        | NumericInstr::FloatCopySign
+        | NumericInstr::FloatPow
+        | NumericInstr::FloatHypot
+        | NumericInstr::FloatAtan2
         | NumericInstr::FloatFixed
         | NumericInstr::SbAppendFloat
         | NumericInstr::BytesBitAnd
         | NumericInstr::BytesBitOr
         | NumericInstr::BytesBitXor => (2, 1),
+        NumericInstr::FloatMulAdd => (3, 1),
     }
 }
 

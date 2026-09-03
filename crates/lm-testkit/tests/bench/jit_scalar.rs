@@ -51,6 +51,22 @@ fn bench_jit_numeric_protocol_dispatch() {
 
 #[test]
 #[ignore]
+fn bench_jit_float_math() {
+    report_jit_representative(
+        "jit_float_math",
+        concat!(
+            "index = 0\nvalue = 0.125\ntotal = 0.0\n",
+            "while index < 1000000\n",
+            "  total = total + value.sin() + value.cos()\n",
+            "  value = value + 0.000001\n",
+            "  index = index + 1\n",
+            "end\ntotal\n",
+        ),
+    );
+}
+
+#[test]
+#[ignore]
 fn bench_jit_inline_leaf_scheduler() {
     report_jit_representative(
         "jit_inline_leaf_scheduler",

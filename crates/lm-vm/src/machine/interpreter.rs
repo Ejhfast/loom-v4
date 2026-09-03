@@ -1050,6 +1050,75 @@ impl Machine {
                 };
                 self.push_float(value)?;
             }
+            NumericInstr::FloatRem
+            | NumericInstr::FloatCopySign
+            | NumericInstr::FloatPow
+            | NumericInstr::FloatHypot
+            | NumericInstr::FloatAtan2 => {
+                let right = self.pop_float()?;
+                let left = self.pop_float()?;
+                let value = match instr {
+                    NumericInstr::FloatRem => lm_math::remainder(left, right),
+                    NumericInstr::FloatCopySign => lm_math::copy_sign(left, right),
+                    NumericInstr::FloatPow => lm_math::pow(left, right),
+                    NumericInstr::FloatHypot => lm_math::hypot(left, right),
+                    NumericInstr::FloatAtan2 => lm_math::atan2(left, right),
+                    _ => unreachable!(),
+                };
+                self.push_float(value)?;
+            }
+            NumericInstr::FloatMulAdd => {
+                let addend = self.pop_float()?;
+                let multiplier = self.pop_float()?;
+                let value = self.pop_float()?;
+                self.push_float(lm_math::mul_add(value, multiplier, addend))?;
+            }
+            NumericInstr::FloatExp
+            | NumericInstr::FloatExp2
+            | NumericInstr::FloatExpM1
+            | NumericInstr::FloatLn
+            | NumericInstr::FloatLog2
+            | NumericInstr::FloatLog10
+            | NumericInstr::FloatLn1P
+            | NumericInstr::FloatCbrt
+            | NumericInstr::FloatSin
+            | NumericInstr::FloatCos
+            | NumericInstr::FloatTan
+            | NumericInstr::FloatAsin
+            | NumericInstr::FloatAcos
+            | NumericInstr::FloatAtan
+            | NumericInstr::FloatSinh
+            | NumericInstr::FloatCosh
+            | NumericInstr::FloatTanh
+            | NumericInstr::FloatAsinh
+            | NumericInstr::FloatAcosh
+            | NumericInstr::FloatAtanh => {
+                let input = self.pop_float()?;
+                let value = match instr {
+                    NumericInstr::FloatExp => lm_math::exp(input),
+                    NumericInstr::FloatExp2 => lm_math::exp2(input),
+                    NumericInstr::FloatExpM1 => lm_math::exp_m1(input),
+                    NumericInstr::FloatLn => lm_math::ln(input),
+                    NumericInstr::FloatLog2 => lm_math::log2(input),
+                    NumericInstr::FloatLog10 => lm_math::log10(input),
+                    NumericInstr::FloatLn1P => lm_math::ln_1p(input),
+                    NumericInstr::FloatCbrt => lm_math::cbrt(input),
+                    NumericInstr::FloatSin => lm_math::sin(input),
+                    NumericInstr::FloatCos => lm_math::cos(input),
+                    NumericInstr::FloatTan => lm_math::tan(input),
+                    NumericInstr::FloatAsin => lm_math::asin(input),
+                    NumericInstr::FloatAcos => lm_math::acos(input),
+                    NumericInstr::FloatAtan => lm_math::atan(input),
+                    NumericInstr::FloatSinh => lm_math::sinh(input),
+                    NumericInstr::FloatCosh => lm_math::cosh(input),
+                    NumericInstr::FloatTanh => lm_math::tanh(input),
+                    NumericInstr::FloatAsinh => lm_math::asinh(input),
+                    NumericInstr::FloatAcosh => lm_math::acosh(input),
+                    NumericInstr::FloatAtanh => lm_math::atanh(input),
+                    _ => unreachable!(),
+                };
+                self.push_float(value)?;
+            }
             NumericInstr::FloatMin | NumericInstr::FloatMax => {
                 let right = self.pop_float()?;
                 let left = self.pop_float()?;

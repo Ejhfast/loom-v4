@@ -1111,7 +1111,7 @@ impl<'m> Oracle<'m> {
                         BinOp::Sub => a - b,
                         BinOp::Mul => a * b,
                         BinOp::Div => a / b,
-                        BinOp::Rem => return Err(Stop::Limit("Float has no remainder")),
+                        BinOp::Rem => lm_math::remainder(a, b),
                         _ => unreachable!(),
                     };
                     return Ok(OV::Float(lm_value::canonical_float_bits(out.to_bits())));
@@ -1235,6 +1235,7 @@ impl<'m> Oracle<'m> {
             lm_abi::INTRINSIC_FLOAT_SUB => Some((BinOp::Sub, lm_types::FLOAT)),
             lm_abi::INTRINSIC_FLOAT_MUL => Some((BinOp::Mul, lm_types::FLOAT)),
             lm_abi::INTRINSIC_FLOAT_DIV => Some((BinOp::Div, lm_types::FLOAT)),
+            lm_abi::INTRINSIC_FLOAT_REM => Some((BinOp::Rem, lm_types::FLOAT)),
             lm_abi::INTRINSIC_FLOAT_EQ => Some((BinOp::Eq, lm_types::FLOAT)),
             lm_abi::INTRINSIC_FLOAT_NE => Some((BinOp::Ne, lm_types::FLOAT)),
             lm_abi::INTRINSIC_FLOAT_LT => Some((BinOp::Lt, lm_types::FLOAT)),
@@ -1321,6 +1322,75 @@ impl<'m> Oracle<'m> {
                 let result =
                     oracle_float_min_max(left, right, intrinsic == lm_abi::INTRINSIC_FLOAT_MIN);
                 Ok(OV::Float(lm_value::canonical_float_bits(result.to_bits())))
+            }
+            lm_abi::INTRINSIC_FLOAT_COPY_SIGN
+            | lm_abi::INTRINSIC_FLOAT_POW
+            | lm_abi::INTRINSIC_FLOAT_HYPOT
+            | lm_abi::INTRINSIC_FLOAT_ATAN2 => {
+                let left = self.as_float(&values[0])?;
+                let right = self.as_float(&values[1])?;
+                let result = match intrinsic {
+                    lm_abi::INTRINSIC_FLOAT_COPY_SIGN => lm_math::copy_sign(left, right),
+                    lm_abi::INTRINSIC_FLOAT_POW => lm_math::pow(left, right),
+                    lm_abi::INTRINSIC_FLOAT_HYPOT => lm_math::hypot(left, right),
+                    lm_abi::INTRINSIC_FLOAT_ATAN2 => lm_math::atan2(left, right),
+                    _ => unreachable!(),
+                };
+                Ok(OV::Float(result.to_bits()))
+            }
+            lm_abi::INTRINSIC_FLOAT_MUL_ADD => {
+                let value = self.as_float(&values[0])?;
+                let multiplier = self.as_float(&values[1])?;
+                let addend = self.as_float(&values[2])?;
+                Ok(OV::Float(
+                    lm_math::mul_add(value, multiplier, addend).to_bits(),
+                ))
+            }
+            lm_abi::INTRINSIC_FLOAT_EXP
+            | lm_abi::INTRINSIC_FLOAT_EXP2
+            | lm_abi::INTRINSIC_FLOAT_EXP_M1
+            | lm_abi::INTRINSIC_FLOAT_LN
+            | lm_abi::INTRINSIC_FLOAT_LOG2
+            | lm_abi::INTRINSIC_FLOAT_LOG10
+            | lm_abi::INTRINSIC_FLOAT_LN_1P
+            | lm_abi::INTRINSIC_FLOAT_CBRT
+            | lm_abi::INTRINSIC_FLOAT_SIN
+            | lm_abi::INTRINSIC_FLOAT_COS
+            | lm_abi::INTRINSIC_FLOAT_TAN
+            | lm_abi::INTRINSIC_FLOAT_ASIN
+            | lm_abi::INTRINSIC_FLOAT_ACOS
+            | lm_abi::INTRINSIC_FLOAT_ATAN
+            | lm_abi::INTRINSIC_FLOAT_SINH
+            | lm_abi::INTRINSIC_FLOAT_COSH
+            | lm_abi::INTRINSIC_FLOAT_TANH
+            | lm_abi::INTRINSIC_FLOAT_ASINH
+            | lm_abi::INTRINSIC_FLOAT_ACOSH
+            | lm_abi::INTRINSIC_FLOAT_ATANH => {
+                let input = self.as_float(&values[0])?;
+                let result = match intrinsic {
+                    lm_abi::INTRINSIC_FLOAT_EXP => lm_math::exp(input),
+                    lm_abi::INTRINSIC_FLOAT_EXP2 => lm_math::exp2(input),
+                    lm_abi::INTRINSIC_FLOAT_EXP_M1 => lm_math::exp_m1(input),
+                    lm_abi::INTRINSIC_FLOAT_LN => lm_math::ln(input),
+                    lm_abi::INTRINSIC_FLOAT_LOG2 => lm_math::log2(input),
+                    lm_abi::INTRINSIC_FLOAT_LOG10 => lm_math::log10(input),
+                    lm_abi::INTRINSIC_FLOAT_LN_1P => lm_math::ln_1p(input),
+                    lm_abi::INTRINSIC_FLOAT_CBRT => lm_math::cbrt(input),
+                    lm_abi::INTRINSIC_FLOAT_SIN => lm_math::sin(input),
+                    lm_abi::INTRINSIC_FLOAT_COS => lm_math::cos(input),
+                    lm_abi::INTRINSIC_FLOAT_TAN => lm_math::tan(input),
+                    lm_abi::INTRINSIC_FLOAT_ASIN => lm_math::asin(input),
+                    lm_abi::INTRINSIC_FLOAT_ACOS => lm_math::acos(input),
+                    lm_abi::INTRINSIC_FLOAT_ATAN => lm_math::atan(input),
+                    lm_abi::INTRINSIC_FLOAT_SINH => lm_math::sinh(input),
+                    lm_abi::INTRINSIC_FLOAT_COSH => lm_math::cosh(input),
+                    lm_abi::INTRINSIC_FLOAT_TANH => lm_math::tanh(input),
+                    lm_abi::INTRINSIC_FLOAT_ASINH => lm_math::asinh(input),
+                    lm_abi::INTRINSIC_FLOAT_ACOSH => lm_math::acosh(input),
+                    lm_abi::INTRINSIC_FLOAT_ATANH => lm_math::atanh(input),
+                    _ => unreachable!(),
+                };
+                Ok(OV::Float(result.to_bits()))
             }
             lm_abi::INTRINSIC_FLOAT_IS_NAN => Ok(OV::Bool(self.as_float(&values[0])?.is_nan())),
             lm_abi::INTRINSIC_FLOAT_IS_FINITE => {

@@ -261,6 +261,32 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::FloatIsNan
         | NumericInstr::FloatIsFinite
         | NumericInstr::FloatIsInfinite
+        | NumericInstr::FloatRem
+        | NumericInstr::FloatCopySign
+        | NumericInstr::FloatMulAdd
+        | NumericInstr::FloatPow
+        | NumericInstr::FloatExp
+        | NumericInstr::FloatExp2
+        | NumericInstr::FloatExpM1
+        | NumericInstr::FloatLn
+        | NumericInstr::FloatLog2
+        | NumericInstr::FloatLog10
+        | NumericInstr::FloatLn1P
+        | NumericInstr::FloatCbrt
+        | NumericInstr::FloatHypot
+        | NumericInstr::FloatSin
+        | NumericInstr::FloatCos
+        | NumericInstr::FloatTan
+        | NumericInstr::FloatAsin
+        | NumericInstr::FloatAcos
+        | NumericInstr::FloatAtan
+        | NumericInstr::FloatAtan2
+        | NumericInstr::FloatSinh
+        | NumericInstr::FloatCosh
+        | NumericInstr::FloatTanh
+        | NumericInstr::FloatAsinh
+        | NumericInstr::FloatAcosh
+        | NumericInstr::FloatAtanh
         | NumericInstr::FloatHash
         | NumericInstr::FloatBits
         | NumericInstr::FloatFromBits

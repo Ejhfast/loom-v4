@@ -16,9 +16,9 @@ Parallel measurements let the operating system select processors.
 
 | Format | Version |
 | --- | ---: |
-| LMBC | 63 |
-| Compiler ABI | 54 |
-| Verifier | 40 |
+| LMBC | 65 |
+| Compiler ABI | 56 |
+| Verifier | 42 |
 | Artifact container | 3 |
 | Interface | 24 |
 | Snapshot | 35 |
@@ -28,25 +28,25 @@ Parallel measurements let the operating system select processors.
 | Measurement | Result |
 | --- | ---: |
 | Classes | 300 |
-| HIR functions | 599 |
+| HIR functions | 639 |
 | HIR types | 566 |
-| Bytecode functions | 899 |
-| Bytecode instructions | 18,907 |
+| Bytecode functions | 939 |
+| Bytecode instructions | 19,036 |
 | Decoded instruction width | 16 bytes |
-| Core LMBC | 305,544 bytes |
-| Core artifact | 305,666 bytes |
-| Core checking | 2.159 ms |
-| Core lowering | 0.764 ms |
-| Core compilation | 3.058 ms |
-| Core decoding | 0.367 ms |
-| Artifact encoding | 0.135 ms |
-| Artifact decoding | 3.080 ms |
-| Core verification | 1.296 ms |
-| Structural verification | 0.534 ms |
-| Verification hash | 0.144 ms |
-| Semantic identity | 1.827 ms |
-| Namespace publication | 1.890 ms |
-| External core load | 5.087 ms |
+| Core LMBC | 312,354 bytes |
+| Core artifact | 312,476 bytes |
+| Core checking | 2.226 ms |
+| Core lowering | 0.801 ms |
+| Core compilation | 3.125 ms |
+| Core decoding | 0.372 ms |
+| Artifact encoding | 0.140 ms |
+| Artifact decoding | 3.151 ms |
+| Core verification | 1.314 ms |
+| Structural verification | 0.558 ms |
+| Verification hash | 0.148 ms |
+| Semantic identity | 1.882 ms |
+| Namespace publication | 1.924 ms |
+| External core load | 5.198 ms |
 | Repeated publication | less than 0.001 ms |
 | Interface witnesses | 11 entries |
 

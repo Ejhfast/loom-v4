@@ -447,6 +447,38 @@ fn primitive_numeric_interface_calls_inline_with_exact_fuel() {
 }
 
 #[test]
+fn float_math_calls_stay_native_with_exact_fuel() {
+    let source = concat!(
+        "def calculate(value: Float): Float\n",
+        "  wave = value.sin() + value.cos() + value.tan()\n",
+        "  inverse = value.asin() + value.acos() + value.atan()\n",
+        "  logs = value.exp().ln() + value.exp2().log2()\n",
+        "  logs = logs + value.exp_m1().ln_1p()\n",
+        "  hyper = value.sinh() + value.cosh() + value.tanh()\n",
+        "  inverse_hyper = value.asinh() + 2.0.acosh() + value.atanh()\n",
+        "  mixed = value.pow(2.0) + value.cbrt() + value.hypot(2.0)\n",
+        "  mixed = mixed + value.atan2(2.0) + value.copy_sign(-1.0)\n",
+        "  mixed = mixed + value.mul_add(2.0, 1.0) + value % 0.2\n",
+        "  wave + inverse + logs + hyper + inverse_hyper + mixed\n",
+        "end\n",
+        "calculate(0.25).is_finite()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-float-math.lm", source)
+        .expect("the Float math case compiles");
+    for fuel in 0..=256 {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Bool(true)));
+    assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
+}
+
+#[test]
 fn guarded_numeric_inlining_preserves_custom_conformances() {
     let source = concat!(
         "final class Count implements Add\n",

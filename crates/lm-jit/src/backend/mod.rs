@@ -73,6 +73,8 @@ use std::cell::{Cell, RefCell};
 use std::mem as std_mem;
 use std::sync::Mutex;
 
+use math::MathFunctions;
+
 pub(super) enum CompileError {
     Unsupported(UnsupportedReason),
     Backend,
@@ -205,16 +207,13 @@ pub(super) fn compile_region(
 
     let pointer_type = isa.pointer_type();
     let frontend_config = isa.frontend_config();
-    let mut module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
+    let mut jit_builder = JITBuilder::with_isa(isa, default_libcall_names());
+    math::register_symbols(&mut jit_builder);
+    let mut module = JITModule::new(jit_builder);
     let mut entry_signature = module.make_signature();
     entry_signature.params.push(AbiParam::new(pointer_type));
     entry_signature.params.push(AbiParam::new(types::I32));
     let host_call_conv = entry_signature.call_conv;
-    let target = BackendTarget {
-        pointer_type,
-        frontend_config,
-        host_call_conv,
-    };
     let mut body_signature = module.make_signature();
     body_signature.params.push(AbiParam::new(pointer_type));
     body_signature.params.push(AbiParam::new(types::I64));
@@ -228,6 +227,13 @@ pub(super) fn compile_region(
     let mut body_context = module.make_context();
     body_context.func.signature = body_signature;
     body_context.func.name = UserFuncName::user(0, body_id.as_u32());
+    let math = MathFunctions::declare(&mut module, &mut body_context.func, host_call_conv)?;
+    let target = BackendTarget {
+        pointer_type,
+        frontend_config,
+        host_call_conv,
+        math,
+    };
     let mut frontend = FunctionBuilderContext::new();
     emit_region(
         &mut body_context.func,
@@ -383,6 +389,7 @@ struct NativeValues<'a> {
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
     heap_translations: &'a RefCell<HeapTranslationCache>,
+    math: MathFunctions,
 }
 
 struct ScalarInstanceValues {
@@ -680,6 +687,7 @@ struct BackendTarget {
     pointer_type: ir::Type,
     frontend_config: TargetFrontendConfig,
     host_call_conv: CallConv,
+    math: MathFunctions,
 }
 
 fn emit_region(
@@ -695,6 +703,7 @@ fn emit_region(
         pointer_type,
         frontend_config,
         host_call_conv,
+        math,
     } = target;
     let call_conv = function.signature.call_conv;
     let mut builder = FunctionBuilder::new(function, frontend);
@@ -1336,6 +1345,7 @@ fn emit_region(
         pointer_type,
         frontend_config,
         heap_translations: &heap_translations,
+        math,
     };
 
     let mut dispatch = Switch::new();
@@ -1653,6 +1663,7 @@ mod exits;
 mod heap;
 mod lists;
 mod maps;
+mod math;
 mod mem;
 mod numeric;
 mod text;

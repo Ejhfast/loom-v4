@@ -271,6 +271,10 @@ final class Float implements Display, Hashable, SignedNumber
     intrinsic("float.div", self, other)
   end
 
+  def __rem__(self, other: Float): Float
+    intrinsic("float.rem", self, other)
+  end
+
   def abs(self): Float
     intrinsic("float.abs", self)
   end
@@ -301,6 +305,106 @@ final class Float implements Display, Hashable, SignedNumber
 
   def trunc(self): Float
     intrinsic("float.trunc", self)
+  end
+
+  def copy_sign(self, sign: Float): Float
+    intrinsic("float.copy_sign", self, sign)
+  end
+
+  def mul_add(self, multiplier: Float, addend: Float): Float
+    intrinsic("float.mul_add", self, multiplier, addend)
+  end
+
+  def pow(self, exponent: Float): Float
+    intrinsic("float.pow", self, exponent)
+  end
+
+  def exp(self): Float
+    intrinsic("float.exp", self)
+  end
+
+  def exp2(self): Float
+    intrinsic("float.exp2", self)
+  end
+
+  def exp_m1(self): Float
+    intrinsic("float.exp_m1", self)
+  end
+
+  def ln(self): Float
+    intrinsic("float.ln", self)
+  end
+
+  def log2(self): Float
+    intrinsic("float.log2", self)
+  end
+
+  def log10(self): Float
+    intrinsic("float.log10", self)
+  end
+
+  def ln_1p(self): Float
+    intrinsic("float.ln_1p", self)
+  end
+
+  def cbrt(self): Float
+    intrinsic("float.cbrt", self)
+  end
+
+  def hypot(self, other: Float): Float
+    intrinsic("float.hypot", self, other)
+  end
+
+  def sin(self): Float
+    intrinsic("float.sin", self)
+  end
+
+  def cos(self): Float
+    intrinsic("float.cos", self)
+  end
+
+  def tan(self): Float
+    intrinsic("float.tan", self)
+  end
+
+  def asin(self): Float
+    intrinsic("float.asin", self)
+  end
+
+  def acos(self): Float
+    intrinsic("float.acos", self)
+  end
+
+  def atan(self): Float
+    intrinsic("float.atan", self)
+  end
+
+  def atan2(self, other: Float): Float
+    intrinsic("float.atan2", self, other)
+  end
+
+  def sinh(self): Float
+    intrinsic("float.sinh", self)
+  end
+
+  def cosh(self): Float
+    intrinsic("float.cosh", self)
+  end
+
+  def tanh(self): Float
+    intrinsic("float.tanh", self)
+  end
+
+  def asinh(self): Float
+    intrinsic("float.asinh", self)
+  end
+
+  def acosh(self): Float
+    intrinsic("float.acosh", self)
+  end
+
+  def atanh(self): Float
+    intrinsic("float.atanh", self)
   end
 
   def __eq__(self, other: Float): Bool

@@ -50,6 +50,7 @@ Most implementation code is under `crates/`.
 - `lm-hir` checks source programs and lowers them to bytecode.
 - `lm-bytecode` defines decoded and serialized bytecode formats.
 - `lm-verify` independently verifies decoded bytecode.
+- `lm-math` supplies pure floating-point math algorithms.
 - `lm-jit` compiles verified bytecode to native code.
 - `lm-link` links artifacts and publishes immutable code namespaces.
 - `lm-value` defines the runtime value representation.

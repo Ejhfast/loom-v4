@@ -192,14 +192,45 @@ pub(crate) fn step(
                 | NumericInstr::FloatFloor
                 | NumericInstr::FloatCeil
                 | NumericInstr::FloatRound
-                | NumericInstr::FloatTrunc => {
+                | NumericInstr::FloatTrunc
+                | NumericInstr::FloatExp
+                | NumericInstr::FloatExp2
+                | NumericInstr::FloatExpM1
+                | NumericInstr::FloatLn
+                | NumericInstr::FloatLog2
+                | NumericInstr::FloatLog10
+                | NumericInstr::FloatLn1P
+                | NumericInstr::FloatCbrt
+                | NumericInstr::FloatSin
+                | NumericInstr::FloatCos
+                | NumericInstr::FloatTan
+                | NumericInstr::FloatAsin
+                | NumericInstr::FloatAcos
+                | NumericInstr::FloatAtan
+                | NumericInstr::FloatSinh
+                | NumericInstr::FloatCosh
+                | NumericInstr::FloatTanh
+                | NumericInstr::FloatAsinh
+                | NumericInstr::FloatAcosh
+                | NumericInstr::FloatAtanh => {
                     pop_expect(state, float)?;
                     push(state, float)?;
                 }
                 NumericInstr::FloatAdd
                 | NumericInstr::FloatSub
                 | NumericInstr::FloatMul
-                | NumericInstr::FloatDiv => {
+                | NumericInstr::FloatDiv
+                | NumericInstr::FloatRem
+                | NumericInstr::FloatCopySign
+                | NumericInstr::FloatPow
+                | NumericInstr::FloatHypot
+                | NumericInstr::FloatAtan2 => {
+                    pop_expect(state, float)?;
+                    pop_expect(state, float)?;
+                    push(state, float)?;
+                }
+                NumericInstr::FloatMulAdd => {
+                    pop_expect(state, float)?;
                     pop_expect(state, float)?;
                     pop_expect(state, float)?;
                     push(state, float)?;

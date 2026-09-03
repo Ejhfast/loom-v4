@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 40;
+pub const ABI_VERSION: u32 = 41;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -641,7 +641,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 26;
+pub const INTRINSIC_ABI_VERSION: u32 = 27;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -854,9 +854,35 @@ pub const INTRINSIC_FLOAT_ROUND: IntrinsicSlot = 194;
 pub const INTRINSIC_FLOAT_TRUNC: IntrinsicSlot = 195;
 pub const INTRINSIC_FLOAT_IS_FINITE: IntrinsicSlot = 196;
 pub const INTRINSIC_FLOAT_IS_INFINITE: IntrinsicSlot = 197;
+pub const INTRINSIC_FLOAT_REM: IntrinsicSlot = 198;
+pub const INTRINSIC_FLOAT_COPY_SIGN: IntrinsicSlot = 199;
+pub const INTRINSIC_FLOAT_MUL_ADD: IntrinsicSlot = 200;
+pub const INTRINSIC_FLOAT_POW: IntrinsicSlot = 201;
+pub const INTRINSIC_FLOAT_EXP: IntrinsicSlot = 202;
+pub const INTRINSIC_FLOAT_EXP2: IntrinsicSlot = 203;
+pub const INTRINSIC_FLOAT_EXP_M1: IntrinsicSlot = 204;
+pub const INTRINSIC_FLOAT_LN: IntrinsicSlot = 205;
+pub const INTRINSIC_FLOAT_LOG2: IntrinsicSlot = 206;
+pub const INTRINSIC_FLOAT_LOG10: IntrinsicSlot = 207;
+pub const INTRINSIC_FLOAT_LN_1P: IntrinsicSlot = 208;
+pub const INTRINSIC_FLOAT_CBRT: IntrinsicSlot = 209;
+pub const INTRINSIC_FLOAT_HYPOT: IntrinsicSlot = 210;
+pub const INTRINSIC_FLOAT_SIN: IntrinsicSlot = 211;
+pub const INTRINSIC_FLOAT_COS: IntrinsicSlot = 212;
+pub const INTRINSIC_FLOAT_TAN: IntrinsicSlot = 213;
+pub const INTRINSIC_FLOAT_ASIN: IntrinsicSlot = 214;
+pub const INTRINSIC_FLOAT_ACOS: IntrinsicSlot = 215;
+pub const INTRINSIC_FLOAT_ATAN: IntrinsicSlot = 216;
+pub const INTRINSIC_FLOAT_ATAN2: IntrinsicSlot = 217;
+pub const INTRINSIC_FLOAT_SINH: IntrinsicSlot = 218;
+pub const INTRINSIC_FLOAT_COSH: IntrinsicSlot = 219;
+pub const INTRINSIC_FLOAT_TANH: IntrinsicSlot = 220;
+pub const INTRINSIC_FLOAT_ASINH: IntrinsicSlot = 221;
+pub const INTRINSIC_FLOAT_ACOSH: IntrinsicSlot = 222;
+pub const INTRINSIC_FLOAT_ATANH: IntrinsicSlot = 223;
 
 /// Pure intrinsics in stable slot order.
-pub const INTRINSICS: [IntrinsicDef; 198] = [
+pub static INTRINSICS: [IntrinsicDef; 224] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2092,6 +2118,162 @@ pub const INTRINSICS: [IntrinsicDef; 198] = [
         name: "float.is_infinite",
         params: &[AbiType::FLOAT],
         reply: AbiType::BOOL,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.rem",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.copy_sign",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.mul_add",
+        params: &[AbiType::FLOAT, AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.pow",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.exp",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.exp2",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.exp_m1",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.ln",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.log2",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.log10",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.ln_1p",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.cbrt",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.hypot",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.sin",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.cos",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.tan",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.asin",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.acos",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.atan",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.atan2",
+        params: &[AbiType::FLOAT, AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.sinh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.cosh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.tanh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.asinh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.acosh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "float.atanh",
+        params: &[AbiType::FLOAT],
+        reply: AbiType::FLOAT,
         semantic_revision: 1,
     },
 ];
