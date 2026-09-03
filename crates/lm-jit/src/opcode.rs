@@ -654,10 +654,24 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::BytesText
         | NativeInstr::BytesHex
         | NativeInstr::DigestSha256
-        | NativeInstr::DigestMd5 => {
+        | NativeInstr::DigestMd5
+        | NativeInstr::CompressEncode
+        | NativeInstr::CompressDecodeStatus
+        | NativeInstr::CompressDecodeValue => {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
                 .with_replay()
-                .with_fault_stack(FaultStack::Pop(1))
+                .with_fault_stack(FaultStack::Pop(
+                    if matches!(
+                        operation,
+                        NativeInstr::CompressEncode
+                            | NativeInstr::CompressDecodeStatus
+                            | NativeInstr::CompressDecodeValue
+                    ) {
+                        3
+                    } else {
+                        1
+                    },
+                ))
         }
         NativeInstr::StrConcat
         | NativeInstr::TextPadStart

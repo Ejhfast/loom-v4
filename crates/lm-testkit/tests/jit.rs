@@ -151,6 +151,8 @@ mod builders;
 mod calls;
 #[path = "jit/closures.rs"]
 mod closures;
+#[path = "jit/compression.rs"]
+mod compression;
 #[path = "jit/dispatch.rs"]
 mod dispatch;
 #[path = "jit/effects.rs"]

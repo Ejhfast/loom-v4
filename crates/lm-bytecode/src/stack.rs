@@ -197,7 +197,10 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::TextReplace)
         | Instr::Native(NativeInstr::RegexReplaceAll)
         | Instr::Native(NativeInstr::BbFindFrom)
-        | Instr::Native(NativeInstr::BbSet) => (3, 1),
+        | Instr::Native(NativeInstr::BbSet)
+        | Instr::Native(NativeInstr::CompressEncode)
+        | Instr::Native(NativeInstr::CompressDecodeStatus)
+        | Instr::Native(NativeInstr::CompressDecodeValue) => (3, 1),
         Instr::MapPut { discard: true, .. } => (3, 0),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),

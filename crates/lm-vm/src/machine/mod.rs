@@ -825,6 +825,19 @@ pub struct Machine {
     ///
     /// Snapshots exclude this process-local cache.
     pub(crate) pending_regex_compile: Option<ObjRef>,
+    /// Decompressed bytes retained between paired compression instructions.
+    ///
+    /// Snapshots exclude this process-local cache.
+    pub(crate) pending_decompression: Option<PendingDecompression>,
+}
+
+/// One process-local decompression result.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PendingDecompression {
+    pub(crate) input: ObjRef,
+    pub(crate) format: i64,
+    pub(crate) limit: i64,
+    pub(crate) output: ObjRef,
 }
 
 /// Clock-free execution counters for one machine.
@@ -917,6 +930,8 @@ fn portable_definition_info_payload(
 
 mod calls;
 mod collections;
+mod compression;
+pub(crate) use compression::compression_format;
 mod execution;
 mod heap;
 pub(crate) use heap::BorrowedStringKey;

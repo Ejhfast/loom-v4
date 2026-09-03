@@ -375,6 +375,7 @@ impl Machine {
             native_type_environments: lm_jit::NativeTypeEnvironmentCache::default(),
             native_resolved_calls: lm_jit::NativeResolvedCallCache::default(),
             pending_regex_compile: None,
+            pending_decompression: None,
         }
     }
 

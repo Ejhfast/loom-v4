@@ -182,6 +182,10 @@ impl Machine {
         if let Some(reference) = self.pending_regex_compile {
             roots.push(reference);
         }
+        if let Some(pending) = self.pending_decompression {
+            roots.push(pending.input);
+            roots.push(pending.output);
+        }
         // Interned literals stay alive for the machine lifetime.
         roots.extend(self.vm.literals.iter().filter_map(|value| value.as_obj()));
     }

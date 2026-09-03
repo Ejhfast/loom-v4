@@ -82,6 +82,11 @@ impl Machine {
                 | lm_bytecode::NativeInstr::RegexMatchText
                 | lm_bytecode::NativeInstr::RegexMatchGroupCount,
             ) => self.exec_regex_native(instr),
+            Instr::Native(
+                lm_bytecode::NativeInstr::CompressEncode
+                | lm_bytecode::NativeInstr::CompressDecodeStatus
+                | lm_bytecode::NativeInstr::CompressDecodeValue,
+            ) => self.exec_compression_native(instr),
             Instr::Native(_) => self.exec_bytes_builder_instr(instr),
             _ => unreachable!("the native dispatcher receives one native instruction"),
         }

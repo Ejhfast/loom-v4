@@ -1066,7 +1066,10 @@ fn native_edges(
         | NativeInstr::HashUnorderedCombine
         | NativeInstr::DigestSha256
         | NativeInstr::DigestCrc32
-        | NativeInstr::DigestMd5 => {}
+        | NativeInstr::DigestMd5
+        | NativeInstr::CompressEncode
+        | NativeInstr::CompressDecodeStatus
+        | NativeInstr::CompressDecodeValue => {}
     }
 }
 

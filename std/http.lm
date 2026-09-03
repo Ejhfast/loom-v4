@@ -3,6 +3,17 @@
 use std.tls.Tls
 use std.tls.TlsClientConfig
 use std.url.Url
+use std.compress.CompressionError
+use std.compress.CompressionFormat
+use std.compress.CompressionLevel
+use std.compress.compress
+use std.compress.decompress
+
+enum HttpContentCoding
+  Identity
+  Gzip
+  Deflate
+end
 
 enum HttpError implements Error
   InvalidRequest(message: String)
@@ -225,6 +236,198 @@ final class Http
     else
       HttpError.InvalidRequest(message)
     end
+  end
+
+  def content_coding(
+    self,
+    headers: [HttpHeader],
+    response: Bool
+  ): Result[HttpContentCoding, HttpError]
+    coding = HttpContentCoding.Identity
+    found = false
+    index = 0
+    while index < headers.len()
+      header = headers.at(index)
+      if header.name.to_lower_ascii() == "content-encoding"
+        if found
+          return Err(self.invalid(response, "the HTTP content encoding is duplicated"))
+        end
+        found = true
+        text = case header.value.utf8()
+        in Ok(value) then value.to_lower_ascii()
+        in Err(_)
+          return Err(self.invalid(response, "the HTTP content encoding is not ASCII"))
+        end
+        coding = if text == "identity"
+          HttpContentCoding.Identity
+        elsif text == "gzip"
+          HttpContentCoding.Gzip
+        elsif text == "deflate"
+          HttpContentCoding.Deflate
+        else
+          return Err(self.invalid(response, "the HTTP content encoding is unsupported"))
+        end
+      end
+      index = index + 1
+    end
+    Ok(coding)
+  end
+
+  def content_headers(
+    self,
+    headers: [HttpHeader],
+    coding: HttpContentCoding
+  ): [HttpHeader]
+    result: [HttpHeader] = []
+    index = 0
+    while index < headers.len()
+      header = headers.at(index)
+      name = header.name.to_lower_ascii()
+      if name != "content-length" and name != "transfer-encoding" and
+        name != "content-encoding"
+        result.push(header)
+      end
+      index = index + 1
+    end
+    case coding
+    in Identity then ()
+    in Gzip
+      result.push(HttpHeader("Content-Encoding", Bytes("gzip")).freeze())
+    in Deflate
+      result.push(HttpHeader("Content-Encoding", Bytes("deflate")).freeze())
+    end
+    result
+  end
+
+  def encode_body(
+    self,
+    body: Bytes,
+    coding: HttpContentCoding,
+    level: CompressionLevel,
+    limits: HttpLimits
+  ): Result[Bytes, HttpError]
+    case self.validate_limits(limits)
+    in Err(error) then return Err(error)
+    in Ok(_) then ()
+    end
+    encoded = case coding
+    in Identity then body
+    in Gzip    then compress(body, CompressionFormat.Gzip, level)
+    in Deflate then compress(body, CompressionFormat.Deflate, level)
+    end
+    if encoded.len() > limits.max_body_bytes
+      return Err(HttpError.LimitExceeded("the encoded HTTP body is too large"))
+    end
+    Ok(encoded)
+  end
+
+  def decode_body(
+    self,
+    body: Bytes,
+    coding: HttpContentCoding,
+    limits: HttpLimits,
+    response: Bool
+  ): Result[Bytes, HttpError]
+    case self.validate_limits(limits)
+    in Err(error) then return Err(error)
+    in Ok(_) then ()
+    end
+    if coding == HttpContentCoding.Identity
+      if body.len() > limits.max_body_bytes
+        return Err(HttpError.LimitExceeded("the decoded HTTP body is too large"))
+      end
+      return Ok(body)
+    end
+    format = if coding == HttpContentCoding.Gzip
+      CompressionFormat.Gzip
+    else
+      CompressionFormat.Deflate
+    end
+    case decompress(body, format, limits.max_body_bytes)
+    in Ok(value) then Ok(value)
+    in Err(CompressionError.LimitExceeded)
+      Err(HttpError.LimitExceeded("the decoded HTTP body is too large"))
+    in Err(CompressionError.InvalidData)
+      Err(self.invalid(response, "the compressed HTTP body is invalid"))
+    end
+  end
+
+  def encode_request_content(
+    self,
+    request: HttpRequest,
+    coding: HttpContentCoding,
+    level: CompressionLevel,
+    limits: HttpLimits
+  ): Result[HttpRequest, HttpError]
+    body = case self.encode_body(request.body, coding, level, limits)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    Ok(HttpRequest(
+      request.method,
+      request.target,
+      self.content_headers(request.headers, coding),
+      body
+    ).freeze())
+  end
+
+  def decode_request_content(
+    self,
+    request: HttpRequest,
+    limits: HttpLimits
+  ): Result[HttpRequest, HttpError]
+    coding = case self.content_coding(request.headers, false)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    body = case self.decode_body(request.body, coding, limits, false)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    Ok(HttpRequest(
+      request.method,
+      request.target,
+      self.content_headers(request.headers, HttpContentCoding.Identity),
+      body
+    ).freeze())
+  end
+
+  def encode_response_content(
+    self,
+    response: HttpResponse,
+    coding: HttpContentCoding,
+    level: CompressionLevel,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError]
+    body = case self.encode_body(response.body, coding, level, limits)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    Ok(HttpResponse(
+      response.status,
+      self.content_headers(response.headers, coding),
+      body
+    ).freeze())
+  end
+
+  def decode_response_content(
+    self,
+    response: HttpResponse,
+    limits: HttpLimits
+  ): Result[HttpResponse, HttpError]
+    coding = case self.content_coding(response.headers, true)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    body = case self.decode_body(response.body, coding, limits, true)
+    in Ok(value) then value
+    in Err(error) then return Err(error)
+    end
+    Ok(HttpResponse(
+      response.status,
+      self.content_headers(response.headers, HttpContentCoding.Identity),
+      body
+    ).freeze())
   end
 
   def token_byte(self, value: Int): Bool

@@ -575,6 +575,9 @@ pub(super) struct RawNativeFunctions {
     pub(super) digest_sha256: RawHeapOperation,
     pub(super) digest_crc32: RawHeapOperation,
     pub(super) digest_md5: RawHeapOperation,
+    pub(super) compress_encode: RawHeapOperation,
+    pub(super) compress_decode_status: RawHeapOperation,
+    pub(super) compress_decode_value: RawHeapOperation,
     pub(super) text_parse_float_status: RawHeapOperation,
     pub(super) text_parse_float_value: RawHeapOperation,
     pub(super) float_fixed: RawHeapOperation,
@@ -709,6 +712,9 @@ impl<R: NativeRuntime> NativeRuntimeFunctions<R> {
         digest_sha256: digest_sha256::<R>,
         digest_crc32: digest_crc32::<R>,
         digest_md5: digest_md5::<R>,
+        compress_encode: compress_encode::<R>,
+        compress_decode_status: compress_decode_status::<R>,
+        compress_decode_value: compress_decode_value::<R>,
         text_parse_float_status: text_parse_float_status::<R>,
         text_parse_float_value: text_parse_float_value::<R>,
         float_fixed: float_fixed::<R>,
@@ -2395,6 +2401,15 @@ pub trait NativeRuntime {
     /// Compute one MD5 digest for compatibility protocols.
     fn digest_md5(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
 
+    /// Compress one immutable byte value.
+    fn compress_encode(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Validate and retain one bounded decompression result.
+    fn compress_decode_status(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
+    /// Load one retained bounded decompression result.
+    fn compress_decode_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult;
+
     /// Return one float parse status.
     fn text_parse_float_status(&mut self, request: HeapOperationRequest<'_>)
         -> HeapOperationResult;
@@ -3506,6 +3521,9 @@ heap_operation_entry!(bytes_is_utf8, bytes_is_utf8);
 heap_operation_entry!(digest_sha256, digest_sha256);
 heap_operation_entry!(digest_crc32, digest_crc32);
 heap_operation_entry!(digest_md5, digest_md5);
+heap_operation_entry!(compress_encode, compress_encode);
+heap_operation_entry!(compress_decode_status, compress_decode_status);
+heap_operation_entry!(compress_decode_value, compress_decode_value);
 heap_operation_entry!(text_parse_float_status, text_parse_float_status);
 heap_operation_entry!(text_parse_float_value, text_parse_float_value);
 heap_operation_entry!(float_fixed, float_fixed);

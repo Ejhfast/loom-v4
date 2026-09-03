@@ -2088,6 +2088,24 @@ pub(crate) fn step(
             }
             push(state, TY_INT)?;
         }
+        Instr::Native(
+            operation @ (lm_bytecode::NativeInstr::CompressEncode
+            | lm_bytecode::NativeInstr::CompressDecodeStatus
+            | lm_bytecode::NativeInstr::CompressDecodeValue),
+        ) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let bytes = pop(state)?;
+            if ctx.ty(bytes) != BcType::Bytes {
+                return Err(fail(format!("compression on non-bytes type {bytes}")));
+            }
+            let result = if matches!(operation, lm_bytecode::NativeInstr::CompressDecodeStatus) {
+                TY_INT
+            } else {
+                bytes
+            };
+            push(state, result)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => {
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {

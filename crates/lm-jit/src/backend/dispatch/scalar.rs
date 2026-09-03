@@ -348,7 +348,10 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             | NativeInstr::BytesIsUtf8
             | NativeInstr::DigestSha256
             | NativeInstr::DigestCrc32
-            | NativeInstr::DigestMd5,
+            | NativeInstr::DigestMd5
+            | NativeInstr::CompressEncode
+            | NativeInstr::CompressDecodeStatus
+            | NativeInstr::CompressDecodeValue,
         )
         | Instr::Numeric(
             NumericInstr::TextParseFloatStatus
@@ -631,6 +634,31 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                         std_mem::offset_of!(RawNativeFunctions, digest_md5),
                         ScalarKind::Object(0),
                     )
+                }
+                Instr::Native(
+                    operation @ (NativeInstr::CompressEncode
+                    | NativeInstr::CompressDecodeStatus
+                    | NativeInstr::CompressDecodeValue),
+                ) => {
+                    let argument = pop_native(stack)?;
+                    let format = pop_native(stack)?;
+                    let bytes = pop_native(stack)?;
+                    let (function_offset, result_kind) = match operation {
+                        NativeInstr::CompressEncode => (
+                            std_mem::offset_of!(RawNativeFunctions, compress_encode),
+                            ScalarKind::Object(0),
+                        ),
+                        NativeInstr::CompressDecodeStatus => (
+                            std_mem::offset_of!(RawNativeFunctions, compress_decode_status),
+                            ScalarKind::Int,
+                        ),
+                        NativeInstr::CompressDecodeValue => (
+                            std_mem::offset_of!(RawNativeFunctions, compress_decode_value),
+                            ScalarKind::Object(0),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    ([bytes, format, argument], function_offset, result_kind)
                 }
                 Instr::Numeric(
                     operation @ (NumericInstr::TextParseFloatStatus
