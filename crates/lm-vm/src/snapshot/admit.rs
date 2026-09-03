@@ -1,5 +1,5 @@
 //! Snapshot image admission
-//! (`docs/specs/sidecar/snapshot-image-admission.md` sections 5, 7, and 10).
+//! (`docs/language-spec.md` section 17.8).
 //!
 //! Admission is the one promotion from editable `Image` data to the
 //! immutable `SnapshotImage` that restore accepts. It proves one rule:

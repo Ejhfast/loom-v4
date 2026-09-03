@@ -799,7 +799,7 @@ pub struct World {
     /// Active restored execution gates and their exact members.
     gate_groups: Vec<GateGroup>,
     /// The closed type table and the type environment table of this
-    /// world (`docs/specs/sidecar/snapshot-image-admission.md` section 5.6).
+    /// world (`docs/language-spec.md` section 17.8).
     ///
     /// A frame, a closure, an instance, and a machine store one index
     /// into it. The table belongs to one world, so an untrusted
@@ -825,8 +825,8 @@ pub struct World {
     gate: u32,
     /// True after one restore committed a machine into this world.
     ///
-    /// The boundary check of `docs/specs/sidecar/snapshot-image-admission.md`
-    /// section 5.2 proves that a value carries the type its receiving
+    /// The boundary check in `docs/language-spec.md` section 17.8 proves
+    /// that a value carries the type its receiving
     /// code expects. Ordinary execution builds every value through
     /// verified code, and the verifier already proved those types, so
     /// the check answers a question that is already settled.

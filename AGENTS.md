@@ -55,13 +55,8 @@ in its own reviewed commit.
 
 ## Repository layout
 
-- `docs/specs/language-spec.md` — the normative language specification
-  (version 0.2).
-- `docs/specs/build-order.md` — the weekly vertical-slice implementation
-  plan. Each week lands a complete source-to-execution increment.
-- `docs/specs/sidecar/` — sidecar specifications. Each one refines the
-  language specification for one topic. Keep `docs/specs/` itself to the
-  language specification and the build order.
+- `docs/language-spec.md` — the normative language and implementation
+  specification (version 0.2).
 - `crates/` — the Rust workspace crates (`lm-source`, `lm-types`,
   `lm-bytecode`, `lm-verify`, `lm-vm`, `lm-cli`, ...).
 - `examples/` — runnable Loom programs (`.lm` files) with checked output.
@@ -75,7 +70,7 @@ in its own reviewed commit.
 
 ## Engineering rules
 
-- Keep the dependency direction from `docs/specs/build-order.md` section 1.
+- Keep the dependency direction from `docs/language-spec.md` section 1.2.
   `lm-vm` must not depend on the filesystem, clock, network, or compiler
   frontend.
 - Unsupported syntax or semantics must reject with a clear diagnostic.

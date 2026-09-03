@@ -1,5 +1,5 @@
 //! The type environment witness suite of
-//! `docs/specs/sidecar/snapshot-image-admission.md` section 5.6.
+//! `docs/language-spec.md` section 17.8.
 //!
 //! The suite proves three groups:
 //!

@@ -1,4 +1,4 @@
-# Language Specification
+# Loom Language Specification
 
 Status: version 0.2 design specification  
 Source form: UTF-8 text, conventional extension `.lm`  
@@ -7,7 +7,7 @@ Snapshot form: serialized machine image, conventional extension `.lms`
 
 This specification defines an object language with a reified compiler, reified virtual machines, immutable code identity, explicit effect rows, runtime policy tables, snapshots, and isolated procs. “Must” and “must not” are normative. Text labeled *implementation note* describes the reference implementation without changing observable semantics.
 
-Sidecar specifications give detailed rules for named topics. This document defines every public operation identity and signature. A sidecar cannot conflict with those definitions.
+This document defines the current language and reference implementation.
 
 ---
 
@@ -31,7 +31,7 @@ A conforming distribution keeps five semantic layers distinct.
 4. **Standard library.** Explicitly linked ordinary modules provide collections, text, files, networking, codecs, VM helpers, compilation, reflection, and testing. Standard code cannot bypass effect rows or policy.
 5. **Host operations.** Fixed members of `sys.*`. They may suspend, are policy-gated, and their exact identities appear in rows.
 
-This separation breaks the bootstrap cycle cleanly. The stage-0 compiler knows only primitive types and the declarative native-class manifest. It compiles the core image first. Host-operation signatures are then resolved against the core role slots of the artifact, so an operation may return `Result[Option[String], IoError]` without making `Option` or `Result` compiler built-ins.
+This separation breaks the bootstrap cycle cleanly. The bootstrap compiler knows primitive types and the native-class manifest. It compiles the core image first. Host-operation signatures then resolve against core role slots. Thus, an operation can return `Result[Option[String], IoError]` without compiler built-ins for these classes.
 
 A wrapper may make an operation convenient; it cannot make an effectful action pure or grant authority.
 
@@ -46,7 +46,7 @@ lm-core-image / lm-std / self-hosted compiler
                     |
 lm-cli + lm-host + lm-proc + bootstrap compiler
                     |
-lm-vm + lm-link + lm-bytecode + lm-verify + lm-value + lm-graph
+lm-vm + lm-jit + lm-link + lm-bytecode + lm-verify + lm-value + lm-graph
 ```
 
 The VM and compiler use stable Rust. Unsafe code is permitted only in small audited modules that implement object storage or foreign-function shims; parser, checker, verifier, policy, snapshot validation, and host-operation routing remain safe Rust. No guest pointer is exposed as a Rust reference across an allocation, collection, suspension, or host call.
@@ -249,7 +249,7 @@ A constant has no function body, runtime slot, or module state. Its typed value 
 
 All definitions are exported by source name. The optional trailing expression becomes the module entry value.
 
-Inside a package, one module holds the program entry: `src/main.lm`. Every other module must end without a trailing expression. The file tree under `src/` is the module tree, and the module path across packages carries the package name of the manifest (`docs/specs/sidecar/packages.md`).
+Inside a package, `src/main.lm` holds the program entry. Every other module must end without a trailing expression. The `src/` file tree defines module paths. A cross-package module path starts with the manifest package name.
 
 ### 3.2 Predeclaration and recursion
 
@@ -269,7 +269,7 @@ The following require no ordinary import slot:
 
 The standard library is not ambient. A package or explicit compile environment supplies every `std/*` module it uses. Every other free name must be defined by the module or supplied in the explicit compile environment.
 
-The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A `use` of another module compiles to a named import slot, and the build tool fulfills it. `use` never grants authority and never changes an effect row. The package layout, the manifest, and the resolution roots are defined in `docs/specs/sidecar/packages.md`.
+The `use` declaration is the source-level surface of this rule. A `use` line binds one dotted path to a short name. A module use creates a named import slot. The build tool fulfills that slot. `use` never grants authority or changes an effect row.
 
 A `use` path starts at a root name. The root set is fixed per module: the dependency keys of the manifest, this package's own top-level modules, `std`, and `sys`. A collision inside the root set is a compile error, and the fix is a manifest rename; resolution never picks silently. A path that names a module binds that module, and every export of it resolves under the bound name. A path that names one export of a module binds that export.
 
@@ -710,7 +710,7 @@ An associated type can declare several interface bounds. The selected type must 
 
 Code can use methods from every associated bound. A shared method name is ambiguous without a more specific operation.
 
-Generic definitions are checked once with type variables and share one bytecode body. Loaded type applications receive dense `TypeId` and class-instantiation slots used by reflection, boundary validation, and field signatures. Ordinary value slots remain uniformly represented, so `List[Int]` and `List[String]` use the same list code and buffer shape. Version 0.2 does not monomorphize or unbox generic elements; a later optimizer may specialize while preserving the verified generic body as the deoptimization target.
+Generic definitions are checked once with type variables and share one bytecode body. Loaded applications receive dense type and class slots. Reflection, boundary validation, and field signatures use these slots. Generic elements retain the canonical `Value` representation.
 
 Type arguments are inferred only when a unique solution follows from arguments and expected result:
 
@@ -766,7 +766,7 @@ A local `DynValue` is digestible when its packaged graph is digestible.
 
 A cross-machine dynamic reference is holder-local and not digestible.
 
-General type descriptors, dynamic unpacking, and value reflection remain deferred.
+Version 0.2 has no general type descriptors, dynamic unpacking, or value reflection.
 
 ### 5.7 Function, operation, and effect-variable types
 
@@ -2020,9 +2020,9 @@ q.op_name(): String
 
 The token names a machine and an ordinal, and never the operation, so the name comes from the pending record of that machine. The request must still be live. `answer`, `reject`, `dispatch`, and `serve_file` each spend one request, and reading the name after any of them faults the caller with `InvalidRequestToken`.
 
-The wider erased surface stays deferred.
+Version 0.2 has no wider erased request surface.
 
-It needs identity-erased operation, value, and type views that version 0.2 does not define.
+It has no identity-erased operation, value, or type views.
 
 To read arguments or answer, the holder matches the request against an exact typed operation object:
 
@@ -2419,45 +2419,143 @@ Each restored world is complete and independent. No machine, mailbox, or resourc
 
 ### 17.8 Decoding and admission
 
-Loading has two stages, and they prove different properties. Decoding protects the host from the byte stream. Admission establishes the interpreter invariant. An editor can build the same invalid state with no container behind it, so admission never trusts a decode result.
+Snapshot loading uses two separate checks.
+
+Decoding protects the host from untrusted bytes.
+
+Admission proves that every structural reference resolves.
+
+Neither check proves the type of a stored value.
+
+The decoder produces an editable `Image`.
+
+Only admission or private in-process capture can produce an immutable `SnapshotImage`.
+
+Restore accepts `SnapshotImage` only.
 
 Decoding checks:
 
 - magic, version, canonical integers, section bounds, and container hash;
 - every count against a load limit and against the bytes that remain, before any allocation;
-- one representable value for every wire tag.
+- one representable value for every wire tag;
+- one aggregate allocation budget for the complete container;
+- no overlapping section or trailing section data.
 
-Decoding produces editable snapshot data. That data promises nothing about references, machine state, or types.
+An `Image` promises nothing about references, machine state, or types.
+
+An editor can create the same invalid state without container bytes.
+
+Admission therefore repeats every required structural check.
 
 Admission uses this rule:
 
-> Editable snapshot data becomes an admitted host image only when its structure resolves and every live declared type is accurate.
+> Editable snapshot data becomes an admitted host image only when its structure resolves.
 
-"Declared type" includes the type the bytecode verifier proves at a saved program point. It never means only a type label the data carries.
+Structural resolution checks:
 
-Structural resolution checks the root machine, every machine and object ordinal, every code and class identity, every frame at a reachable instruction boundary, the frame partition of the local and operand arenas, every object field and element count, every capture context, every literal, every parent chain, every machine reference, and the lifecycle records of every machine.
+- the distinguished run or full-VM selector;
+- every machine and object ordinal;
+- every function, class, type, and operation identity;
+- every installed artifact and aggregate code identity;
+- every frame and reachable instruction boundary;
+- every frame environment and arena partition;
+- every object field, collection element, and closure context;
+- every literal and relocation record;
+- every machine reference and parent chain;
+- every request token and lifecycle record;
+- every mailbox, block, pause, and gate record;
+- every nested control edge and policy cursor.
 
-Type accuracy checks every initialized local, every operand of each stopped frame, every closure capture, every initialized instance field, every pending argument, every accepted mailbox value, every terminal result, every typed native value, and every reachable collection element. Admission derives each type from verified code and resolved layouts. It applies every generic substitution before it checks a value, and it treats an uninitialized slot as a state, not as a type wildcard. A native value that names another machine or record takes its type from that target.
+Admission checks each installed artifact with the independent verifier.
 
-Admission proves no other property. It does not prove termination, useful control state, scheduler fairness, request-token history, external authority, or target-world resources. A strange but structurally valid typed state remains legal.
+Admission does not prove value types, progress, scheduler fairness, authority, or host resources.
 
-Restore accepts admitted host image backing alone. It never accepts editable image data.
+A structurally valid image can contain a value with the wrong runtime tag.
 
-Execution and later snapshots repeat no admission check.
+The interpreter checks each typed value tag before it reads the payload.
 
-A host can cache one verified installed-code aggregate across repeated external loads.
+A mismatch faults the controlled machine with `TypeMismatch`.
 
-The cache key covers the base verification hash, artifact bytes, and provider relocations.
+Field reads report `UninitializedField` for the `Uninit` tag.
 
-Each load still decodes and admits all mutable image state.
+Graph copies and digests report `BoundaryViolation` for `Uninit`.
 
-The write barrier and dynamic checks still enforce runtime semantics.
+The world also checks values at VM boundaries.
 
-An in-process snapshot of a stopped verified world holds the same invariant by construction.
+The receiving verified instruction supplies the expected boundary type.
 
-Its capture path repeats no graph check. Origin grants no other trust.
+Boundary checks cover terminal results, mailbox messages, replies, spawn arguments, mock results, and typed restores.
 
-A nested snapshot stays opaque. Admission matches its declared root result type and admits its body at its own restore.
+Each check descends through fields, captures, and collection elements.
+
+It compares a closure with the complete verified closed signature.
+
+Native handles use a shape check and validate their produced values at their next boundary.
+
+The graph copy and type check use separate bounded walks.
+
+One object can appear under several expected types.
+
+Thus, one object-identity walk cannot replace the type walk.
+
+Generic runtime state carries closed type-environment witnesses.
+
+A frame stores its applied type and effect arguments.
+
+A closure stores its creator environment.
+
+An instance stores its concrete class arguments.
+
+A machine stores its result and mailbox types.
+
+One canonical world table stores every closed type and environment.
+
+Index zero names the empty environment.
+
+Each table entry contains no free type variable.
+
+Each entry has a canonical content identity.
+
+Restore interns these records into the target world and remaps every stored index.
+
+Admission checks witness structure, bounds, arity, and acyclicity.
+
+Admission does not prove that execution produced a supplied witness.
+
+Interpreter tag checks remain authoritative inside an externally restored world.
+
+World limits bound type nodes and environment nodes.
+
+Witnesses do not affect value equality, semantic digests, or value identity.
+
+Capture preserves witnesses before their source activation can disappear.
+
+External loading performs these actions:
+
+1. Decode bytes into `Image` under one aggregate budget.
+2. Admit the image against exact verified code.
+3. Seal the image with its canonical bytes and hash.
+4. Return `SnapshotImage`.
+
+In-process capture constructs `SnapshotImage` from stopped verified state.
+
+The capture constructor remains private to snapshot capture.
+
+The image origin supports diagnostics only. It proves no stored value type.
+
+Editing an admitted image produces an untrusted `Image`.
+
+The edited image needs admission before restore.
+
+One `SnapshotImage` can support many restores.
+
+Restore repeats no admission walk.
+
+Canonical bytes carry no admission status.
+
+Another process repeats decoding and admission.
+
+A nested snapshot stays opaque until its own restore.
 
 ### 17.9 Canonical form
 
@@ -2638,7 +2736,7 @@ A proc may hold its own handle, so a send may name the sending machine. That sen
 
 A mailbox message type must not name a holder-local native class. The checker rejects the proc-class declaration or the mailbox type at compile time. `Handle[M,R]` remains a legal message type, because a handle is a sendable typed designator.
 
-Handles are sendable typed designators, so send rights can travel as data without erasing `M` or `R`. Attenuated send-only views are deferred.
+Handles are sendable typed designators, so send rights can travel as data without erasing `M` or `R`. Version 0.2 has no attenuated send-only view.
 
 ### 18.6 Failure and parent lifetime
 
@@ -2654,7 +2752,7 @@ A missing parent denies future requests.
 
 ### 18.7 Distribution
 
-A spawn payload is already a code hash plus a typed tuple of sendable values, and operations/messages already cross one codec. A future remote scheduler may transport the same protocol without changing language semantics; distribution is not required in version 0.2.
+A spawn payload contains a code hash and a typed tuple of sendable values. Version 0.2 provides no remote scheduler.
 
 ## 19. Reflection
 
@@ -2668,7 +2766,7 @@ The syntax values are immutable. They expose no writable compiler or VM state.
 
 Version 0.2 has no general object mirror or dynamic invocation by name.
 
-The metaprogramming sidecar defines syntax inspection, construction, and compiler input rules.
+Sections 20.4 and 23.10 define syntax inspection, construction, and compiler inputs.
 
 ---
 
@@ -2828,7 +2926,7 @@ The `definition` field contains the same `DefinitionSpec` data that `code.defini
 
 The source attachment does not affect semantic or verification hashes.
 
-The metaprogramming sidecar defines source attachment and origin selection.
+Source attachments contain diagnostic data and verified definition metadata. They do not affect semantic or verification hashes.
 
 Capturing closures cannot become portable code values.
 
@@ -2864,7 +2962,7 @@ The typed `change_*` methods also cover values and processes.
 
 The operation rejects duplicate slots and stale slot versions.
 
-The metaprogramming sidecar defines source binding, batch replacement, and class revision rules.
+Section 23.7 defines source bindings, batch replacement, and class revision rules.
 
 Installation validates and commits code atomically. It does not execute the entry function.
 
@@ -2955,91 +3053,175 @@ The reference workspace separates immutable formats from mutable execution:
 
 ```text
 lm-abi         canonical core/operation/intrinsic/fault manifests
+lm-source      UTF-8 source, scanner, parser, spans, and diagnostics
+lm-types       interned types, rows, subtyping, and local inference
+lm-hir         resolved typed HIR and control-flow checking
 lm-value       Value, TypeId, ObjRef, scalar semantics
 lm-bytecode    serialized and decoded bytecode structures
 lm-verify      artifact and bytecode verifier
+lm-jit         verified native regions and executable memory
+lm-link        artifact resolution, relocation, and code namespaces
 lm-heap        per-VM heap, object table, collector, native shapes
 lm-graph       freeze/copy/digest/boundary/snapshot graph engine
 lm-vm          frames, interpreter, pending performs, policy
 lm-host        root operations and async completion adapters
 lm-proc        scheduler and mailboxes
 lm-compiler    scanner through artifact emission
+lm-testkit     conformance, corruption, and benchmark support
 lm-cli         build/run/test/inspect tools
 ```
 
-`lm-vm` depends on no filesystem, clock, socket, command-line, or compiler frontend. `lm-host` receives validated values and designators, never an arbitrary mutable guest reference.
+`lm-vm` depends on no filesystem, clock, socket, command-line, or compiler frontend.
+
+`lm-jit` depends on explicit bytecode, verifier, value, and heap ABI data.
+
+`lm-jit` does not depend on `lm-vm`.
+
+`lm-host` receives validated values and designators, never an arbitrary mutable guest reference.
 
 ### 22.2 `Value`
 
-On 64-bit hosts the baseline representation is a stable 16-byte tagged record rather than a Rust enum with unspecified layout or immediate NaN boxing:
+`Value` is the canonical 16-byte runtime value.
+
+The implementation uses a C-compatible tagged union with a 64-bit tag.
 
 ```text
+tag:     u64
 payload: u64
-kind:    u32
-aux:     u32
 ```
 
-`payload` holds the full bits of `Int` or `Float`, a scalar value, or a 64-bit object/handle reference. `kind` selects unit, bool, integer, float, byte, char, heap object, code/class value, or native handle family. `aux` stores a small subtype/type slot or zero.
+The stable tags are `Unit`, `Bool`, `Int`, `Float`, `Char`, `Obj`, `Op`, `Callback`, `EmptyCase`, and `Uninit`.
 
-The 16-byte choice keeps full 64-bit integers and canonical float bits without pointer-width assumptions, makes snapshot/debug dumps straightforward, and confines tag decoding to generated helpers. A NaN-boxed or 8-byte mode is a future measured optimization, not a premise of the language.
+Tags are append-only. A removed variant leaves a reserved tag.
+
+`Int` and `Float` retain all 64 payload bits.
+
+Object references contain two 32-bit fields.
+
+Float values always use the canonical NaN encoding.
+
+Compile-time assertions check the size, alignment, tag width, and payload offset.
+
+Heap arrays and native code use this same representation.
 
 ### 22.3 Heap references and object headers
 
-A heap reference is a packed `(slot: u32, generation: u32)`. Each VM owns an object-slot table whose live entry points into one of that VM's allocation pages. The generation catches stale internal handles during debug and fuzz builds. Guest references cannot name another VM's table; crossing a boundary always uses the codec.
+A heap reference is `(slot: u32, generation: u32)`.
 
-The baseline object header is 16 bytes:
+Each VM owns its object table.
 
-```text
-class_slot: u32
-byte_size:  u32
-shape_slot: u16
-flags:      u16    # frozen, marked, native, digest-cached, ...
-gc_word:    u32
-```
+One table page contains 1,024 stable entries.
 
-Ordinary instance payloads are contiguous `Value` fields in inherited-then-source order. Native objects use an immutable shape descriptor that supplies tracing, write locations, transfer, snapshot policy, snapshot encoding, digest, and destruction hooks.
+A page address never changes after publication.
 
-The object table adds one indexed load to field access but keeps the rest of the runtime safe Rust, allows page movement or compaction later, makes ownership checks explicit, and avoids self-referential Rust structures. A direct-pointer mode is permitted only after benchmarks show that indirection dominates.
+Each C-compatible entry contains a generation and one tagged state.
+
+The state is `Dead` or `Live`.
+
+A live entry contains one header and one tagged `Object` value.
+
+The header stores the frozen flag, logical byte charge, and shared-allocation key.
+
+The `Object` tag uses a stable 32-bit C representation.
+
+Native code reads only object variants in the declared heap ABI.
+
+Instance fields, list items, tuple items, and closure captures use `ValueArray`.
+
+`ValueArray` is a C-compatible record containing a pointer, length, and capacity.
+
+It owns one process-allocator allocation and supports fallible growth.
+
+Native shape descriptors define tracing, write locations, transfer, snapshots, digest, and cleanup.
+
+Compact text views use a separate fixed-page descriptor table.
+
+Their references use a reserved generation tag and retain normal stale-reference checks.
+
+Guest references cannot name another VM heap.
+
+A boundary transfer creates values in the destination heap.
 
 ### 22.4 Allocation and collection
 
-Each VM uses segmented bump pages for the fast allocation path and a per-size free list for swept objects. Collection is stop-the-VM mark/sweep because guest execution has one owner thread. Roots are module values, frames, locals/operands, the pending perform, native handles, and host-held temporary roots registered through scoped guards.
+Allocation takes one free entry or appends one object-table entry.
 
-Marking is iterative and shares the native shape table with the graph engine. Sweeping increments dead slot generations and returns storage to page/free lists. There are no guest finalizers and therefore no collector reentrancy. The baseline collector is non-moving; a young copying generation may be added behind `ObjRef` without changing guest semantics.
+The host process allocator supplies variable object payloads.
 
-Allocation is amortized O(1). A collection is O(live objects + heap pages). Heap limits are checked before committing page growth, so failure leaves the VM in a valid state.
+The final host binary selects the global process allocator.
+
+Runtime library crates do not select it.
+
+Collection uses stop-the-VM mark and sweep.
+
+The collector does not move live entries or payloads.
+
+Roots include frames, locals, operands, pending requests, native activations, image slots, and scoped host roots.
+
+Marking is iterative and uses the same native shape table as graph operations.
+
+Sweeping drops dead objects, advances their generations, and returns their slots to the free list.
+
+Compact text descriptors use their own bounded sweep.
+
+Shared immutable text and byte allocations use one reference ledger per heap.
+
+There are no guest finalizers or collector reentrancy.
+
+Heap limits are checked before committed growth.
+
+An allocation failure leaves valid machine and heap state.
 
 ### 22.5 Code, classes, and generic applications
 
-Verified `Code`, class definitions, source maps, and core-image data are immutable `Arc`-backed host objects shared across VMs by semantic hash. A VM's load table maps those hashes to dense `u32` slots.
+Verified code, classes, source maps, and core data are immutable shared host objects.
+
+A namespace maps their identities to dense runtime slots.
 
 A decoded instruction is a fixed 16-byte record containing opcode/flags and up to three `u32` operands. Loading resolves constant, code, class, type, selector, field, intrinsic, and operation hashes once. The interpreter does not parse variable-length bytecode or hash names in its hot loop.
 
 One interface call packs 16-bit interface and method indices into one operand. Each related table can contain at most 65,536 addressable entries.
 
-Class slots contain field offsets and a flattened selector-to-code table. Virtual dispatch is two indexed loads: runtime class slot, then selector slot. Generic applications share code and object layout but have distinct interned `TypeId` records containing argument type IDs for reflection and boundary validation.
+Class slots contain field offsets and flattened dispatch rows.
+
+Virtual dispatch loads the runtime class and selector target.
+
+Generic applications share code and object layout.
+
+Closed type records retain their argument types for reflection and boundary checks.
 
 ### 22.6 Frames, locals, and operands
 
-Frames are explicit fixed records, approximately 32–40 bytes in the reference build:
+Frames are explicit records:
 
 ```text
-code_slot
-pc
-local_base / local_count
-operand_base / current_height
-caller_frame
-return_destination
-source_cursor
+function version
+block and instruction
+local base
+operand base
+capture reference
+type environment
 ```
 
-Locals and operands occupy one VM-owned `Vec<Value>` arena; frames occupy a separate `Vec<Frame>`. A guest call checks limits, reserves arena space, writes a frame, and jumps. A return truncates the arenas and writes the result into the caller destination. Host recursion never represents a guest call, including native VM nesting.
+Locals and operands occupy VM-owned `Value` arenas.
 
-The Rust loop avoids holding references into these vectors across allocation or an operation call. It works with indices and reloads after helpers that may grow storage or collect.
+Frames occupy a separate frame vector.
+
+An interpreter call checks limits, reserves storage, writes a frame, and transfers control.
+
+A return truncates the arenas and leaves its result for the caller.
+
+Interpreter calls never consume host call-stack depth.
+
+The interpreter retains indices across any operation that can grow storage or collect.
 
 ### 22.7 Interpreter loop and cost model
 
-The interpreter is a generated `match` loop over decoded opcodes. `run`, `step`, and `drive` call the same loop with different stop modes. The loop keeps the current frame index and PC in local Rust variables and writes them back only at safepoints, calls, performs, faults, or exits.
+The interpreter uses one `match` loop over decoded instructions.
+
+`run`, `step`, and `drive` use the same loop with different stop modes.
+
+The loop materializes current position at calls, performs, faults, safepoints, and exits.
 
 Ordinary verified instructions do not run subtype checks. Integer and float operations inspect only the known scalar tag; field and selector offsets are pre-resolved; locals and operands are bounds-safe by verified maxima plus runtime arena limits.
 
@@ -3054,7 +3236,7 @@ Reference performance invariants:
 - no heap allocation for `ReplySink` validation;
 - snapshots and graph operations proportional to reachable encoded data, not heap capacity.
 
-The benchmark suite records dispatch, direct/virtual call, allocation, list traversal, map lookup, perform pass/block/mock, `drive` interception, nested-VM run, freeze, snapshot write/load, and proc send/receive. Regressions are compared against committed distributions, not a single machine-specific nanosecond threshold.
+The benchmark suite measures dispatch, calls, allocation, collections, effects, VM control, snapshots, and proc communication.
 
 ### 22.8 Pending performs and typed requests
 
@@ -3140,6 +3322,20 @@ A Bytes slice is also an explicit view. `Bytes.compact` copies the visible bytes
 
 Text and Bytes can share one physical byte allocation. A heap charges this allocation once for all its local views.
 
+`split` and `lines` can allocate immutable views in one descriptor-page batch.
+
+One owner record retains the shared root for the complete batch.
+
+A nested batch from one compact view reuses that owner record.
+
+Each result remains a normal `Value::Obj` reference.
+
+Collection checks each descriptor generation and releases the owner after its final view dies.
+
+Boundary transfer, compaction, and snapshot encoding materialize an ordinary `Substring` object.
+
+The heap charges the same logical view cost for both storage classes.
+
 `Text.bytes` shares storage. `Bytes.utf8_view` validates UTF-8 and returns a shared Substring.
 
 `Bytes.utf8` validates UTF-8 and returns a bounded String. It copies only when the retention bound requires a copy.
@@ -3174,7 +3370,7 @@ One non-recursive engine drives mark, deep freeze, frozen verification, boundary
 - transfer/copy: O(V + E + bytes), preserves cycles and sharing;
 - digest: O(V + E + bytes), assigns deterministic traversal ordinals and domain-separates backreferences;
 - snapshot write: O(reachable encoded bytes plus machine-world state);
-- external snapshot load: O(container bytes) once, producing trusted state.
+- external snapshot load: O(container bytes), producing decoded and structurally admitted state.
 
 Depth never consumes the Rust stack. Every mode has object, edge, byte, and work limits. Transfer and copy commit destination state only after preflight succeeds.
 
@@ -3186,21 +3382,303 @@ The default block action requires no allocation. Live edits replace one action u
 
 ### 22.12 Procs, snapshot barriers, and asynchronous host work
 
-A proc owns one `VmState` on one scheduler task. The deterministic scheduler uses one FIFO ready queue. It runs each ready task for one fixed instruction quantum. Wake indexes name mailbox changes, terminal states, and host completions. A state change wakes only tasks in its matching index. The scheduler waits on the host only when no task is ready. One VM never executes concurrently.
+A proc owns one `VmState` on one scheduler task.
 
-Task keys and wake keys contain plain identifiers and counters. The parallel worker scheduler uses the same records.
+The runtime provides deterministic and parallel scheduler modes.
 
-Each proc has a stable opaque reference with a generation for dead-proc detection. Handle transfer preserves the reference.
+Both modes use one coordinator state machine and one report commit path.
 
-A snapshot barrier pauses the reachable machines at safepoints, closes the set over the handles found in their state, and records one mailbox acceptance cut. It resumes the original world after success or failure. Host scheduler objects never enter snapshot bytes. Every control call on a machine serializes through the scheduler, so the barrier never races a holder.
+The coordinator owns the complete `World` and every cross-machine commit.
 
-Asynchronous host operations receive a single-use completion sink containing only controlled-VM ID, pending ordinal, and typed reply encoder. Completion queues never hold Rust references into the guest heap. Pause/resume transfers scheduler ownership at an interpreter safepoint.
+It owns task order, activation stacks, wait indexes, policies, image slots, and snapshot barriers.
 
-`docs/specs/sidecar/multi-threaded-scheduler.md` defines parallel mode and the deterministic compatibility contract.
+A task can drive a stack of held VMs.
 
-Each VM also owns a host-side resource registry outside the guest heap. The registry records resource kind, scope identity, pending ordinal, and cleanup state. Snapshot preflight reads this registry and the guest graph to find live host attachments.
+Only the active machine enters an execution lease.
 
-### 22.13 Unsafe-code policy
+An execution lease gives one worker exclusive machine ownership.
+
+A worker receives immutable verified code and bounded execution resources.
+
+It receives no mutable `World` reference and invokes no host operation.
+
+One VM never executes concurrently.
+
+Deterministic mode executes leases on the coordinator thread.
+
+Parallel mode uses a bounded worker pool and one FIFO lease queue.
+
+The default deterministic and parallel poll intervals are 16,384 guest instructions.
+
+An explicit fixed quantum replaces demand-driven polling.
+
+At a poll, a worker continues when no other lease waits.
+
+It rotates its lease when another lease waits.
+
+This rule keeps the native poll cheap when no coordinator work exists.
+
+Parallel mode probes work on the coordinator before it activates the pool.
+
+Boundary-heavy single-task work stays on the coordinator path.
+
+An embedding host can share one worker pool across several worlds.
+
+Each report contains a world identity and a unique lease token.
+
+The coordinator rejects stale, duplicate, or foreign reports.
+
+A worker returns for effects, waits, sends, spawns, nested VM control, policy edits, snapshots, terminal values, and faults.
+
+The coordinator commits that action before it dispatches the task again.
+
+Cross-machine transfer requires both machines to become resident.
+
+The coordinator recalls a leased destination before it commits the transfer.
+
+The source stays blocked until the transaction completes.
+
+The coordinator commit order defines accepted mailbox order.
+
+One sender preserves its message order.
+
+Different senders have no relative ordering guarantee in parallel mode.
+
+Deterministic mode preserves FIFO task and trace order.
+
+Parallel mode preserves results and machine-local instruction order.
+
+It does not promise repeatable cross-task interleavings.
+
+Shared world fuel uses bounded atomic claims.
+
+Unused fuel returns when a lease reports.
+
+Machine heap accounting remains local to its exclusive lease.
+
+World machine, image, child, and wait limits remain coordinator-owned.
+
+Wake indexes name mailbox changes, terminal states, waits, and host completions.
+
+A state change wakes only tasks registered for its key.
+
+The scheduler calls the host wait operation only when no task is ready.
+
+An asynchronous completion sink contains machine identity, request ordinal, and one typed reply encoder.
+
+Completion queues contain no Rust reference into a guest heap.
+
+A snapshot barrier requests each selected lease at a safepoint.
+
+It closes the selected set over machine handles discovered during capture.
+
+It records one mailbox acceptance cut.
+
+The barrier resumes the original world after success or failure.
+
+Host scheduler objects never enter snapshot bytes.
+
+Each VM also owns a host-side resource registry outside its heap.
+
+The registry records resource kind, scope identity, request ordinal, and cleanup state.
+
+Snapshot preflight reads the registry and guest graph to find live host attachments.
+
+### 22.13 Native compilation
+
+The reference runtime provides `Interpreter`, `Auto`, and `Native` engine modes.
+
+The host selects the mode.
+
+Engine policy is not guest state and never enters artifacts or snapshots.
+
+Engine choice cannot change results, faults, host actions, or retired instruction counts.
+
+Verified LMBC is the only native compiler input.
+
+The verifier proves code structure and instruction types.
+
+The JIT consumes verifier program-point metadata.
+
+It does not repeat type checking.
+
+An entry plan names only values that the native region can read.
+
+An entry guard checks their runtime representations before entry.
+
+A failed guard changes no machine state and resumes the interpreter at the same position.
+
+The guard does not inspect dormant locals or unrelated machines.
+
+An externally restored world can contain structurally valid values with wrong tags.
+
+Native entry guards and checked native heap loads contain those values.
+
+The world restore flag also enables checked interpreter boundaries.
+
+That flag does not select the execution engine.
+
+Deterministic and parallel execution use one engine boundary:
+
+```text
+run_turn(exclusive machine, immutable code, environments, limits, engine)
+  -> turn result
+```
+
+Compiled code captures no worker identity or mutable `World` pointer.
+
+One native activation owns all compiled frames until an observable boundary.
+
+It contains contiguous scalar storage, frame records, entry cells, fuel, and one exit record.
+
+Each native frame records its function, resume position, scalar window, operand height, type environment, and physical stack charge.
+
+A direct call loads one stable function entry cell.
+
+A present entry pushes a logical frame and performs one native call.
+
+A missing entry exits before the call retires.
+
+The interpreter executes the unchanged call and can enter native code at another segment head.
+
+A native return removes one native frame and leaves its result for the caller.
+
+Native recursion uses the same convention.
+
+One physical native call chain has a 256 KiB stack budget.
+
+The compiler measures each emitted function frame and adds a fixed ABI reserve.
+
+An excess call exits before retirement and unwinds the physical chain.
+
+The logical native frame table remains live.
+
+Execution retries the call with a fresh physical budget.
+
+The guest frame limit remains authoritative.
+
+Native activation storage grows geometrically outside generated call code.
+
+Storage growth does not materialize canonical `VmState`.
+
+The planner can inline bounded direct callees with compatible summaries.
+
+An inline child retains exact fuel, faults, and parent continuation state.
+
+A region contains one verified function control-flow graph.
+
+A segment is one fixed-cost path between reservation heads and engine boundaries.
+
+Conditional branches split bytecode blocks into segments.
+
+A retryable instruction starts one segment.
+
+A retry resumes at that segment head.
+
+Native code can cross segment edges and loop backedges without returning to Rust.
+
+Every bytecode instruction has one exhaustive treatment:
+
+- direct register code;
+- guarded memory access;
+- an inline fast path with one typed slow path;
+- a native call;
+- one fixed typed runtime helper;
+- an observable engine exit.
+
+The opcode ledger also records replay, fault-stack, and exit behavior.
+
+A new opcode cannot compile until this ledger classifies it.
+
+No temporary instruction treatment exists.
+
+An observable instruction can exit, execute once in the interpreter, and resume at a native segment head.
+
+Fuel counts retired bytecode instructions.
+
+Native code reserves hard fuel before each segment chain.
+
+Several acyclic segments can share one reservation.
+
+Insufficient hard fuel exits at the current segment head.
+
+The interpreter executes the partial reservation and lands the exact stop.
+
+`vm.step()` and bounded drive retain instruction-exact stopping.
+
+Scheduler polls occur at deterministic reservation heads.
+
+An idle poll rearms inside native code.
+
+A requested poll returns canonical state and the exact retired count.
+
+Guest faults use explicit exit records, not Cranelift traps.
+
+Fault exits preserve the post-instruction position and exact operand consumption.
+
+Generated code reads the canonical `Value`, object table, and `ValueArray` layouts.
+
+It maintains no parallel object representation.
+
+A validated entry address remains stable until a safepoint.
+
+A movable payload pointer lives only between calls or under an explicit stability proof.
+
+Any call that can grow or collect ends that proof.
+
+Native code reloads the payload pointer after the proof ends.
+
+Direct fast paths cover common field, tuple, list, map, builder, and scalar text operations.
+
+Each fast path performs generation, shape, bounds, and frozen checks that its memory access requires.
+
+Slow paths use fixed typed signatures.
+
+No generic operation dispatcher decodes a runtime contract.
+
+A helper remains appropriate only when its work dominates the call cost.
+
+An effect stores canonical request arguments before it leaves generated code.
+
+A scalar effect reply can update a retained native activation.
+
+Inspection, recall, snapshots, faults, engine changes, and canonical stack mutation force materialization.
+
+Materialization reconstructs every logical frame from the activation records.
+
+An ordinary scheduler poll can retain the native activation.
+
+`Auto` starts in the interpreter and samples direct calls and loop backedges.
+
+It uses relaxed counters and no profiling mutex.
+
+A cache lookup occurs before specialization work.
+
+Permanent compiler rejection stops later probes for that function.
+
+Code-cache pressure remains retryable and never becomes a compiler verdict.
+
+Repeated quick exits can disable native entry for one compiled function.
+
+`Native` bypasses productivity policy for differential testing.
+
+One engine cache belongs to an exact namespace layout.
+
+Dense function slots own compiler verdicts and stable entry cells.
+
+The host limits executable code by bytes.
+
+Published native code is immutable and releases executable memory on final drop.
+
+Cold and warm measurements remain separate.
+
+A warm measurement uses one stable namespace and engine.
+
+The JIT reports compilation, entry, retirement, guard, helper, allocation, continuation, materialization, and exit counters.
+
+Differential tests compare complete state across both drive modes and all supported fuel boundaries.
+
+### 22.14 Unsafe-code policy
 
 Unsafe Rust is confined to page allocation, raw byte-copy primitives, and optional C ABI shims. Every unsafe module states its invariants and has Miri/property tests. The verifier, byte decoder, snapshot loader, graph algorithms, policy table, interpreter state machine, and host dispatch are safe Rust. Fuzz builds enable generation checks and expensive heap validation after every instruction transition.
 
@@ -3250,7 +3728,7 @@ Fs.Rename      (String, String, RenameMode) -> Result[(), FsError]
 Fs.SyncDir     (String) -> Result[(), FsError]
 ```
 
-A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. The standard library never reopens a raw file handle silently. A later version may define a checkpointable file type with an explicit restore contract.
+A live `FileHandle` names one resource entry and one service binding. The binding can belong to the root host or a driver. Every alias closes together. An open entry blocks snapshot creation. A closed handle remains typed machine state and restores as closed. Raw file handles have no checkpoint contract.
 
 File operations can suspend their proc. The host adapter performs blocking platform work outside the scheduler thread.
 
@@ -3296,7 +3774,7 @@ The host invokes no shell unless a library names one explicitly.
 
 An overlay cannot remove an inherited value.
 
-The host-effects sidecar defines child inputs, ownership, limits, and cleanup.
+Child inputs, ownership, limits, and cleanup follow the resource rules in sections 16.4 and 25.5.
 
 ### 23.4 Clock and randomness
 
@@ -3344,7 +3822,7 @@ Cancellation keeps a selected signal in its stream until another request commits
 
 Live `RawMode` and `SignalStream` resources block snapshot creation.
 
-The host-effects sidecar defines delivery, escalation, limits, and platform behavior.
+Signal delivery, escalation, and cleanup follow the resource rules in sections 16.4 and 25.5.
 
 ### 23.6 Networking
 
@@ -3432,7 +3910,7 @@ Every connected or accepted TCP stream has `TCP_NODELAY` enabled.
 
 The host closes the stream when it cannot enable this option.
 
-The network sidecar defines limits, ownership, errors, and protocol layers.
+Network handles follow the resource rules in sections 16.4 and 25.5.
 
 ### 23.7 VM operations
 
@@ -3582,7 +4060,7 @@ Each `Vm.Change*` operation captures the current slot version without publishing
 
 `Vm.ReplaceAll` publishes all valid changes together or publishes none.
 
-The metaprogramming sidecar defines the complete slot contracts and replacement rules.
+This section defines the complete slot contracts and replacement rules.
 
 The held, receiverless, and full VM forms use separate exact operation identities. They share one snapshot implementation family.
 
@@ -3646,7 +4124,7 @@ Preparation keeps consumable input until selection commits.
 
 Cancellation keeps that input available to the same logical resource.
 
-`docs/specs/sidecar/waits.md` defines readiness, drive leases, and scheduler indexes.
+Readiness commits one source atomically. The scheduler indexes each pending source by its stable wait key.
 
 ### 23.10 Compiler and reflection
 
@@ -3674,7 +4152,7 @@ The diagnostic source name affects only diagnostics and debug records.
 
 `Reflect.ParseSyntax` returns a lossless syntax tree, parse status, and diagnostics.
 
-`docs/specs/sidecar/vm-metaprogramming.md` defines syntax values, construction, detachment, and compiler inputs.
+Syntax values preserve source text, token structure, trivia, and diagnostics. Construction and detachment produce immutable syntax values.
 
 All host-operation argument/reply types are frozen ABI definitions. Operations may add ordinary error arms compatibly only through an ABI version change reflected in identity hashes.
 
@@ -3956,7 +4434,7 @@ is_superset(self, other: Set[T]) -> Bool
 is_disjoint(self, other: Set[T]) -> Bool
 ```
 
-A deque is not core. A later standard module can add one without changing language semantics.
+A deque is not part of the core image.
 
 ### 24.6 Strings, bytes, builders, and formatting
 
@@ -4052,7 +4530,7 @@ Interpolation accepts any `Text`. A `Substring` appends to the builder without a
 
 The implementation uses one lazy sparse scalar index for each text root. It records every 64th scalar position.
 
-The first indexed operation can build this index in O(n) time. A later scalar boundary lookup scans at most 63 scalars.
+The first indexed operation can build this index in O(n) time. A scalar boundary lookup scans at most 63 scalars.
 
 `each` is the primary scalar traversal operation. `map` transforms each scalar and returns a new String.
 
@@ -4463,7 +4941,7 @@ This rule adds no variadic generics, tuple spreading, or dependent native rule.
 
 `std/proc` supplies explicit supervision, bounded send loops, close/drain, cancellation-message conventions, and result aggregation. It does not add shared memory or hide proc effects. `Handle[M,R]` preserves message and result types through `send`, `done`, `pause`, `resume`, transfer, and snapshot restore.
 
-### 24.14 Compiler, reflection, and testing
+### 24.15 Compiler, reflection, and testing
 
 `std/compiler.compile(source)` can supply an empty `CompileEnv` and default options.
 
@@ -4479,7 +4957,7 @@ The runner can use `drive` for deterministic operation transcripts.
 
 The compiler test harness has UI diagnostics, compile-pass, run-pass, run-fail, bytecode-verifier, artifact/snapshot corruption, conformance, fuzz-regression, and benchmark suites.
 
-### 24.15 Deliberate omissions
+### 24.16 Deliberate omissions
 
 The minimal library does not include an iterator trait hierarchy, async/await, regex engine, database client, GUI, or locale framework.
 
@@ -4549,7 +5027,7 @@ Before loading guest code, the host verifies its compiled-in/generated tables ag
 
 ### 26.1 Package model
 
-A package root is one source module in version 0.2. Supporting modules compile independently and are supplied as explicit compile/link bindings to the root. Surface `import` syntax is deferred; dependency edges live in the manifest/build graph and artifact import slots.
+A package root is one source module. Supporting modules compile independently and use explicit compile and link bindings. Source modules use `use`. Dependency edges live in the manifest and artifact import slots.
 
 A minimal `lm.package` is deterministic data:
 
@@ -4665,7 +5143,7 @@ A conforming implementation passes tests for at least:
 9. deep freeze, cycles, sharing, map order, digest stability, and frozen write barriers;
 10. boundary copy of mutable graphs; rejection of scoped and holder-local values; sendable proc-handle transfer;
 11. snapshot round trips at every instruction boundary and in `asked`; world closure over reachable machines;
-12. one-time snapshot load verification followed by trusted resume without repeated whole-image checks;
+12. one-time snapshot admission followed by guarded execution without repeated whole-image checks;
 13. proc isolation, FIFO acceptance, close/drain, pause/resume, dead-peer results, and terminal transfer checks;
 14. machine-reference relocation and complete world independence across multi-shot restore;
 15. host-attachment preflight and precise blocker paths;

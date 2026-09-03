@@ -1,5 +1,5 @@
 //! The snapshot admission suite of
-//! `docs/specs/sidecar/snapshot-image-admission.md`.
+//! `docs/language-spec.md` section 17.8.
 //!
 //! Every case builds one editable image, damages exactly one position,
 //! and states what the damage produces. An image is editable data, so

@@ -1,5 +1,5 @@
 //! The canonical closed type table and the type environment table
-//! (`docs/specs/sidecar/snapshot-image-admission.md` section 5.6).
+//! (`docs/language-spec.md` section 17.8).
 //!
 //! The verifier proves one generic body once, with the type variables
 //! of that body opaque. One activation of the body needs the type
