@@ -490,6 +490,7 @@ enum CollectionIterationOp {
 enum CollectionExtensionOp {
     ListCapacity,
     ListSet,
+    ListSwap,
     ListPop(u32),
     ListInsert,
     ListRemove { swap: bool },

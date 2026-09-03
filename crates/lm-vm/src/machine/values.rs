@@ -665,6 +665,15 @@ impl Machine {
                 let len = i64::try_from(len).map_err(|_| FaultCode::IntegerOverflow)?;
                 self.push(Value::Int(len))?;
             }
+            Instr::Native(lm_bytecode::NativeInstr::BbCapacity) => {
+                let buffer = self.pop_obj()?;
+                let capacity = match self.vm.heap.get(buffer) {
+                    Object::ByteBuf(bytes) => bytes.capacity().ok_or(FaultCode::InvalidVmState)?,
+                    _ => return Err(BAD_TYPE),
+                };
+                let capacity = i64::try_from(capacity).map_err(|_| FaultCode::IntegerOverflow)?;
+                self.push(Value::Int(capacity))?;
+            }
             Instr::Native(lm_bytecode::NativeInstr::BbBuild) => {
                 let buffer = self.pop_obj()?;
                 let len = match self.vm.heap.get(buffer) {
@@ -760,6 +769,37 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 if !cleared {
+                    return Err(FaultCode::InvalidVmState);
+                }
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbSet) => {
+                let value = self.pop_int()?;
+                let index = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                let byte = u8::try_from(value).map_err(|_| FaultCode::IntegerOverflow)?;
+                let index = usize::try_from(index).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let changed = match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(bytes) if bytes.buffer().is_some() => bytes.set(index, byte),
+                    Object::ByteBuf(_) => return Err(FaultCode::InvalidVmState),
+                    _ => return Err(BAD_TYPE),
+                };
+                if !changed {
+                    return Err(FaultCode::IndexOutOfBounds);
+                }
+                self.push(Value::Obj(buffer))?;
+            }
+            Instr::Native(lm_bytecode::NativeInstr::BbTruncate) => {
+                let length = self.pop_int()?;
+                let buffer = self.pop_obj()?;
+                self.frozen_guard(buffer)?;
+                let length = usize::try_from(length).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let changed = match self.vm.heap.get_mut(buffer) {
+                    Object::ByteBuf(bytes) => bytes.truncate(length),
+                    _ => return Err(BAD_TYPE),
+                };
+                if !changed {
                     return Err(FaultCode::InvalidVmState);
                 }
                 self.push(Value::Obj(buffer))?;

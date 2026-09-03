@@ -261,6 +261,7 @@ pub(crate) fn verify_func(
                         &application.rows,
                         &module.func_bounds[*callee as usize],
                         &module.func_bounds[fidx as usize],
+                        Some(fidx),
                     ) {
                         return Err(err(
                             fidx,
@@ -376,6 +377,7 @@ pub(crate) fn verify_func(
                         &[],
                         &module.class_bounds[*class as usize],
                         &module.func_bounds[fidx as usize],
+                        Some(fidx),
                     ) {
                         return Err(err(
                             fidx,
@@ -576,6 +578,7 @@ pub(crate) fn verify_func(
                                     &application.rows,
                                     &callable.type_bounds,
                                     &module.func_bounds[fidx as usize],
+                                    Some(fidx),
                                 ) {
                                     return Err(err(
                                         fidx,
@@ -618,6 +621,7 @@ pub(crate) fn verify_func(
                                     &application.rows,
                                     &constructor.type_bounds,
                                     &module.func_bounds[fidx as usize],
+                                    Some(fidx),
                                 ) {
                                     return Err(err(
                                         fidx,

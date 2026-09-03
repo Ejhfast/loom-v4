@@ -390,7 +390,12 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             )?;
             push_static(builder, stack, ScalarKind::Object(0), result)?;
         }
-        Instr::Native(NativeInstr::SbLen | NativeInstr::SbByteLen | NativeInstr::BbLen) => {
+        Instr::Native(
+            NativeInstr::SbLen
+            | NativeInstr::SbByteLen
+            | NativeInstr::BbLen
+            | NativeInstr::BbCapacity,
+        ) => {
             let deopt_stack = stack.clone();
             let reference = pop_native(stack)?;
             let position = segment.start + within as u32;
@@ -409,6 +414,11 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                     JIT_OBJECT_BYTE_BUFFER,
                     JIT_BYTE_BUFFER_ACTIVE_OFFSET,
                     JIT_BYTE_BUFFER_LEN_OFFSET,
+                ),
+                Instr::Native(NativeInstr::BbCapacity) => (
+                    JIT_OBJECT_BYTE_BUFFER,
+                    JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+                    JIT_BYTE_BUFFER_CAPACITY_OFFSET,
                 ),
                 _ => return Err(CompileError::Backend),
             };
@@ -466,6 +476,52 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                 &deopt_stack,
             )?;
             push_static(builder, stack, ScalarKind::Int, result)?;
+        }
+        Instr::Native(NativeInstr::BbSet) => {
+            let deopt_stack = stack.clone();
+            let value = pop_native(stack)?;
+            let index = pop_native(stack)?;
+            let reference = pop_native(stack)?;
+            let position = segment.start + within as u32;
+            emit_byte_buffer_set(
+                builder,
+                values,
+                reference,
+                index,
+                value,
+                HeapExitEmission {
+                    point: FaultPoint {
+                        block: segment.block,
+                        instruction: position + 1,
+                        prefix: fault_prefix,
+                    },
+                    fault_stack: stack,
+                    deopt_stack: &deopt_stack,
+                },
+            )?;
+            push_static(builder, stack, ScalarKind::Object(0), reference)?;
+        }
+        Instr::Native(NativeInstr::BbTruncate) => {
+            let deopt_stack = stack.clone();
+            let length = pop_native(stack)?;
+            let reference = pop_native(stack)?;
+            let position = segment.start + within as u32;
+            emit_byte_buffer_truncate(
+                builder,
+                values,
+                reference,
+                length,
+                HeapExitEmission {
+                    point: FaultPoint {
+                        block: segment.block,
+                        instruction: position + 1,
+                        prefix: fault_prefix,
+                    },
+                    fault_stack: stack,
+                    deopt_stack: &deopt_stack,
+                },
+            )?;
+            push_static(builder, stack, ScalarKind::Object(0), reference)?;
         }
         Instr::Native(NativeInstr::BytesLen) => {
             let deopt_stack = stack.clone();

@@ -12,6 +12,8 @@ fn builders_and_byte_construction_use_dedicated_paths() {
         "finished_text = builder.finish()\n",
         "buffer = ByteBuffer()\n",
         "buffer.reserve(8).append(1).append(2).extend(Bytes(\"AB\"))\n",
+        "reserved = buffer.capacity() >= 8\n",
+        "buffer.set(1, 9).truncate(3)\n",
         "byte = buffer.at_or(1, 0)\n",
         "built_bytes = buffer.build()\n",
         "byte_size = buffer.len()\n",
@@ -32,7 +34,7 @@ fn builders_and_byte_construction_use_dedicated_paths() {
         "right = b\"\\x33\\x55\"\n",
         "bits = (left & right).len() + (left | right).len()\n",
         "bits = bits + (left ^ right).len() + (~left).len()\n",
-        "(built_text.byte_len(), text_size, finished_text.byte_len(), byte, ",
+        "(built_text.byte_len(), text_size, finished_text.byte_len(), reserved, byte, ",
         "byte_size, finished_bytes.len(), slice_size, compact.len(), view_size, range_size, bits)\n",
     );
     let artifact = lm_testkit::compile_text("jit-builders.lm", source)
@@ -44,6 +46,7 @@ fn builders_and_byte_construction_use_dedicated_paths() {
     assert_eq!(native_dump, interpreted_dump);
     assert!(matches!(native, Outcome::Done(_)));
     assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert_eq!(metrics.native_replay_exits, 0, "{metrics:?}");
     assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
 }
 
@@ -211,8 +214,11 @@ fn builder_construction_matches_each_fuel_boundary() {
         "builder = StringBuilder()\n",
         "text = builder.append(\"loom\").append_int(-12).append_bool(false).push_char('é').build()\n",
         "buffer = ByteBuffer()\n",
-        "bytes = buffer.reserve(8).append(1).extend(Bytes(text)).build()\n",
-        "(text, bytes)\n",
+        "buffer.reserve(8).append(1).extend(Bytes(text))\n",
+        "capacity = buffer.capacity()\n",
+        "buffer.set(0, 2).truncate(3)\n",
+        "bytes = buffer.build()\n",
+        "(text, bytes, capacity)\n",
     );
     let artifact = lm_testkit::compile_text("jit-builder-fuel.lm", source)
         .expect("the builder fuel case compiles");
@@ -253,6 +259,18 @@ fn builder_faults_match_the_interpreter() {
         (
             "buffer = ByteBuffer()\nbuffer.reserve(-1)\n",
             lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            "buffer = ByteBuffer()\nbuffer.append(1)\nbuffer.set(0, 256)\n",
+            lm_vm::FaultCode::IntegerOverflow,
+        ),
+        (
+            "buffer = ByteBuffer()\nbuffer.append(1)\nbuffer.set(1, 2)\n",
+            lm_vm::FaultCode::IndexOutOfBounds,
+        ),
+        (
+            "buffer = ByteBuffer()\nbuffer.append(1)\nbuffer.truncate(-1)\n",
+            lm_vm::FaultCode::IndexOutOfBounds,
         ),
         (
             "builder = StringBuilder()\nbuilder.finish()\nbuilder.len()\n",

@@ -1,0 +1,47 @@
+def locate[R: RandomAccess](
+  values: R,
+  compare: (R.Item) -> Ordering
+): Option[Int]
+  values.binary_search_by(compare)
+end
+
+values = [1, 2, 3, 4]
+values.swap(0, 3)
+values.reverse_range(1, 2)
+
+kept = values.copy()
+kept.retain(do |value: Int|: Bool value % 2 != 0 end)
+
+runs = [1, 1, 2, 2, 2, 3, 1, 1]
+runs.dedup_adjacent()
+
+windows = [1, 2, 3, 4].windows(3).map(
+  do |window: ListSlice[Int]|: List[Int] window.copy() end
+)
+zipped = [1, 2, 3].zip(["a", "b"])
+mapped = [1, 2, 3].flat_map(do |value: Int|: List[Int]
+  [value, -value]
+end)
+flattened = [[1, 2], [3], List[Int]()].flatten()
+distinct = [3, 1, 3, 2, 1].unique()
+ordered = [1, 2, 2, 4, 8]
+slice = ordered.slice_view(1, 3)
+
+(
+  values,
+  kept,
+  runs,
+  windows,
+  zipped,
+  mapped,
+  flattened,
+  distinct,
+  ordered.partition_point(do |value: Int|: Bool value < 4 end),
+  ordered.lower_bound(2),
+  ordered.upper_bound(2),
+  ordered.binary_search(2),
+  ordered.binary_search(3),
+  locate(slice, do |value: Int|: Ordering value.compare(2) end),
+  ordered.lower_bound_by(do |value: Int|: Ordering value.compare(3) end),
+  ordered.binary_search_by(do |value: Int|: Ordering value.compare(4) end)
+)

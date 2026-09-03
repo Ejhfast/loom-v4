@@ -926,6 +926,9 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BbFinish)
         | Instr::Native(NativeInstr::BbAt)
         | Instr::Native(NativeInstr::BbFindFrom)
+        | Instr::Native(NativeInstr::BbSet)
+        | Instr::Native(NativeInstr::BbCapacity)
+        | Instr::Native(NativeInstr::BbTruncate)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -1178,6 +1181,7 @@ fn preflight_extended(
         | ExtendedInstr::ListInsert
         | ExtendedInstr::ListRemove
         | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListSwap
         | ExtendedInstr::ListReserve
         | ExtendedInstr::ListTruncate
         | ExtendedInstr::ListContains
@@ -2310,6 +2314,9 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::RegexMatchEnd) => 0x10e,
             Instr::Native(NativeInstr::RegexMatchText) => 0x10f,
             Instr::Native(NativeInstr::RegexMatchGroupCount) => 0x110,
+            Instr::Native(NativeInstr::BbSet) => 0x115,
+            Instr::Native(NativeInstr::BbCapacity) => 0x116,
+            Instr::Native(NativeInstr::BbTruncate) => 0x117,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2359,6 +2366,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ListInsert => 0xc6,
             ExtendedInstr::ListRemove => 0xc7,
             ExtendedInstr::ListSwapRemove => 0xc8,
+            ExtendedInstr::ListSwap => 0x114,
             ExtendedInstr::ListReserve => 0xc9,
             ExtendedInstr::ListTruncate => 0xca,
             ExtendedInstr::ListContains => 0xcb,
@@ -2656,6 +2664,9 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BbClear)
             | Instr::Native(NativeInstr::BbAt)
             | Instr::Native(NativeInstr::BbFindFrom)
+            | Instr::Native(NativeInstr::BbSet)
+            | Instr::Native(NativeInstr::BbCapacity)
+            | Instr::Native(NativeInstr::BbTruncate)
             | Instr::Freeze
             | Instr::Native(NativeInstr::BytesNew)
             | Instr::Native(NativeInstr::BytesLen)
@@ -2785,6 +2796,7 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ListInsert
             | ExtendedInstr::ListRemove
             | ExtendedInstr::ListSwapRemove
+            | ExtendedInstr::ListSwap
             | ExtendedInstr::ListReserve
             | ExtendedInstr::ListTruncate
             | ExtendedInstr::ListContains

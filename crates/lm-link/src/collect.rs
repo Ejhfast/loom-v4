@@ -1036,7 +1036,10 @@ fn native_edges(
         | NativeInstr::BbReserve
         | NativeInstr::BbClear
         | NativeInstr::BbAt
-        | NativeInstr::BbFindFrom => role_edges(module, offsets, &["ByteBuffer"], edges),
+        | NativeInstr::BbFindFrom
+        | NativeInstr::BbSet
+        | NativeInstr::BbCapacity
+        | NativeInstr::BbTruncate => role_edges(module, offsets, &["ByteBuffer"], edges),
         NativeInstr::BytesEndsWith
         | NativeInstr::BytesContains
         | NativeInstr::BytesNew
@@ -1269,6 +1272,7 @@ fn extended_edges(
         | ExtendedInstr::ListInsert
         | ExtendedInstr::ListRemove
         | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListSwap
         | ExtendedInstr::ListReserve
         | ExtendedInstr::ListTruncate
         | ExtendedInstr::ListContains

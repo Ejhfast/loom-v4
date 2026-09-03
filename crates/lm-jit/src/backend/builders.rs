@@ -1164,3 +1164,112 @@ pub(super) fn emit_byte_buffer_at(
     builder.switch_to_block(done);
     Ok(builder.block_params(done)[0])
 }
+
+pub(super) fn emit_byte_buffer_set(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    index: ir::Value,
+    value: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTE_BUFFER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let negative_byte = builder.ins().icmp_imm(IntCC::SignedLessThan, value, 0);
+    let large_byte = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, value, i64::from(u8::MAX));
+    let invalid_byte = builder.ins().bor(negative_byte, large_byte);
+    emit_fault_check(
+        builder,
+        values,
+        invalid_byte,
+        EXIT_INTEGER_OVERFLOW,
+        exit.point,
+        exit.fault_stack,
+    )?;
+    let negative_index = builder.ins().icmp_imm(IntCC::SignedLessThan, index, 0);
+    let native_index = native_size(builder, values, index, exit)?;
+    let length = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let outside = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, native_index, length);
+    let invalid_index = builder.ins().bor(negative_index, outside);
+    emit_interpreter_replay(builder, values, invalid_index, exit.point, exit.deopt_stack)?;
+    let data = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_BYTE_BUFFER_DATA_OFFSET,
+    )?;
+    let address = builder.ins().iadd(data, native_index);
+    let byte = builder.ins().ireduce(types::I8, value);
+    builder.ins().store(MemFlags::trusted(), byte, address, 0);
+    Ok(())
+}
+
+pub(super) fn emit_byte_buffer_truncate(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    length: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTE_BUFFER,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    emit_active_guard(
+        builder,
+        values,
+        entry,
+        JIT_BYTE_BUFFER_ACTIVE_OFFSET,
+        exit.point,
+        exit.deopt_stack,
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, length, 0);
+    emit_interpreter_replay(builder, values, negative, exit.point, exit.deopt_stack)?;
+    let length = native_size(builder, values, length, exit)?;
+    let current = load_value(
+        builder,
+        values.pointer_type,
+        entry,
+        JIT_BYTE_BUFFER_LEN_OFFSET,
+    )?;
+    let changed = builder.ins().icmp(IntCC::UnsignedLessThan, length, current);
+    let update = builder.create_block();
+    let done = builder.create_block();
+    builder.ins().brif(changed, update, &[], done, &[]);
+
+    builder.switch_to_block(update);
+    store_native_value(builder, entry, JIT_BYTE_BUFFER_LEN_OFFSET, length)?;
+    builder.ins().jump(done, &[]);
+
+    builder.switch_to_block(done);
+    Ok(())
+}

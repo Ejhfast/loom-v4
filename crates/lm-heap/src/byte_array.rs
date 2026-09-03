@@ -59,6 +59,23 @@ impl ByteArray {
         self.vector().extend_from_slice(values);
     }
 
+    /// Replace one byte when the index exists.
+    pub(crate) fn set(&mut self, index: usize, value: u8) -> bool {
+        if index >= self.len {
+            return false;
+        }
+        // SAFETY: The index is inside the initialized allocation.
+        unsafe {
+            *self.data.add(index) = value;
+        }
+        true
+    }
+
+    /// Remove bytes after one length.
+    pub(crate) fn truncate(&mut self, length: usize) {
+        self.len = self.len.min(length);
+    }
+
     /// Remove all bytes.
     pub(crate) fn clear(&mut self) {
         self.len = 0;
@@ -193,6 +210,11 @@ mod tests {
         bytes.extend_from_slice(&[4, 5]);
         assert_eq!(bytes.as_ref(), [1, 2, 3, 4, 5]);
         assert!(bytes.capacity() >= bytes.len());
+        assert!(bytes.set(1, 9));
+        assert!(!bytes.set(5, 0));
+        bytes.truncate(3);
+        bytes.truncate(8);
+        assert_eq!(bytes.as_ref(), [1, 9, 3]);
         bytes.clear();
         assert!(bytes.is_empty());
     }

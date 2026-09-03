@@ -692,6 +692,48 @@ pub(super) fn emit_list_set(
     emit_store_value(builder, address, stored, contract.kind)
 }
 
+pub(super) fn emit_list_swap(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    first: ir::Value,
+    second: ir::Value,
+    exit: HeapExitEmission<'_>,
+) -> Result<(), CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_LIST,
+        exit.point,
+        ObjectGuard::Fault(exit.fault_stack),
+    )?;
+    emit_mutable_guard(builder, values, entry, exit)?;
+    let first = emit_checked_list_index(builder, values, entry, first, exit)?;
+    let second = emit_checked_list_index(builder, values, entry, second, exit)?;
+    let different = builder.ins().icmp(IntCC::NotEqual, first, second);
+    let swap = builder.create_block();
+    let done = builder.create_block();
+    builder.ins().brif(different, swap, &[], done, &[]);
+
+    builder.switch_to_block(swap);
+    emit_list_epoch_bump(builder, values, entry, exit)?;
+    let first_address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, first)?;
+    let second_address = emit_array_address(builder, values, entry, JIT_LIST_ITEMS_OFFSET, second)?;
+    let first_bits = load_heap_value(builder, types::I64, first_address, VALUE_PAYLOAD_OFFSET)?;
+    let first_tag = load_heap_value(builder, types::I64, first_address, VALUE_TAG_OFFSET)?;
+    let second_bits = load_heap_value(builder, types::I64, second_address, VALUE_PAYLOAD_OFFSET)?;
+    let second_tag = load_heap_value(builder, types::I64, second_address, VALUE_TAG_OFFSET)?;
+    store_heap_value(builder, first_address, VALUE_PAYLOAD_OFFSET, second_bits)?;
+    store_heap_value(builder, first_address, VALUE_TAG_OFFSET, second_tag)?;
+    store_heap_value(builder, second_address, VALUE_PAYLOAD_OFFSET, first_bits)?;
+    store_heap_value(builder, second_address, VALUE_TAG_OFFSET, first_tag)?;
+    builder.ins().jump(done, &[]);
+
+    builder.switch_to_block(done);
+    Ok(())
+}
+
 pub(super) fn emit_list_push(
     builder: &mut FunctionBuilder<'_>,
     values: NativeValues<'_>,

@@ -2683,6 +2683,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTE_BUFFER_FIND_FROM => {
                 Instr::Native(lm_bytecode::NativeInstr::BbFindFrom)
             }
+            lm_abi::INTRINSIC_BYTE_BUFFER_SET => Instr::Native(lm_bytecode::NativeInstr::BbSet),
+            lm_abi::INTRINSIC_BYTE_BUFFER_CAPACITY => {
+                Instr::Native(lm_bytecode::NativeInstr::BbCapacity)
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_TRUNCATE => {
+                Instr::Native(lm_bytecode::NativeInstr::BbTruncate)
+            }
             lm_abi::INTRINSIC_TEXT_FIND_BYTE_INDEX => {
                 Instr::Native(lm_bytecode::NativeInstr::TextFindByteIndex)
             }
@@ -2760,6 +2767,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_LIST_INSERT => extended(ExtendedInstr::ListInsert),
             lm_abi::INTRINSIC_LIST_REMOVE => extended(ExtendedInstr::ListRemove),
             lm_abi::INTRINSIC_LIST_SWAP_REMOVE => extended(ExtendedInstr::ListSwapRemove),
+            lm_abi::INTRINSIC_LIST_SWAP => extended(ExtendedInstr::ListSwap),
             lm_abi::INTRINSIC_LIST_RESERVE => extended(ExtendedInstr::ListReserve),
             lm_abi::INTRINSIC_LIST_TRUNCATE => extended(ExtendedInstr::ListTruncate),
             lm_abi::INTRINSIC_LIST_CONTAINS => extended(ExtendedInstr::ListContains),
@@ -4238,6 +4246,9 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BbFinish) => "BbFinish".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbAt) => "BbAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbFindFrom) => "BbFindFrom".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbSet) => "BbSet".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbCapacity) => "BbCapacity".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BbTruncate) => "BbTruncate".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest { ty } => format!("Digest {ty}"),
         Instr::EqDigest => "EqDigest".to_string(),
@@ -4322,6 +4333,7 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::ListInsert => "ListInsert".to_string(),
         ExtendedInstr::ListRemove => "ListRemove".to_string(),
         ExtendedInstr::ListSwapRemove => "ListSwapRemove".to_string(),
+        ExtendedInstr::ListSwap => "ListSwap".to_string(),
         ExtendedInstr::ListReserve => "ListReserve".to_string(),
         ExtendedInstr::ListTruncate => "ListTruncate".to_string(),
         ExtendedInstr::ListContains => "ListContains".to_string(),

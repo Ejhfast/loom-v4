@@ -4336,7 +4336,7 @@ TlsError, TlsStream
 Text, String, Substring, Char, Utf8Error, IndexError, HexError, ParseIntError, ParseFloatError, FloatToIntError, Bytes
 StringBuilder, ByteBuffer
 Display, PartialEq, Hashable, Comparable, Copyable, Add, Error
-Iterator, Iterable, Counted, ByteReader, ByteWriter
+Iterator, Iterable, Counted, RandomAccess, ByteReader, ByteWriter
 identity, display, hash_of, hash_combine, assert, assert_message
 ```
 
@@ -4388,7 +4388,36 @@ The top level cannot use `?`. A closure that uses `?` must declare its `Result` 
 
 `raise(fault: Fault): Never` raises an existing fault without replacing its trace.
 
-### 24.4 Native `List[T]`
+### 24.4 Random access and native `List[T]`
+
+`RandomAccess` extends `Counted` and `Iterable` with indexed reads.
+
+It provides binary-search defaults for ordered collections.
+
+```text
+RandomAccess
+  at(self, index: Int) -> Self.Item
+  get(self, index: Int) -> Option[Self.Item]
+  partition_point[e](self, predicate: (Self.Item) -> Bool with e) -> Int with e
+  lower_bound(self, value: Self.Item) -> Int when Self.Item: Comparable
+  upper_bound(self, value: Self.Item) -> Int when Self.Item: Comparable
+  binary_search(self, value: Self.Item) -> Option[Int] when Self.Item: Comparable
+  lower_bound_by[e](self, compare: (Self.Item) -> Ordering with e) -> Int with e
+  upper_bound_by[e](self, compare: (Self.Item) -> Ordering with e) -> Int with e
+  binary_search_by[e](self, compare: (Self.Item) -> Ordering with e) -> Option[Int] with e
+```
+
+The bound methods expect ascending input.
+
+The comparator reports each input element's order relative to the search value.
+
+`lower_bound` returns the first index that is not less than the value.
+
+`upper_bound` returns the first index that is greater than the value.
+
+`partition_point` returns the first index where its predicate is false.
+
+`List[T]` and `ListSlice[T]` implement `RandomAccess`.
 
 List literals have type `List[T]`; `[T]` is canonical type sugar. The minimum sealed method surface is:
 
@@ -4410,14 +4439,21 @@ pop(mut self) -> Option[T]
 insert(mut self, index: Int, value: T) -> ()
 remove(mut self, index: Int) -> T
 swap_remove(mut self, index: Int) -> T
+swap(mut self, first: Int, second: Int) -> ()
 reserve(mut self, additional: Int) -> ()
 truncate(mut self, length: Int) -> ()
 clear(mut self) -> ()
 copy(self) -> List[T]
 slice(self, start: Int, length: Int) -> List[T]
+slice_view(self, start: Int, length: Int) -> ListSlice[T]
 concat(self, other: List[T]) -> List[T]
 extend(mut self, other: List[T]) -> ()
+reverse_range(mut self, start: Int, length: Int) -> ()
 reverse(mut self) -> ()
+retain[e](mut self, keep: (T) -> Bool with e) -> () with e
+dedup_adjacent(mut self) -> () when T: PartialEq
+windows(self, size: Int) -> List[ListSlice[T]]
+flatten(self) -> List[T.Item] when T: Iterable
 contains(self, value: T) -> Bool
 position[e](self, predicate: (T) -> Bool with e) -> Option[Int] with e
 find[e](self, predicate: (T) -> Bool with e) -> Option[T] with e
@@ -4437,13 +4473,35 @@ freeze(self) -> List[T]
 
 Faulting index methods use `IndexOutOfBounds`; allocation failure obeys heap limits. Higher-order methods call the closure in list order and stop immediately on fault.
 
+`swap` exchanges two valid positions. Equal positions do not change the list.
+
+`reverse_range` reverses one valid half-open range. `reverse` applies it to the complete list.
+
+`retain` preserves the order of values accepted by its predicate.
+
+`dedup_adjacent` preserves the first value from each adjacent equal run.
+
+`windows` requires a positive size. It returns overlapping views in source order.
+
+A size greater than the list length gives an empty list.
+
+`flatten` concatenates each nested iterable in source order.
+
+`ListSlice` shares its source list. Structural source changes make later slice operations fault with `CollectionModified`.
+
 `List[T]` conditionally implements `Display`, `PartialEq`, `Hashable`, and `Comparable`.
 
 It implements `Copyable` for every element type.
 
 `Iterable` provides eager defaults from one required `iterator()` method.
 
-The defaults include mapping, filtering, folding, queries, indexed operations, slicing, chunks, bounds, joining, and parallel mapping.
+The defaults include mapping, filtering, folding, queries, indexed operations, slicing, chunks, joining, and parallel mapping.
+
+They also include `zip`, `flat_map`, and `unique`.
+
+`zip` stops when either input ends. `flat_map` concatenates each mapped iterable.
+
+`unique` preserves the first occurrence of each value. Its item type must implement `Hashable`.
 
 `par_map` uses pure escaping callbacks and the `Proc` effect.
 
@@ -4765,6 +4823,9 @@ StringBuilder.finish() -> String
 ByteBuffer.append(byte: Int) -> ByteBuffer
 ByteBuffer.extend(bytes: Bytes) -> ByteBuffer
 ByteBuffer.reserve(additional: Int) -> ByteBuffer
+ByteBuffer.set(index: Int, byte: Int) -> ByteBuffer
+ByteBuffer.capacity() -> Int
+ByteBuffer.truncate(length: Int) -> ByteBuffer
 ByteBuffer.clear() -> ByteBuffer
 ByteBuffer.len() -> Int
 ByteBuffer.build() -> Bytes
@@ -4784,6 +4845,12 @@ The builders use ordinary class types in bytecode and module interfaces. Native 
 Both methods then invalidate the builder.
 
 Any operation on a finished builder faults with `InvalidVmState`.
+
+`ByteBuffer.set` requires a valid index and a byte from 0 through 255.
+
+An invalid index faults with `IndexOutOfBounds`. An invalid byte faults with `IntegerOverflow`.
+
+`ByteBuffer.truncate` rejects a negative length. A length above the current length has no effect.
 
 File and network operations exchange Bytes. An in-process host boundary can share immutable Bytes storage.
 

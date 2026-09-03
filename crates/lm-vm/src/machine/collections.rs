@@ -359,6 +359,28 @@ impl Machine {
                 *item = value;
                 self.push(Value::Unit)?;
             }
+            CollectionExtensionOp::ListSwap => {
+                let second = self.pop_int()?;
+                let first = self.pop_int()?;
+                let r = self.pop_obj()?;
+                self.frozen_guard(r)?;
+                match self.vm.heap.get_mut(r) {
+                    Object::List { items, epoch }
+                        if first >= 0
+                            && second >= 0
+                            && (first as usize) < items.len()
+                            && (second as usize) < items.len() =>
+                    {
+                        if first != second {
+                            epoch.bump()?;
+                            items.swap(first as usize, second as usize);
+                        }
+                    }
+                    Object::List { .. } => return Err(FaultCode::IndexOutOfBounds),
+                    _ => return Err(BAD_TYPE),
+                }
+                self.push(Value::Unit)?;
+            }
             CollectionExtensionOp::ListPop(ty) => {
                 let r = self.pop_obj()?;
                 self.frozen_guard(r)?;

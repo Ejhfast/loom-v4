@@ -1,0 +1,2 @@
+values = [1, 2]
+values.swap(0, 2)

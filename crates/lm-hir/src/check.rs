@@ -5859,9 +5859,17 @@ fn check_interface_defaults(
             let type_param_count = sig.type_params.len() as u32;
             let effect_param_count = sig.effect_params.len() as u32;
             let self_ty = ctx.store.intern(Type::Var(0));
+            let declared_type_bounds = sig.type_bounds.clone();
+            let mut checking_type_bounds = std::mem::take(&mut sig.type_bounds);
+            checking_type_bounds[0] = expand_interface_bounds(
+                ctx,
+                self_ty,
+                checking_type_bounds[0].clone(),
+                method.span,
+            )?;
             let env = TyEnv {
                 type_names: std::mem::take(&mut sig.type_params),
-                type_bounds: std::mem::take(&mut sig.type_bounds),
+                type_bounds: checking_type_bounds,
                 extra_bounds: requirement.premises.clone(),
                 effect_names: std::mem::take(&mut sig.effect_params),
                 type_offset: 0,
@@ -5900,7 +5908,7 @@ fn check_interface_defaults(
                     .clone()
                     .expect("each default has one hidden binding"),
                 type_params: type_param_count,
-                type_bounds: into_hir_bounds(checked.type_bounds),
+                type_bounds: into_hir_bounds(declared_type_bounds),
                 effect_params: effect_param_count,
                 params: sig.params,
                 param_muts: sig.param_muts,

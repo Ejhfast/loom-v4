@@ -658,11 +658,9 @@ impl<'m> Ctx<'m> {
             return None;
         }
         match self.ty(ty) {
-            BcType::Var(index) => bounds
-                .get(index as usize)?
-                .iter()
-                .find(|item| item.interface == interface)
-                .cloned(),
+            BcType::Var(index) => bounds.get(index as usize)?.iter().find_map(|application| {
+                self.inherited_interface_application(ty, application, interface, depth + 1)
+            }),
             BcType::Projection {
                 base,
                 interface: owner,
@@ -670,18 +668,19 @@ impl<'m> Ctx<'m> {
             } => {
                 let owner_application =
                     self.interface_application_with_bounds(base, owner, bounds, depth + 1)?;
-                let bound = self
-                    .module
+                let mut types = vec![base];
+                types.extend(owner_application.types.iter().copied());
+                self.module
                     .interfaces
                     .get(owner as usize)?
                     .associated
                     .get(assoc as usize)?
                     .bounds
                     .iter()
-                    .find(|bound| bound.interface == interface)?;
-                let mut types = vec![base];
-                types.extend(owner_application.types.iter().copied());
-                Some(self.subst_interface_use(bound, &types, &owner_application.rows))
+                    .map(|bound| self.subst_interface_use(bound, &types, &owner_application.rows))
+                    .find_map(|application| {
+                        self.inherited_interface_application(ty, &application, interface, depth + 1)
+                    })
             }
             _ => {
                 let (conformance, args) =
@@ -689,6 +688,30 @@ impl<'m> Ctx<'m> {
                 Some(self.subst_interface_use(&conformance.application, &args, &[]))
             }
         }
+    }
+
+    /// Resolve one interface through an application or its parents.
+    fn inherited_interface_application(
+        &self,
+        receiver: u32,
+        application: &BcInterfaceUse,
+        interface: u32,
+        depth: u32,
+    ) -> Option<BcInterfaceUse> {
+        if depth >= 128 {
+            return None;
+        }
+        if application.interface == interface {
+            return Some(application.clone());
+        }
+        let contract = self.module.interfaces.get(application.interface as usize)?;
+        let mut types = Vec::with_capacity(application.types.len() + 1);
+        types.push(receiver);
+        types.extend(application.types.iter().copied());
+        contract.parents.iter().find_map(|parent| {
+            let parent = self.subst_interface_use(parent, &types, &application.rows);
+            self.inherited_interface_application(receiver, &parent, interface, depth + 1)
+        })
     }
 
     /// Validate one interface application in one generic scope.
@@ -779,6 +802,7 @@ impl<'m> Ctx<'m> {
         actual_rows: &[Vec<BcRow>],
         required_bounds: &[Vec<BcInterfaceUse>],
         scope_bounds: &[Vec<BcInterfaceUse>],
+        scope_func: Option<u32>,
     ) -> bool {
         if actual_types.len() != required_bounds.len() {
             return false;
@@ -786,12 +810,15 @@ impl<'m> Ctx<'m> {
         for (actual, bounds) in actual_types.iter().zip(required_bounds) {
             for bound in bounds {
                 let required = self.subst_interface_use(bound, actual_types, actual_rows);
-                let found = self.interface_application_with_bounds(
-                    *actual,
-                    required.interface,
-                    scope_bounds,
-                    0,
-                );
+                let found = match scope_func {
+                    Some(func) => self.interface_application(func, *actual, required.interface, 0),
+                    None => self.interface_application_with_bounds(
+                        *actual,
+                        required.interface,
+                        scope_bounds,
+                        0,
+                    ),
+                };
                 if found.as_ref() != Some(&required) {
                     return false;
                 }
@@ -808,7 +835,7 @@ impl<'m> Ctx<'m> {
         required_bounds: &[Vec<BcInterfaceUse>],
         prefix_types: &[u32],
         prefix_rows: &[Vec<BcRow>],
-        scope_bounds: &[Vec<BcInterfaceUse>],
+        scope_func: u32,
     ) -> bool {
         if actual_types.len() != required_bounds.len() {
             return false;
@@ -822,12 +849,7 @@ impl<'m> Ctx<'m> {
         for (actual, bounds) in actual_types.iter().zip(required_bounds) {
             for bound in bounds {
                 let required = self.subst_interface_use(bound, &types, &rows);
-                let found = self.interface_application_with_bounds(
-                    *actual,
-                    required.interface,
-                    scope_bounds,
-                    0,
-                );
+                let found = self.interface_application(scope_func, *actual, required.interface, 0);
                 if found.as_ref() != Some(&required) {
                     return false;
                 }

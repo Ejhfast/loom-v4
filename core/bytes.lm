@@ -274,6 +274,18 @@ final class ByteBuffer implements Copyable
     intrinsic("byte_buffer.reserve", self, additional)
   end
 
+  def set(mut self, index: Int, byte: Int): ByteBuffer
+    intrinsic("byte_buffer.set", self, index, byte)
+  end
+
+  def capacity(self): Int
+    intrinsic("byte_buffer.capacity", self)
+  end
+
+  def truncate(mut self, length: Int): ByteBuffer
+    intrinsic("byte_buffer.truncate", self, length)
+  end
+
   def clear(mut self): ByteBuffer
     intrinsic("byte_buffer.clear", self)
   end

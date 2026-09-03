@@ -407,6 +407,10 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
             .with_replay()
             .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(3)),
+        ExtendedInstr::ListSwap => dedicated(Guarded)
+            .with_replay()
+            .with_replay_barrier()
+            .with_fault_stack(FaultStack::Pop(3)),
         ExtendedInstr::MapEpoch | ExtendedInstr::MapIterLen => dedicated(Guarded).with_replay(),
         ExtendedInstr::ListPop { .. } => dedicated(Guarded)
             .with_replay()
@@ -600,11 +604,22 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
             .with_replay()
             .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(1)),
-        NativeInstr::SbByteLen | NativeInstr::SbLen | NativeInstr::BbLen => dedicated(Guarded)
+        NativeInstr::SbByteLen
+        | NativeInstr::SbLen
+        | NativeInstr::BbLen
+        | NativeInstr::BbCapacity => dedicated(Guarded)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
         NativeInstr::BbAt => dedicated(Guarded)
             .with_replay()
+            .with_fault_stack(FaultStack::Pop(2)),
+        NativeInstr::BbSet => dedicated(Guarded)
+            .with_replay()
+            .with_replay_barrier()
+            .with_fault_stack(FaultStack::Pop(3)),
+        NativeInstr::BbTruncate => dedicated(Guarded)
+            .with_replay()
+            .with_replay_barrier()
             .with_fault_stack(FaultStack::Pop(2)),
         NativeInstr::StrStartsWith
         | NativeInstr::StrEndsWith

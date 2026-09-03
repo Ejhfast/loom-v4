@@ -94,6 +94,9 @@ impl Machine {
             ExtendedInstr::ListSet => {
                 self.exec_collection_extension(module, envs, CollectionExtensionOp::ListSet)?;
             }
+            ExtendedInstr::ListSwap => {
+                self.exec_collection_extension(module, envs, CollectionExtensionOp::ListSwap)?;
+            }
             ExtendedInstr::ListPop { ty } => {
                 self.exec_collection_extension(module, envs, CollectionExtensionOp::ListPop(ty))?;
             }

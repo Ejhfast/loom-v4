@@ -139,6 +139,7 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::SbLen)
         | Instr::Native(NativeInstr::SbClear)
         | Instr::Native(NativeInstr::BbLen)
+        | Instr::Native(NativeInstr::BbCapacity)
         | Instr::Native(NativeInstr::BbBuild)
         | Instr::Native(NativeInstr::BbClear)
         | Instr::Native(NativeInstr::StrByteLen)
@@ -183,7 +184,8 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::SbAppendStr)
         | Instr::Native(NativeInstr::SbAppendInt)
         | Instr::Native(NativeInstr::SbAppendBool)
-        | Instr::Native(NativeInstr::BbAppend) => (2, 1),
+        | Instr::Native(NativeInstr::BbAppend)
+        | Instr::Native(NativeInstr::BbTruncate) => (2, 1),
         Instr::MapPut { discard: false, .. }
         | Instr::Native(NativeInstr::BytesSlice)
         | Instr::Native(NativeInstr::BytesTextRange)
@@ -191,7 +193,8 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::TextSliceBytes)
         | Instr::Native(NativeInstr::TextReplace)
         | Instr::Native(NativeInstr::RegexReplaceAll)
-        | Instr::Native(NativeInstr::BbFindFrom) => (3, 1),
+        | Instr::Native(NativeInstr::BbFindFrom)
+        | Instr::Native(NativeInstr::BbSet) => (3, 1),
         Instr::MapPut { discard: true, .. } => (3, 0),
         Instr::ListNew { count, .. } | Instr::TupleNew { count, .. } => (*count as usize, 1),
         Instr::MapNew { count, .. } => (2 * *count as usize, 1),
@@ -349,6 +352,7 @@ fn extended_stack_effect(
         | ExtendedInstr::MapReserve => (2, 1),
         ExtendedInstr::MapNextIndex
         | ExtendedInstr::ListSet
+        | ExtendedInstr::ListSwap
         | ExtendedInstr::ListInsert
         | ExtendedInstr::MapPutText { discard: false, .. }
         | ExtendedInstr::SyntaxBuildToken

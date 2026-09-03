@@ -2191,6 +2191,23 @@ impl<'m> Oracle<'m> {
                 }
                 Ok(values[0].clone())
             }
+            lm_abi::INTRINSIC_BYTE_BUFFER_SET => {
+                let buffer = self.as_obj(&values[0])?;
+                frozen_guard(&buffer)?;
+                let index = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let byte = u8::try_from(self.as_int(&values[2])?)
+                    .map_err(|_| Stop::Fault("IntegerOverflow"))?;
+                let mut borrow = buffer.borrow_mut();
+                let slot = match &mut borrow.kind {
+                    OKind::Bb(Some(bytes)) => bytes.get_mut(index),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("buffer op on a non-buffer")),
+                }
+                .ok_or(Stop::Fault("IndexOutOfBounds"))?;
+                *slot = byte;
+                Ok(values[0].clone())
+            }
             lm_abi::INTRINSIC_BYTE_BUFFER_LEN => {
                 let buffer = self.as_obj(&values[0])?;
                 let len = match &buffer.borrow().kind {
@@ -2199,6 +2216,38 @@ impl<'m> Oracle<'m> {
                     _ => return Err(Stop::Limit("buffer op on a non-buffer")),
                 };
                 Ok(OV::Int(len as i64))
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_CAPACITY => {
+                let buffer = self.as_obj(&values[0])?;
+                let capacity = match &buffer.borrow().kind {
+                    OKind::Bb(Some(bytes)) => bytes.capacity(),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("buffer op on a non-buffer")),
+                };
+                Ok(OV::Int(capacity as i64))
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_AT => {
+                let buffer = self.as_obj(&values[0])?;
+                let index = self.as_int(&values[1])?;
+                let value = match &buffer.borrow().kind {
+                    OKind::Bb(Some(bytes)) if index >= 0 => bytes.get(index as usize).copied(),
+                    OKind::Bb(Some(_)) => None,
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("buffer op on a non-buffer")),
+                };
+                Ok(OV::Int(value.map_or(-1, i64::from)))
+            }
+            lm_abi::INTRINSIC_BYTE_BUFFER_TRUNCATE => {
+                let buffer = self.as_obj(&values[0])?;
+                frozen_guard(&buffer)?;
+                let length = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                match &mut buffer.borrow_mut().kind {
+                    OKind::Bb(Some(bytes)) => bytes.truncate(length),
+                    OKind::Bb(None) => return Err(Stop::Fault("InvalidVmState")),
+                    _ => return Err(Stop::Limit("buffer op on a non-buffer")),
+                }
+                Ok(values[0].clone())
             }
             lm_abi::INTRINSIC_BYTE_BUFFER_BUILD => {
                 let buffer = self.as_obj(&values[0])?;
@@ -2283,6 +2332,22 @@ impl<'m> Oracle<'m> {
                 *item = values[2].clone();
                 Ok(OV::Unit)
             }
+            lm_abi::INTRINSIC_LIST_SWAP => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                let left = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let right = usize::try_from(self.as_int(&values[2])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                match &mut list.borrow_mut().kind {
+                    OKind::List(items) if left < items.len() && right < items.len() => {
+                        items.swap(left, right)
+                    }
+                    OKind::List(_) => return Err(Stop::Fault("IndexOutOfBounds")),
+                    _ => return Err(Stop::Limit("list op on a non-list")),
+                }
+                Ok(OV::Unit)
+            }
             lm_abi::INTRINSIC_LIST_POP => {
                 let list = self.as_obj(&values[0])?;
                 frozen_guard(&list)?;
@@ -2354,6 +2419,14 @@ impl<'m> Oracle<'m> {
                     _ => return Err(Stop::Limit("list op on a non-list")),
                 };
                 Ok(OV::Bool(found))
+            }
+            lm_abi::INTRINSIC_LIST_REORDER => {
+                let list = self.as_obj(&values[0])?;
+                frozen_guard(&list)?;
+                if !matches!(&list.borrow().kind, OKind::List(_)) {
+                    return Err(Stop::Limit("list op on a non-list"));
+                }
+                Ok(OV::Unit)
             }
             lm_abi::INTRINSIC_MAP_LEN | lm_abi::INTRINSIC_MAP_EPOCH => {
                 let map = self.as_obj(&values[0])?;

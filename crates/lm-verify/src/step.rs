@@ -820,6 +820,7 @@ pub(crate) fn step(
                 &app.rows,
                 &module.func_bounds[target as usize],
                 &module.func_bounds[fidx as usize],
+                Some(fidx),
             ) {
                 return Err(fail(
                     "a virtual call type argument does not meet its interface bounds".to_string(),
@@ -881,7 +882,7 @@ pub(crate) fn step(
                 &requirement.type_bounds,
                 &prefix_types,
                 &application.rows,
-                &module.func_bounds[fidx as usize],
+                fidx,
             ) {
                 return Err(fail(
                     "an interface call type argument does not meet its interface bounds"
@@ -1535,6 +1536,13 @@ pub(crate) fn step(
             }
             push(state, TY_UNIT)?;
         }
+        Instr::Extended(ExtendedInstr::ListSwap) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let list = pop(state)?;
+            as_list(list)?;
+            push(state, TY_UNIT)?;
+        }
         Instr::Extended(ExtendedInstr::ListPop { ty }) => {
             let list = pop(state)?;
             let element = as_list(list)?;
@@ -1873,6 +1881,15 @@ pub(crate) fn step(
             pop_expect(state, buffer)?;
             push(state, TY_INT)?;
         }
+        Instr::Native(lm_bytecode::NativeInstr::BbCapacity) => {
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, TY_INT)?;
+        }
         Instr::Native(lm_bytecode::NativeInstr::BbBuild)
         | Instr::Native(lm_bytecode::NativeInstr::BbFinish) => {
             let class = ctx
@@ -1896,6 +1913,27 @@ pub(crate) fn step(
             push(state, buffer)?;
         }
         Instr::Native(lm_bytecode::NativeInstr::BbReserve) => {
+            pop_expect(state, TY_INT)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, buffer)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbSet) => {
+            pop_expect(state, TY_INT)?;
+            pop_expect(state, TY_INT)?;
+            let class = ctx
+                .core
+                .byte_buffer
+                .ok_or_else(|| fail("ByteBuffer needs its core role".to_string()))?;
+            let buffer = ctx.intern(BcType::Class(class));
+            pop_expect(state, buffer)?;
+            push(state, buffer)?;
+        }
+        Instr::Native(lm_bytecode::NativeInstr::BbTruncate) => {
             pop_expect(state, TY_INT)?;
             let class = ctx
                 .core

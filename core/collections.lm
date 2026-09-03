@@ -179,6 +179,44 @@ interface Iterable
     result
   end
 
+  def zip[U: Iterable](self, other: U): List[(Self.Item, U.Item)]
+    result = List[(Self.Item, U.Item)]()
+    other_iterator = other.iterator()
+    for value in self
+      case other_iterator.next()
+      in Some(other_value)
+        result.push((value, other_value))
+      in None
+        return result
+      end
+    end
+    result
+  end
+
+  def flat_map[U: Iterable, effect e](
+    self,
+    f: (Self.Item) -> U with e
+  ): List[U.Item] with e
+    result = List[U.Item]()
+    for value in self
+      for mapped in f(value)
+        result.push(mapped)
+      end
+    end
+    result
+  end
+
+  def unique(self): List[Self.Item] when Self.Item: Hashable
+    seen = Set[Self.Item]()
+    result = List[Self.Item]()
+    for value in self
+      if seen.add(value)
+        result.push(value)
+      end
+    end
+    result
+  end
+
   def min(self): Option[Self.Item] when Self.Item: Comparable
     result = None[Self.Item]()
     for value in self
@@ -278,7 +316,120 @@ interface Counted
   def len(self): Int
 end
 
-final class List[T] implements Counted, Iterable, Copyable,
+interface RandomAccess: Counted, Iterable
+  def at(self, index: Int): Self.Item
+  def get(self, index: Int): Option[Self.Item]
+
+  def partition_point[effect e](
+    self,
+    predicate: (Self.Item) -> Bool with e
+  ): Int with e
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      if predicate(self.at(middle))
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low
+  end
+
+  def lower_bound(self, value: Self.Item): Int when Self.Item: Comparable
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      if self.at(middle).compare(value).is_less()
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low
+  end
+
+  def upper_bound(self, value: Self.Item): Int when Self.Item: Comparable
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      if self.at(middle).compare(value).is_greater()
+        high = middle
+      else
+        low = middle + 1
+      end
+    end
+    low
+  end
+
+  def binary_search(self, value: Self.Item): Option[Int] when Self.Item: Comparable
+    index = self.lower_bound(value)
+    if index < self.len() and self.at(index).compare(value).is_equal()
+      Some(index)
+    else
+      None
+    end
+  end
+
+  def lower_bound_by[effect e](
+    self,
+    compare: (Self.Item) -> Ordering with e
+  ): Int with e
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      if compare(self.at(middle)).is_less()
+        low = middle + 1
+      else
+        high = middle
+      end
+    end
+    low
+  end
+
+  def upper_bound_by[effect e](
+    self,
+    compare: (Self.Item) -> Ordering with e
+  ): Int with e
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      if compare(self.at(middle)).is_greater()
+        high = middle
+      else
+        low = middle + 1
+      end
+    end
+    low
+  end
+
+  def binary_search_by[effect e](
+    self,
+    compare: (Self.Item) -> Ordering with e
+  ): Option[Int] with e
+    low = 0
+    high = self.len()
+    while low < high
+      middle = low + (high - low) / 2
+      ordering = compare(self.at(middle))
+      if ordering.is_less()
+        low = middle + 1
+      elsif ordering.is_greater()
+        high = middle
+      else
+        return Some(middle)
+      end
+    end
+    None[Int]()
+  end
+end
+
+final class List[T] implements RandomAccess, Copyable,
                                Display when T: Display,
                                PartialEq when T: PartialEq,
                                Hashable when T: Hashable,
@@ -340,6 +491,10 @@ final class List[T] implements Counted, Iterable, Copyable,
 
   def swap_remove(mut self, index: Int): T
     intrinsic("list.swap_remove", self, index)
+  end
+
+  def swap(mut self, first: Int, second: Int)
+    intrinsic("list.swap", self, first, second)
   end
 
   def reserve(mut self, additional: Int)
@@ -456,10 +611,13 @@ final class List[T] implements Counted, Iterable, Copyable,
     end
   end
 
-  def reverse(mut self)
-    left = 0
-    right = self.len() - 1
-    if right > 0
+  def reverse_range(mut self, start: Int, length: Int)
+    if start < 0 or length < 0 or start > self.len() - length
+      self.at(-1)
+    end
+    left = start
+    right = start + length - 1
+    if left < right
       intrinsic("list.reorder", self)
     end
     while left < right
@@ -470,6 +628,74 @@ final class List[T] implements Counted, Iterable, Copyable,
       left = left + 1
       right = right - 1
     end
+  end
+
+  def reverse(mut self)
+    self.reverse_range(0, self.len())
+  end
+
+  def retain[effect e](mut self, keep: (T) -> Bool with e): () with e
+    read = 0
+    write = 0
+    length = self.len()
+    while read < length
+      value = self.at(read)
+      if keep(value)
+        if write != read
+          self.set(write, value)
+        end
+        write = write + 1
+      end
+      read = read + 1
+    end
+    self.truncate(write)
+  end
+
+  def dedup_adjacent(mut self) when T: PartialEq
+    length = self.len()
+    if length < 2
+      return
+    end
+    write = 1
+    read = 1
+    while read < length
+      value = self.at(read)
+      if not (value == self.at(write - 1))
+        if write != read
+          self.set(write, value)
+        end
+        write = write + 1
+      end
+      read = read + 1
+    end
+    self.truncate(write)
+  end
+
+  def windows(self, size: Int): List[ListSlice[T]]
+    if size <= 0
+      panic("windows needs a positive size")
+    end
+    result = List[ListSlice[T]]()
+    if size > self.len()
+      return result
+    end
+    result.reserve(self.len() - size + 1)
+    start = 0
+    while start + size <= self.len()
+      result.push(self.slice_view(start, size))
+      start = start + 1
+    end
+    result
+  end
+
+  def flatten(self): List[T.Item] when T: Iterable
+    result = List[T.Item]()
+    for group in self
+      for value in group
+        result.push(value)
+      end
+    end
+    result
   end
 
   def contains(self, value: T): Bool
@@ -1189,7 +1415,7 @@ final class RangeIterator implements Iterator
   end
 end
 
-final class ListSlice[T] implements Counted, Iterable,
+final class ListSlice[T] implements RandomAccess,
                                     Display when T: Display,
                                     PartialEq when T: PartialEq,
                                     Comparable when T: Comparable

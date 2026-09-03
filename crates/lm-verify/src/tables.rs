@@ -1701,6 +1701,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                         &[],
                         class_method_bounds,
                         &conformance_bounds,
+                        None,
                     )
                 };
                 if !bounds_hold {
@@ -1816,6 +1817,7 @@ fn verify_conformances(ctx: &Ctx<'_>, interface_self: &[bool]) -> Result<(), Ver
                     &[],
                     class_method_bounds,
                     &conformance_bounds,
+                    None,
                 )
             };
             if !bounds_hold {

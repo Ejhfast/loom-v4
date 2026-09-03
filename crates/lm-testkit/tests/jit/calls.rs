@@ -468,6 +468,43 @@ fn list_mutations_use_direct_heap_paths() {
 }
 
 #[test]
+fn list_swap_uses_a_direct_heap_path() {
+    let source = concat!(
+        "items = [1, 2, 3]\ni = 0\ntotal = 0\n",
+        "while i < 500\n",
+        "  items.swap(0, 2)\n",
+        "  total = total + items.at(1)\n",
+        "  i = i + 1\n",
+        "end\ntotal + items.at(0) * 10 + items.at(2)\n",
+    );
+    let artifact =
+        lm_testkit::compile_text("jit-list-swap.lm", source).expect("the list swap case compiles");
+    for fuel in [0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89] {
+        let (interpreted, _, interpreted_dump) =
+            run_artifact(&artifact, EngineMode::Interpreter, fuel);
+        let (native, metrics, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+        assert_eq!(native, interpreted, "fuel {fuel}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+    }
+    let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+    assert_eq!(native, Outcome::Done(lm_value::Value::Int(1013)));
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+    assert!(metrics.compiled_heap_write_sites >= 1, "{metrics:?}");
+    assert!(metrics.native_retired_instructions > 5_000, "{metrics:?}");
+
+    let modified = concat!(
+        "items = [1, 2]\niterator = items.iterator()\n",
+        "items.swap(0, 0)\niterator.next()\n",
+        "items.swap(0, 1)\niterator.next()\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(modified, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(modified, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted, "{metrics:?}");
+    assert_eq!(native_dump, interpreted_dump);
+    assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::CollectionModified));
+}
+
+#[test]
 fn list_push_preserves_heap_limit_and_frozen_faults() {
     let limit_source = concat!(
         "items: [Int] = []\ni = 0\n",

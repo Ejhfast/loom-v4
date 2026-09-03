@@ -1,3 +1,7 @@
 bb = ByteBuffer()
+bb.reserve(8)
+reserved = bb.capacity() >= 8
 bb.append(72).append(105)
-"#{bb.build().text()} len=#{bb.len()}"
+before = bb.set(1, 111).build().text()
+after = bb.truncate(1).build().text()
+("#{before}/#{after}", bb.len(), reserved, bb.at(0), bb.at(1))

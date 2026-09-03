@@ -1907,6 +1907,11 @@ impl NativeByteBuffer {
         (self.active != 0).then_some(self.buffer.len())
     }
 
+    /// Get the active buffer capacity.
+    pub fn capacity(&self) -> Option<usize> {
+        (self.active != 0).then_some(self.buffer.capacity())
+    }
+
     /// Test whether the active buffer is empty.
     pub fn is_empty(&self) -> Option<bool> {
         (self.active != 0).then_some(self.buffer.is_empty())
@@ -1915,6 +1920,14 @@ impl NativeByteBuffer {
     /// Read one byte from an active buffer.
     pub fn at(&self, index: usize) -> Option<u8> {
         self.buffer()?.get(index).copied()
+    }
+
+    /// Replace one byte in an active buffer.
+    pub fn set(&mut self, index: usize, byte: u8) -> bool {
+        if self.active == 0 {
+            return false;
+        }
+        self.buffer.set(index, byte)
     }
 
     /// Find immutable bytes at or after one active-buffer position.
@@ -1935,6 +1948,15 @@ impl NativeByteBuffer {
             return false;
         }
         self.buffer.clear();
+        true
+    }
+
+    /// Remove bytes after one active-buffer length.
+    pub fn truncate(&mut self, length: usize) -> bool {
+        if self.active == 0 {
+            return false;
+        }
+        self.buffer.truncate(length);
         true
     }
 
@@ -2143,6 +2165,21 @@ mod tests {
                 assert!(bytes.push(0));
             }
         }
+    }
+
+    #[test]
+    fn byte_buffer_random_access_preserves_ownership() {
+        let mut bytes = NativeByteBuffer::from_vec(vec![1, 2, 3]);
+        let capacity = bytes.capacity().expect("the buffer is active");
+        assert!(capacity >= 3);
+        assert!(bytes.set(1, 9));
+        assert!(!bytes.set(3, 0));
+        assert!(bytes.truncate(2));
+        assert_eq!(bytes.buffer(), Some([1, 9].as_slice()));
+        assert_eq!(bytes.finish(), Some(vec![1, 9]));
+        assert_eq!(bytes.capacity(), None);
+        assert!(!bytes.set(0, 0));
+        assert!(!bytes.truncate(0));
     }
 
     #[test]

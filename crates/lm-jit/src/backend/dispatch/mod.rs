@@ -157,6 +157,7 @@ pub(super) fn emit_segment_body(
                 Instr::MapPut { discard, .. } => collections::emit(&mut emission)?,
                 Instr::ListAt => collections::emit(&mut emission)?,
                 Instr::Extended(ExtendedInstr::ListSet) => collections::emit(&mut emission)?,
+                Instr::Extended(ExtendedInstr::ListSwap) => collections::emit(&mut emission)?,
                 Instr::Extended(ExtendedInstr::ListInsert) => collections::emit(&mut emission)?,
                 Instr::Extended(
                     operation @ (ExtendedInstr::ListRemove | ExtendedInstr::ListSwapRemove),
@@ -226,13 +227,19 @@ pub(super) fn emit_segment_body(
                     | NumericInstr::BytesBitXor
                     | NumericInstr::BytesBitNot,
                 ) => runtime::emit(&mut emission)?,
-                Instr::Native(NativeInstr::SbLen | NativeInstr::SbByteLen | NativeInstr::BbLen) => {
-                    runtime::emit(&mut emission)?
-                }
+                Instr::Native(
+                    NativeInstr::SbLen
+                    | NativeInstr::SbByteLen
+                    | NativeInstr::BbLen
+                    | NativeInstr::BbCapacity,
+                ) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::SbClear | NativeInstr::BbClear) => {
                     runtime::emit(&mut emission)?
                 }
                 Instr::Native(NativeInstr::BbAt) => runtime::emit(&mut emission)?,
+                Instr::Native(NativeInstr::BbSet | NativeInstr::BbTruncate) => {
+                    runtime::emit(&mut emission)?
+                }
                 Instr::Native(NativeInstr::BytesLen) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::BytesAt) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::BytesGet) => runtime::emit(&mut emission)?,

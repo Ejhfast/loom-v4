@@ -549,6 +549,7 @@ pub(super) enum HeapAccessKind {
     ListSet {
         value: ValueContract,
     },
+    ListSwap,
     ListPush {
         value: ValueContract,
     },
@@ -1085,6 +1086,7 @@ impl RegionPlan {
                 match access.kind {
                     HeapAccessKind::StoreField { .. }
                     | HeapAccessKind::ListSet { .. }
+                    | HeapAccessKind::ListSwap
                     | HeapAccessKind::ListPush { .. }
                     | HeapAccessKind::ListInsert { .. }
                     | HeapAccessKind::ListRemove { .. }

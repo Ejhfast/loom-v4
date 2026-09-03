@@ -751,6 +751,9 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::BbFinish)
         | Instr::Native(lm_bytecode::NativeInstr::BbAt)
         | Instr::Native(lm_bytecode::NativeInstr::BbFindFrom)
+        | Instr::Native(lm_bytecode::NativeInstr::BbSet)
+        | Instr::Native(lm_bytecode::NativeInstr::BbCapacity)
+        | Instr::Native(lm_bytecode::NativeInstr::BbTruncate)
         | Instr::Native(lm_bytecode::NativeInstr::BytesNew)
         | Instr::Native(lm_bytecode::NativeInstr::BytesLen)
         | Instr::Native(lm_bytecode::NativeInstr::BytesText)
@@ -916,6 +919,7 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         | ExtendedInstr::ListInsert
         | ExtendedInstr::ListRemove
         | ExtendedInstr::ListSwapRemove
+        | ExtendedInstr::ListSwap
         | ExtendedInstr::ListReserve
         | ExtendedInstr::ListTruncate
         | ExtendedInstr::ListContains

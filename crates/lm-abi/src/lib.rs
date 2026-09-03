@@ -651,7 +651,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 28;
+pub const INTRINSIC_ABI_VERSION: u32 = 29;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -904,9 +904,13 @@ pub const INTRINSIC_REGEX_MATCH_TEXT: IntrinsicSlot = 234;
 pub const INTRINSIC_REGEX_MATCH_GROUP_COUNT: IntrinsicSlot = 235;
 pub const INTRINSIC_REGEX_MATCH_GROUP: IntrinsicSlot = 236;
 pub const INTRINSIC_REGEX_MATCH_NAMED: IntrinsicSlot = 237;
+pub const INTRINSIC_LIST_SWAP: IntrinsicSlot = 238;
+pub const INTRINSIC_BYTE_BUFFER_SET: IntrinsicSlot = 239;
+pub const INTRINSIC_BYTE_BUFFER_CAPACITY: IntrinsicSlot = 240;
+pub const INTRINSIC_BYTE_BUFFER_TRUNCATE: IntrinsicSlot = 241;
 
 /// Pure intrinsics in stable slot order.
-pub static INTRINSICS: [IntrinsicDef; 238] = [
+pub static INTRINSICS: [IntrinsicDef; 242] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2382,6 +2386,30 @@ pub static INTRINSICS: [IntrinsicDef; 238] = [
         name: "regex_match.named",
         params: &[AbiType::REGEX_MATCH, AbiType::TEXT],
         reply: AbiType::OPTION_SUBSTRING,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "list.swap",
+        params: &[AbiType::List(&AbiType::Var(0)), AbiType::INT, AbiType::INT],
+        reply: AbiType::UNIT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.set",
+        params: &[AbiType::BYTE_BUFFER, AbiType::INT, AbiType::INT],
+        reply: AbiType::BYTE_BUFFER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.capacity",
+        params: &[AbiType::BYTE_BUFFER],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "byte_buffer.truncate",
+        params: &[AbiType::BYTE_BUFFER, AbiType::INT],
+        reply: AbiType::BYTE_BUFFER,
         semantic_revision: 1,
     },
 ];

@@ -1,0 +1,3 @@
+buffer = ByteBuffer()
+buffer.append(1)
+buffer.truncate(-1)

@@ -356,6 +356,40 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             let unit = builder.ins().iconst(types::I64, 0);
             push_static(builder, stack, ScalarKind::Unit, unit)?;
         }
+        Instr::Extended(ExtendedInstr::ListSwap) => {
+            let deopt_stack = stack.clone();
+            let second = pop_native(stack)?;
+            let first = pop_native(stack)?;
+            let reference = pop_native(stack)?;
+            let instruction = segment.start + within as u32;
+            let access = segment
+                .heap_accesses
+                .iter()
+                .find(|access| access.instruction == instruction)
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            if !matches!(access.kind, HeapAccessKind::ListSwap) {
+                return Err(CompileError::Backend);
+            }
+            emit_list_swap(
+                builder,
+                values,
+                reference,
+                first,
+                second,
+                HeapExitEmission {
+                    point: FaultPoint {
+                        block: segment.block,
+                        instruction: instruction + 1,
+                        prefix: fault_prefix,
+                    },
+                    fault_stack: stack,
+                    deopt_stack: &deopt_stack,
+                },
+            )?;
+            let unit = builder.ins().iconst(types::I64, 0);
+            push_static(builder, stack, ScalarKind::Unit, unit)?;
+        }
         Instr::Extended(ExtendedInstr::ListInsert) => {
             let instruction = segment.start + within as u32;
             let deopt_stack = stack.clone();

@@ -777,6 +777,16 @@ pub(super) fn analyze_segment(
                     kind: HeapAccessKind::ListSet { value: contract },
                 });
             }
+            Instr::Extended(ExtendedInstr::ListSwap) => {
+                let receiver = stack_from_end(&before.stack, 2)?;
+                list_element_type(context, receiver)?;
+                expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::ListSwap,
+                });
+            }
             Instr::Extended(ExtendedInstr::ListInsert) => {
                 let value = stack_from_end(&before.stack, 0)?;
                 let receiver = stack_from_end(&before.stack, 2)?;
@@ -1297,10 +1307,19 @@ pub(super) fn analyze_segment(
                     stack: before.stack.clone(),
                 });
             }
-            Instr::Native(NativeInstr::BbLen | NativeInstr::BbClear) => {
+            Instr::Native(NativeInstr::BbLen | NativeInstr::BbCapacity | NativeInstr::BbClear) => {
                 byte_buffer_type(context, stack_from_end(&before.stack, 0)?)?;
             }
             Instr::Native(NativeInstr::BbAt) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+            }
+            Instr::Native(NativeInstr::BbSet) => {
+                byte_buffer_type(context, stack_from_end(&before.stack, 2)?)?;
+                expect_scalar(stack_from_end(&before.stack, 1)?, ScalarKind::Int)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+            }
+            Instr::Native(NativeInstr::BbTruncate) => {
                 byte_buffer_type(context, stack_from_end(&before.stack, 1)?)?;
                 expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
             }

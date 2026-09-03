@@ -835,6 +835,8 @@ pub enum ExtendedInstr {
     ListRemove,
     /// Pop an index and a list. Swap-remove and push the indexed value.
     ListSwapRemove,
+    /// Pop two indices and a list. Swap the indexed values.
+    ListSwap,
     /// Pop an additional capacity and a list. Reserve that capacity.
     ListReserve,
     /// Pop a target length and a list. Remove trailing values.
@@ -1068,6 +1070,12 @@ pub enum NativeInstr {
     BbClear,
     /// Pop an index and a buffer, then push one byte or -1.
     BbAt,
+    /// Pop a byte, an index, and a buffer. Replace the indexed byte.
+    BbSet,
+    /// Pop a buffer and push its current capacity.
+    BbCapacity,
+    /// Pop a length and a buffer. Remove trailing bytes.
+    BbTruncate,
     /// Pop a start, needle, and buffer, then push an index or -1.
     BbFindFrom,
     /// Pop an index and bytes, then push the byte as an Int.
@@ -2186,8 +2194,12 @@ const EXT_REGEX_MATCH_GROUP_COUNT: u8 = 16;
 const EXT_REGEX_CAPTURES: u8 = 17;
 const EXT_REGEX_MATCH_GROUP: u8 = 18;
 const EXT_REGEX_MATCH_NAMED: u8 = 19;
+const EXT_LIST_SWAP: u8 = 20;
+const EXT_BB_SET: u8 = 21;
+const EXT_BB_CAPACITY: u8 = 22;
+const EXT_BB_TRUNCATE: u8 = 23;
 
-fn regex_extension_tag(instr: NativeInstr) -> Option<u8> {
+fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
         NativeInstr::RegexCompileStatus => EXT_REGEX_COMPILE_STATUS,
         NativeInstr::RegexCompileValue => EXT_REGEX_COMPILE_VALUE,
@@ -2200,6 +2212,9 @@ fn regex_extension_tag(instr: NativeInstr) -> Option<u8> {
         NativeInstr::RegexMatchEnd => EXT_REGEX_MATCH_END,
         NativeInstr::RegexMatchText => EXT_REGEX_MATCH_TEXT,
         NativeInstr::RegexMatchGroupCount => EXT_REGEX_MATCH_GROUP_COUNT,
+        NativeInstr::BbSet => EXT_BB_SET,
+        NativeInstr::BbCapacity => EXT_BB_CAPACITY,
+        NativeInstr::BbTruncate => EXT_BB_TRUNCATE,
         _ => return None,
     })
 }
@@ -3022,7 +3037,7 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
         Instr::Native(NativeInstr::HashCombine) => out.push(OP_HASH_COMBINE),
         Instr::Native(NativeInstr::HashUnorderedCombine) => out.push(OP_HASH_UNORDERED_COMBINE),
         Instr::Native(
-            regex @ (NativeInstr::RegexCompileStatus
+            extended @ (NativeInstr::RegexCompileStatus
             | NativeInstr::RegexCompileValue
             | NativeInstr::RegexSource
             | NativeInstr::RegexIsMatch
@@ -3032,10 +3047,13 @@ fn encode_instr(out: &mut Vec<u8>, instr: &Instr) {
             | NativeInstr::RegexMatchStart
             | NativeInstr::RegexMatchEnd
             | NativeInstr::RegexMatchText
-            | NativeInstr::RegexMatchGroupCount),
+            | NativeInstr::RegexMatchGroupCount
+            | NativeInstr::BbSet
+            | NativeInstr::BbCapacity
+            | NativeInstr::BbTruncate),
         ) => {
             out.push(OP_EXTENSION);
-            out.push(regex_extension_tag(*regex).expect("a regex instruction has one tag"));
+            out.push(native_extension_tag(*extended).expect("an extended instruction has one tag"));
         }
         Instr::Native(NativeInstr::LtBytes) => out.push(OP_LT_BYTES),
         Instr::Native(NativeInstr::LeBytes) => out.push(OP_LE_BYTES),
@@ -3197,6 +3215,10 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::ListInsert => out.push(OP_LIST_INSERT),
         ExtendedInstr::ListRemove => out.push(OP_LIST_REMOVE),
         ExtendedInstr::ListSwapRemove => out.push(OP_LIST_SWAP_REMOVE),
+        ExtendedInstr::ListSwap => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_LIST_SWAP);
+        }
         ExtendedInstr::ListReserve => out.push(OP_LIST_RESERVE),
         ExtendedInstr::ListTruncate => out.push(OP_LIST_TRUNCATE),
         ExtendedInstr::ListContains => out.push(OP_LIST_CONTAINS),
@@ -4402,6 +4424,10 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             EXT_REGEX_MATCH_NAMED => {
                 Instr::Extended(ExtendedInstr::RegexMatchNamed { ty: cur.u32()? })
             }
+            EXT_LIST_SWAP => Instr::Extended(ExtendedInstr::ListSwap),
+            EXT_BB_SET => Instr::Native(NativeInstr::BbSet),
+            EXT_BB_CAPACITY => Instr::Native(NativeInstr::BbCapacity),
+            EXT_BB_TRUNCATE => Instr::Native(NativeInstr::BbTruncate),
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
@@ -5138,6 +5164,7 @@ mod tests {
             Instr::Extended(ExtendedInstr::ListInsert),
             Instr::Extended(ExtendedInstr::ListRemove),
             Instr::Extended(ExtendedInstr::ListSwapRemove),
+            Instr::Extended(ExtendedInstr::ListSwap),
             Instr::Extended(ExtendedInstr::ListReserve),
             Instr::Extended(ExtendedInstr::ListTruncate),
             Instr::Extended(ExtendedInstr::ListContains),
@@ -5186,6 +5213,9 @@ mod tests {
             Instr::Native(NativeInstr::BbAppend),
             Instr::Native(NativeInstr::BbLen),
             Instr::Native(NativeInstr::BbBuild),
+            Instr::Native(NativeInstr::BbSet),
+            Instr::Native(NativeInstr::BbCapacity),
+            Instr::Native(NativeInstr::BbTruncate),
             Instr::Native(NativeInstr::HashCombine),
             Instr::Native(NativeInstr::HashUnorderedCombine),
             Instr::Numeric(NumericInstr::IntBitAnd),
