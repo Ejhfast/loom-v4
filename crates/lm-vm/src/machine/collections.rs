@@ -393,7 +393,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 if value.is_some() {
-                    self.vm.heap.recharge(r);
+                    self.vm.heap.recharge_local(r);
                 }
                 match value {
                     Some(value) => self.push(value)?,
@@ -423,7 +423,7 @@ impl Machine {
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(r);
+                self.vm.heap.recharge_local(r);
                 self.push(Value::Unit)?;
             }
             CollectionExtensionOp::ListRemove { swap } => {
@@ -444,7 +444,7 @@ impl Machine {
                     Object::List { .. } => return Err(FaultCode::IndexOutOfBounds),
                     _ => return Err(BAD_TYPE),
                 };
-                self.vm.heap.recharge(r);
+                self.vm.heap.recharge_local(r);
                 self.push(value)?;
             }
             CollectionExtensionOp::ListReserve => {
@@ -495,7 +495,7 @@ impl Machine {
                     _ => return Err(BAD_TYPE),
                 };
                 if changed {
-                    self.vm.heap.recharge(r);
+                    self.vm.heap.recharge_local(r);
                 }
                 self.push(Value::Unit)?;
             }

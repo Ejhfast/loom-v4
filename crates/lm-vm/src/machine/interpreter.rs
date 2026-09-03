@@ -770,7 +770,7 @@ impl Machine {
                     }
                     _ => return Err(BAD_TYPE),
                 }
-                self.vm.heap.recharge(r);
+                self.vm.heap.recharge_local(r);
                 self.push(Value::Unit)?;
             }
             Instr::MapNew { count, .. } => {
