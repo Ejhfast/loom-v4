@@ -654,7 +654,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 29;
+pub const INTRINSIC_ABI_VERSION: u32 = 30;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -911,9 +911,11 @@ pub const INTRINSIC_LIST_SWAP: IntrinsicSlot = 238;
 pub const INTRINSIC_BYTE_BUFFER_SET: IntrinsicSlot = 239;
 pub const INTRINSIC_BYTE_BUFFER_CAPACITY: IntrinsicSlot = 240;
 pub const INTRINSIC_BYTE_BUFFER_TRUNCATE: IntrinsicSlot = 241;
+pub const INTRINSIC_BYTES_READ_U32_BE: IntrinsicSlot = 242;
+pub const INTRINSIC_BYTES_READ_U32_LE: IntrinsicSlot = 243;
 
 /// Pure intrinsics in stable slot order.
-pub static INTRINSICS: [IntrinsicDef; 242] = [
+pub static INTRINSICS: [IntrinsicDef; 244] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2413,6 +2415,18 @@ pub static INTRINSICS: [IntrinsicDef; 242] = [
         name: "byte_buffer.truncate",
         params: &[AbiType::BYTE_BUFFER, AbiType::INT],
         reply: AbiType::BYTE_BUFFER,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.read_u32_be",
+        params: &[AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "bytes.read_u32_le",
+        params: &[AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
         semantic_revision: 1,
     },
 ];

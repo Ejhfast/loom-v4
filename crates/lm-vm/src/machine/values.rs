@@ -931,6 +931,29 @@ impl Machine {
                 }
                 self.push(Value::Int(byte.map(i64::from).unwrap_or(-1)))?;
             }
+            Instr::Native(
+                operation @ (lm_bytecode::NativeInstr::BytesReadU32Be
+                | lm_bytecode::NativeInstr::BytesReadU32Le),
+            ) => {
+                let offset = self.pop_int()?;
+                let bytes = self.pop_obj()?;
+                let offset = usize::try_from(offset).map_err(|_| FaultCode::IndexOutOfBounds)?;
+                let end = offset.checked_add(4).ok_or(FaultCode::IndexOutOfBounds)?;
+                let word = match self.vm.heap.get(bytes) {
+                    Object::Bytes(bytes) => bytes
+                        .as_slice()
+                        .get(offset..end)
+                        .ok_or(FaultCode::IndexOutOfBounds)?,
+                    _ => return Err(BAD_TYPE),
+                };
+                let word: [u8; 4] = word.try_into().map_err(|_| FaultCode::InvalidVmState)?;
+                let value = if matches!(operation, lm_bytecode::NativeInstr::BytesReadU32Be) {
+                    u32::from_be_bytes(word)
+                } else {
+                    u32::from_le_bytes(word)
+                };
+                self.push(Value::Int(i64::from(value)))?;
+            }
             Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => {
                 let length = self.pop_int()?;
                 let start = self.pop_int()?;

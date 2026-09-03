@@ -28,20 +28,6 @@ def _word_buffer(): List[Int]
   words
 end
 
-def _word_be(bytes: Bytes, offset: Int): Int
-  (bytes.at(offset) << 24) |
-    (bytes.at(offset + 1) << 16) |
-    (bytes.at(offset + 2) << 8) |
-    bytes.at(offset + 3)
-end
-
-def _word_le(bytes: Bytes, offset: Int): Int
-  bytes.at(offset) |
-    (bytes.at(offset + 1) << 8) |
-    (bytes.at(offset + 2) << 16) |
-    (bytes.at(offset + 3) << 24)
-end
-
 def _rotate_right_32(value: Int, amount: Int): Int
   repeated = value | (value << 32)
   repeated.rotate_right(amount) & _WORD_MASK
@@ -140,11 +126,12 @@ final class Sha256 implements DigestState
     f = self.h5
     g = self.h6
     h = self.h7
+    constants = _SHA256_CONSTANTS
 
     round = 0
     while round < 64
       word = if round < 16
-        _word_be(source, offset + round * 4)
+        source.read_u32_be(offset + round * 4)
       else
         prior = schedule.at((round - 15) & 15)
         sigma0 = _rotate_right_32(prior, 7) ^
@@ -160,7 +147,7 @@ final class Sha256 implements DigestState
       sum1 = _rotate_right_32(e, 6) ^ _rotate_right_32(e, 11) ^
         _rotate_right_32(e, 25)
       choose = ((e & f) ^ ((~e) & g)) & _WORD_MASK
-      constant = _word_be(_SHA256_CONSTANTS, round * 4)
+      constant = constants.read_u32_be(round * 4)
       temporary1 = (h + sum1 + choose + constant + word) & _WORD_MASK
       sum0 = _rotate_right_32(a, 2) ^ _rotate_right_32(a, 13) ^
         _rotate_right_32(a, 22)
@@ -189,12 +176,13 @@ final class Sha256 implements DigestState
   end
 
   def update(mut self, bytes: Bytes): Sha256
-    self.byte_count = self.byte_count.wrapping_add(bytes.len())
+    length = bytes.len()
+    self.byte_count = self.byte_count.wrapping_add(length)
     offset = 0
 
     if self.pending.len() > 0
       needed = 64 - self.pending.len()
-      count = needed.min(bytes.len())
+      count = needed.min(length)
       if count > 0
         self.pending.extend(bytes.slice(0, count).expect("the pending range is valid"))
         offset = count
@@ -205,13 +193,13 @@ final class Sha256 implements DigestState
       end
     end
 
-    while offset + 64 <= bytes.len()
+    while offset + 64 <= length
       self._block(bytes, offset)
       offset = offset + 64
     end
-    if offset < bytes.len()
+    if offset < length
       self.pending.extend(
-        bytes.slice(offset, bytes.len() - offset).expect("the digest suffix is valid")
+        bytes.slice(offset, length - offset).expect("the digest suffix is valid")
       )
     end
     self
@@ -326,7 +314,7 @@ final class Md5 implements DigestState
     words = self.words
     index = 0
     while index < 16
-      words.set(index, _word_le(source, offset + index * 4))
+      words.set(index, source.read_u32_le(offset + index * 4))
       index = index + 1
     end
 
@@ -334,6 +322,8 @@ final class Md5 implements DigestState
     b = self.b0
     c = self.c0
     d = self.d0
+    constants = _MD5_CONSTANTS
+    shifts = _MD5_SHIFTS
     round = 0
     while round < 64
       function = 0
@@ -352,9 +342,9 @@ final class Md5 implements DigestState
         word_index = (7 * round) % 16
       end
 
-      sum = (a + function + _word_le(_MD5_CONSTANTS, round * 4) +
+      sum = (a + function + constants.read_u32_le(round * 4) +
         words.at(word_index)) & _WORD_MASK
-      next_b = (b + _rotate_left_32(sum, _MD5_SHIFTS.at(round))) & _WORD_MASK
+      next_b = (b + _rotate_left_32(sum, shifts.at(round))) & _WORD_MASK
       a = d
       d = c
       c = b
@@ -369,12 +359,13 @@ final class Md5 implements DigestState
   end
 
   def update(mut self, bytes: Bytes): Md5
-    self.byte_count = self.byte_count.wrapping_add(bytes.len())
+    length = bytes.len()
+    self.byte_count = self.byte_count.wrapping_add(length)
     offset = 0
 
     if self.pending.len() > 0
       needed = 64 - self.pending.len()
-      count = needed.min(bytes.len())
+      count = needed.min(length)
       if count > 0
         self.pending.extend(bytes.slice(0, count).expect("the pending range is valid"))
         offset = count
@@ -385,13 +376,13 @@ final class Md5 implements DigestState
       end
     end
 
-    while offset + 64 <= bytes.len()
+    while offset + 64 <= length
       self._block(bytes, offset)
       offset = offset + 64
     end
-    if offset < bytes.len()
+    if offset < length
       self.pending.extend(
-        bytes.slice(offset, bytes.len() - offset).expect("the digest suffix is valid")
+        bytes.slice(offset, length - offset).expect("the digest suffix is valid")
       )
     end
     self
@@ -458,13 +449,17 @@ final class Crc32 implements DigestState
 
   def update(mut self, bytes: Bytes): Crc32
     index = 0
-    while index < bytes.len()
-      value = self.checksum ^ bytes.at(index)
-      value = (value >>> 4) ^ _word_le(_CRC32_TABLE, (value & 15) * 4)
-      value = (value >>> 4) ^ _word_le(_CRC32_TABLE, (value & 15) * 4)
-      self.checksum = value & _WORD_MASK
+    length = bytes.len()
+    checksum = self.checksum
+    table = _CRC32_TABLE
+    while index < length
+      value = checksum ^ bytes.at(index)
+      value = (value >>> 4) ^ table.read_u32_le((value & 15) * 4)
+      value = (value >>> 4) ^ table.read_u32_le((value & 15) * 4)
+      checksum = value & _WORD_MASK
       index = index + 1
     end
+    self.checksum = checksum
     self
   end
 

@@ -78,6 +78,8 @@ fn bytes_and_builder_intrinsics_use_native_instructions() {
     for expected in [
         Instr::Native(lm_bytecode::NativeInstr::BytesAt),
         Instr::Native(lm_bytecode::NativeInstr::BytesGet),
+        Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Be),
+        Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Le),
         Instr::Native(lm_bytecode::NativeInstr::BytesConcat),
         Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith),
         Instr::Native(lm_bytecode::NativeInstr::BytesFindIndex),
@@ -106,6 +108,37 @@ fn bytes_and_builder_intrinsics_use_native_instructions() {
             .position(|ty| *ty == BcType::Class(class))
             .expect("the nominal builder type exists");
         assert!(ty >= 4);
+    }
+}
+
+#[test]
+fn bytes_read_unsigned_words_in_both_byte_orders() {
+    let source = r#"
+bytes = b"\x01\x23\x45\x67\x89"
+(
+  bytes.read_u32_be(0),
+  bytes.read_u32_le(0),
+  bytes.read_u32_be(1),
+  bytes.read_u32_le(1)
+)
+"#;
+    assert_eq!(
+        run_text("bytes_words.lm", source, VmConfig::default()).unwrap(),
+        "Done((19088743, 1732584193, 591751049, 2305246499))"
+    );
+}
+
+#[test]
+fn bytes_word_reads_check_the_complete_range() {
+    for (name, source) in [
+        ("bytes_word_negative.lm", "b\"abcd\".read_u32_be(-1)\n"),
+        ("bytes_word_short.lm", "b\"abc\".read_u32_le(0)\n"),
+        ("bytes_word_end.lm", "b\"abcd\".read_u32_be(1)\n"),
+    ] {
+        assert_eq!(
+            run_text(name, source, VmConfig::default()).unwrap(),
+            "Fault(IndexOutOfBounds)"
+        );
     }
 }
 

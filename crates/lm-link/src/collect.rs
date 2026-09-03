@@ -1048,6 +1048,8 @@ fn native_edges(
         | NativeInstr::BytesTextRange
         | NativeInstr::BytesAt
         | NativeInstr::BytesGet
+        | NativeInstr::BytesReadU32Be
+        | NativeInstr::BytesReadU32Le
         | NativeInstr::BytesSlice
         | NativeInstr::BytesConcat
         | NativeInstr::BytesStartsWith

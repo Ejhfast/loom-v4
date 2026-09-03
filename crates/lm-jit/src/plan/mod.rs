@@ -620,6 +620,7 @@ pub(super) enum HeapAccessKind {
     BytesLen,
     BytesAt,
     BytesGet,
+    BytesReadU32,
     TextByteLen,
     TextScalarLen,
     TextAtByte,

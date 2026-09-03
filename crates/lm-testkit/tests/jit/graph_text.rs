@@ -49,6 +49,34 @@ fn byte_index_faults_match_the_interpreter() {
 }
 
 #[test]
+fn byte_word_faults_match_the_interpreter() {
+    for expression in [
+        "bytes.read_u32_be(-1)",
+        "bytes.read_u32_le(2)",
+        "b\"abc\".read_u32_be(0)",
+    ] {
+        let source = format!(
+            concat!(
+                "def read(bytes: Bytes): Int\n",
+                "  spin = 0\n",
+                "  while spin < 1000\n",
+                "    spin = spin + 1\n",
+                "  end\n",
+                "  {}\n",
+                "end\n",
+                "read(b\"loom\")\n",
+            ),
+            expression
+        );
+        let (interpreted, _, interpreted_dump) = run(&source, EngineMode::Interpreter, u64::MAX);
+        let (native, metrics, native_dump) = run(&source, EngineMode::Native, u64::MAX);
+        assert_eq!(native, interpreted, "{expression}: {metrics:?}");
+        assert_eq!(native_dump, interpreted_dump, "{expression}");
+        assert!(metrics.native_retired_instructions > 0, "{metrics:?}");
+    }
+}
+
+#[test]
 fn text_metadata_and_hash_mix_stay_native() {
     let source = concat!(
         "def measure_string(value: String): Int\n",

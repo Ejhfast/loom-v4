@@ -97,6 +97,8 @@ pub fn stack_effect(tables: &impl StackEffectTables, instruction: &Instr) -> (us
         | Instr::Native(NativeInstr::TextSplit)
         | Instr::Native(NativeInstr::BytesAt)
         | Instr::Native(NativeInstr::BytesGet)
+        | Instr::Native(NativeInstr::BytesReadU32Be)
+        | Instr::Native(NativeInstr::BytesReadU32Le)
         | Instr::Native(NativeInstr::BytesConcat)
         | Instr::Native(NativeInstr::BytesStartsWith)
         | Instr::Native(NativeInstr::BytesFindIndex)

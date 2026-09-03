@@ -493,7 +493,9 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::StrCharCount
         | NativeInstr::BytesLen
         | NativeInstr::BytesAt
-        | NativeInstr::BytesGet => dedicated(Guarded).with_replay(),
+        | NativeInstr::BytesGet
+        | NativeInstr::BytesReadU32Be
+        | NativeInstr::BytesReadU32Le => dedicated(Guarded).with_replay(),
         NativeInstr::TextAtByte | NativeInstr::TextAt | NativeInstr::TextIsBoundary => {
             dedicated(Guarded).with_replay()
         }

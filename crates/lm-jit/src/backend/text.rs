@@ -422,3 +422,56 @@ pub(super) fn emit_bytes_get(
     builder.switch_to_block(done);
     Ok(builder.block_params(done)[0])
 }
+
+pub(super) fn emit_bytes_read_u32(
+    builder: &mut FunctionBuilder<'_>,
+    values: NativeValues<'_>,
+    reference: ir::Value,
+    offset: ir::Value,
+    big_endian: bool,
+    point: FaultPoint,
+    deopt_stack: &[NativeValue],
+) -> Result<ir::Value, CompileError> {
+    let entry = emit_object_entry(
+        builder,
+        values,
+        reference,
+        JIT_OBJECT_BYTES,
+        point,
+        ObjectGuard::Replay(deopt_stack),
+    )?;
+    let negative = builder.ins().icmp_imm(IntCC::SignedLessThan, offset, 0);
+    let offset = if values.pointer_type == types::I64 {
+        offset
+    } else {
+        builder.ins().ireduce(values.pointer_type, offset)
+    };
+    let len = load_value(builder, values.pointer_type, entry, JIT_BYTES_LEN_OFFSET)?;
+    let too_short = builder.ins().icmp_imm(IntCC::UnsignedLessThan, len, 4);
+    let four = builder.ins().iconst(values.pointer_type, 4);
+    let last = builder.ins().isub(len, four);
+    let outside = builder.ins().icmp(IntCC::UnsignedGreaterThan, offset, last);
+    let invalid = builder.ins().bor(negative, too_short);
+    let invalid = builder.ins().bor(invalid, outside);
+    emit_interpreter_replay(builder, values, invalid, point, deopt_stack)?;
+
+    let data = load_value(builder, values.pointer_type, entry, JIT_BYTES_DATA_OFFSET)?;
+    let address = builder.ins().iadd(data, offset);
+    let flags = MemFlags::new().with_notrap();
+    let word = builder.ins().load(types::I32, flags, address, 0);
+    let word = builder.ins().uextend(types::I64, word);
+    let reverse = big_endian == cfg!(target_endian = "little");
+    if !reverse {
+        return Ok(word);
+    }
+    let byte_0 = builder.ins().band_imm(word, 0xff);
+    let byte_0 = builder.ins().ishl_imm(byte_0, 24);
+    let byte_1 = builder.ins().band_imm(word, 0xff00);
+    let byte_1 = builder.ins().ishl_imm(byte_1, 8);
+    let byte_2 = builder.ins().ushr_imm(word, 8);
+    let byte_2 = builder.ins().band_imm(byte_2, 0xff00);
+    let byte_3 = builder.ins().ushr_imm(word, 24);
+    let high = builder.ins().bor(byte_0, byte_1);
+    let low = builder.ins().bor(byte_2, byte_3);
+    Ok(builder.ins().bor(high, low))
+}

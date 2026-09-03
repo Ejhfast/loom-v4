@@ -4740,6 +4740,8 @@ len() -> Int
 is_empty() -> Bool
 at(index: Int) -> Int
 get(index: Int) -> Option[Int]
+read_u32_be(offset: Int) -> Int
+read_u32_le(offset: Int) -> Int
 slice(start: Int, length: Int) -> Result[Bytes,IndexError]
 compact() -> Bytes
 concat(other: Bytes) -> Bytes
@@ -4765,6 +4767,10 @@ __ge__(other: Bytes) -> Bool
 ```
 
 `at` faults with `IndexOutOfBounds` for an invalid index. `get` returns `None` for an invalid index.
+
+The word-read methods return an unsigned 32-bit value as a nonnegative `Int`.
+
+They fault with `IndexOutOfBounds` unless four bytes start at the offset.
 
 `slice` returns `Err(IndexError.OutOfBounds)` for an invalid range. A successful slice shares immutable storage.
 

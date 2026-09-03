@@ -2586,6 +2586,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_BYTES_LEN => Instr::Native(lm_bytecode::NativeInstr::BytesLen),
             lm_abi::INTRINSIC_BYTES_AT => Instr::Native(lm_bytecode::NativeInstr::BytesAt),
             lm_abi::INTRINSIC_BYTES_GET => Instr::Native(lm_bytecode::NativeInstr::BytesGet),
+            lm_abi::INTRINSIC_BYTES_READ_U32_BE => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Be)
+            }
+            lm_abi::INTRINSIC_BYTES_READ_U32_LE => {
+                Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Le)
+            }
             lm_abi::INTRINSIC_BYTES_SLICE => Instr::Native(lm_bytecode::NativeInstr::BytesSlice),
             lm_abi::INTRINSIC_BYTES_CONCAT => Instr::Native(lm_bytecode::NativeInstr::BytesConcat),
             lm_abi::INTRINSIC_BYTES_STARTS_WITH => {
@@ -4220,6 +4226,8 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BytesTextRange) => "BytesTextRange".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesAt) => "BytesAt".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesGet) => "BytesGet".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Be) => "BytesReadU32Be".to_string(),
+        Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Le) => "BytesReadU32Le".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesSlice) => "BytesSlice".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesConcat) => "BytesConcat".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith) => "BytesStartsWith".to_string(),

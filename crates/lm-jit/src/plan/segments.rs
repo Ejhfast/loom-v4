@@ -1186,6 +1186,15 @@ pub(super) fn analyze_segment(
                     kind: HeapAccessKind::BytesGet,
                 });
             }
+            Instr::Native(NativeInstr::BytesReadU32Be | NativeInstr::BytesReadU32Le) => {
+                let receiver = stack_from_end(&before.stack, 1)?;
+                bytes_type(context, receiver)?;
+                expect_scalar(stack_from_end(&before.stack, 0)?, ScalarKind::Int)?;
+                heap_accesses.push(HeapAccess {
+                    instruction: position,
+                    kind: HeapAccessKind::BytesReadU32,
+                });
+            }
             Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
                 let receiver = stack_from_end(&before.stack, 0)?;
                 text_type(context, receiver)?;

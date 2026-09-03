@@ -935,6 +935,8 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BytesTextRange)
         | Instr::Native(NativeInstr::BytesAt)
         | Instr::Native(NativeInstr::BytesGet)
+        | Instr::Native(NativeInstr::BytesReadU32Be)
+        | Instr::Native(NativeInstr::BytesReadU32Le)
         | Instr::Native(NativeInstr::BytesSlice)
         | Instr::Native(NativeInstr::BytesConcat)
         | Instr::Native(NativeInstr::BytesStartsWith)
@@ -2281,6 +2283,8 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BytesTextRange) => 0x103,
             Instr::Native(NativeInstr::BytesAt) => 0x6e,
             Instr::Native(NativeInstr::BytesGet) => 0x6f,
+            Instr::Native(NativeInstr::BytesReadU32Be) => 0x118,
+            Instr::Native(NativeInstr::BytesReadU32Le) => 0x119,
             Instr::Native(NativeInstr::BytesSlice) => 0x7b,
             Instr::Native(NativeInstr::BytesConcat) => 0x7c,
             Instr::Native(NativeInstr::BytesStartsWith) => 0x7d,
@@ -2674,6 +2678,8 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BytesTextRange)
             | Instr::Native(NativeInstr::BytesAt)
             | Instr::Native(NativeInstr::BytesGet)
+            | Instr::Native(NativeInstr::BytesReadU32Be)
+            | Instr::Native(NativeInstr::BytesReadU32Le)
             | Instr::Native(NativeInstr::BytesSlice)
             | Instr::Native(NativeInstr::BytesConcat)
             | Instr::Native(NativeInstr::BytesStartsWith)

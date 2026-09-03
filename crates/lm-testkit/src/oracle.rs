@@ -1843,6 +1843,30 @@ impl<'m> Oracle<'m> {
                     (_, byte) => Ok(OV::Int(byte.map(i64::from).unwrap_or(-1))),
                 }
             }
+            lm_abi::INTRINSIC_BYTES_READ_U32_BE | lm_abi::INTRINSIC_BYTES_READ_U32_LE => {
+                let obj = self.as_obj(&values[0])?;
+                let offset = usize::try_from(self.as_int(&values[1])?)
+                    .map_err(|_| Stop::Fault("IndexOutOfBounds"))?;
+                let end = offset
+                    .checked_add(4)
+                    .ok_or(Stop::Fault("IndexOutOfBounds"))?;
+                let borrowed = obj.borrow();
+                let bytes = match &borrowed.kind {
+                    OKind::Bytes(bytes) => bytes
+                        .get(offset..end)
+                        .ok_or(Stop::Fault("IndexOutOfBounds"))?,
+                    _ => return Err(Stop::Limit("bytes op on a non-bytes value")),
+                };
+                let word: [u8; 4] = bytes
+                    .try_into()
+                    .map_err(|_| Stop::Fault("InvalidVmState"))?;
+                let value = if intrinsic == lm_abi::INTRINSIC_BYTES_READ_U32_BE {
+                    u32::from_be_bytes(word)
+                } else {
+                    u32::from_le_bytes(word)
+                };
+                Ok(OV::Int(i64::from(value)))
+            }
             lm_abi::INTRINSIC_BYTES_SLICE => {
                 let obj = self.as_obj(&values[0])?;
                 let start = self.as_int(&values[1])?;

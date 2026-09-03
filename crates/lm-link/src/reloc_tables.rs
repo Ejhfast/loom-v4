@@ -760,6 +760,8 @@ pub(crate) fn reloc_instr(instr: &Instr, reloc: &Reloc) -> Instr {
         | Instr::Native(lm_bytecode::NativeInstr::BytesTextRange)
         | Instr::Native(lm_bytecode::NativeInstr::BytesAt)
         | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Be)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Le)
         | Instr::Native(lm_bytecode::NativeInstr::BytesSlice)
         | Instr::Native(lm_bytecode::NativeInstr::BytesConcat)
         | Instr::Native(lm_bytecode::NativeInstr::BytesStartsWith)

@@ -605,6 +605,35 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             )?;
             push_static(builder, stack, ScalarKind::Int, value)?;
         }
+        Instr::Native(operation @ (NativeInstr::BytesReadU32Be | NativeInstr::BytesReadU32Le)) => {
+            let deopt_stack = stack.clone();
+            let offset = pop_native(stack)?;
+            let reference = pop_native(stack)?;
+            let instruction = segment.start + within as u32;
+            let access = segment
+                .heap_accesses
+                .iter()
+                .find(|access| access.instruction == instruction)
+                .copied()
+                .ok_or(CompileError::Backend)?;
+            if !matches!(access.kind, HeapAccessKind::BytesReadU32) {
+                return Err(CompileError::Backend);
+            }
+            let value = emit_bytes_read_u32(
+                builder,
+                values,
+                reference,
+                offset,
+                matches!(operation, NativeInstr::BytesReadU32Be),
+                FaultPoint {
+                    block: segment.block,
+                    instruction: instruction + 1,
+                    prefix: fault_prefix,
+                },
+                &deopt_stack,
+            )?;
+            push_static(builder, stack, ScalarKind::Int, value)?;
+        }
         Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
             let deopt_stack = stack.clone();
             let reference = pop_native(stack)?;

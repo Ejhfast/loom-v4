@@ -243,6 +243,9 @@ pub(super) fn emit_segment_body(
                 Instr::Native(NativeInstr::BytesLen) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::BytesAt) => runtime::emit(&mut emission)?,
                 Instr::Native(NativeInstr::BytesGet) => runtime::emit(&mut emission)?,
+                Instr::Native(NativeInstr::BytesReadU32Be | NativeInstr::BytesReadU32Le) => {
+                    runtime::emit(&mut emission)?
+                }
                 Instr::Native(NativeInstr::StrByteLen | NativeInstr::StrCharCount) => {
                     runtime::emit(&mut emission)?
                 }

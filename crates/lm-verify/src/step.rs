@@ -2024,7 +2024,9 @@ pub(crate) fn step(
             push(state, view)?;
         }
         Instr::Native(lm_bytecode::NativeInstr::BytesAt)
-        | Instr::Native(lm_bytecode::NativeInstr::BytesGet) => {
+        | Instr::Native(lm_bytecode::NativeInstr::BytesGet)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Be)
+        | Instr::Native(lm_bytecode::NativeInstr::BytesReadU32Le) => {
             pop_expect(state, TY_INT)?;
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {
