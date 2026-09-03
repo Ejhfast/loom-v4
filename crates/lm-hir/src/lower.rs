@@ -2431,6 +2431,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_INT_ROTATE_RIGHT => {
                 Instr::Numeric(lm_bytecode::NumericInstr::IntRotateRight)
             }
+            lm_abi::INTRINSIC_INT_ROTATE_LEFT_32 => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntRotateLeft32)
+            }
+            lm_abi::INTRINSIC_INT_ROTATE_RIGHT_32 => {
+                Instr::Numeric(lm_bytecode::NumericInstr::IntRotateRight32)
+            }
             lm_abi::INTRINSIC_INT_COUNT_ONES => {
                 Instr::Numeric(lm_bytecode::NumericInstr::IntCountOnes)
             }

@@ -28,16 +28,6 @@ def _word_buffer(): List[Int]
   words
 end
 
-def _rotate_right_32(value: Int, amount: Int): Int
-  repeated = value | (value << 32)
-  repeated.rotate_right(amount) & _WORD_MASK
-end
-
-def _rotate_left_32(value: Int, amount: Int): Int
-  repeated = value | (value << 32)
-  repeated.rotate_left(amount) & _WORD_MASK
-end
-
 def _append_word_be(mut output: ByteBuffer, value: Int)
   output.append((value >>> 24) & 255)
   output.append((value >>> 16) & 255)
@@ -134,23 +124,23 @@ final class Sha256 implements DigestState
         source.read_u32_be(offset + round * 4)
       else
         prior = schedule.at((round - 15) & 15)
-        sigma0 = _rotate_right_32(prior, 7) ^
-          _rotate_right_32(prior, 18) ^ (prior >>> 3)
+        sigma0 = prior.rotate_right_32(7) ^
+          prior.rotate_right_32(18) ^ (prior >>> 3)
         prior = schedule.at((round - 2) & 15)
-        sigma1 = _rotate_right_32(prior, 17) ^
-          _rotate_right_32(prior, 19) ^ (prior >>> 10)
+        sigma1 = prior.rotate_right_32(17) ^
+          prior.rotate_right_32(19) ^ (prior >>> 10)
         (schedule.at((round - 16) & 15) + sigma0 +
           schedule.at((round - 7) & 15) + sigma1) & _WORD_MASK
       end
       schedule.set(round & 15, word)
 
-      sum1 = _rotate_right_32(e, 6) ^ _rotate_right_32(e, 11) ^
-        _rotate_right_32(e, 25)
+      sum1 = e.rotate_right_32(6) ^ e.rotate_right_32(11) ^
+        e.rotate_right_32(25)
       choose = ((e & f) ^ ((~e) & g)) & _WORD_MASK
       constant = constants.read_u32_be(round * 4)
       temporary1 = (h + sum1 + choose + constant + word) & _WORD_MASK
-      sum0 = _rotate_right_32(a, 2) ^ _rotate_right_32(a, 13) ^
-        _rotate_right_32(a, 22)
+      sum0 = a.rotate_right_32(2) ^ a.rotate_right_32(13) ^
+        a.rotate_right_32(22)
       majority = ((a & b) ^ (a & c) ^ (b & c)) & _WORD_MASK
       temporary2 = (sum0 + majority) & _WORD_MASK
 
@@ -344,7 +334,7 @@ final class Md5 implements DigestState
 
       sum = (a + function + constants.read_u32_le(round * 4) +
         words.at(word_index)) & _WORD_MASK
-      next_b = (b + _rotate_left_32(sum, shifts.at(round))) & _WORD_MASK
+      next_b = (b + sum.rotate_left_32(shifts.at(round))) & _WORD_MASK
       a = d
       d = c
       c = b

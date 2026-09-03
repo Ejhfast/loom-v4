@@ -163,6 +163,14 @@ final class Int implements Display, Hashable, SignedNumber
     intrinsic("int.rotate_right", self, amount)
   end
 
+  def rotate_left_32(self, amount: Int): Int
+    intrinsic("int.rotate_left_32", self, amount)
+  end
+
+  def rotate_right_32(self, amount: Int): Int
+    intrinsic("int.rotate_right_32", self, amount)
+  end
+
   def count_ones(self): Int
     intrinsic("int.count_ones", self)
   end

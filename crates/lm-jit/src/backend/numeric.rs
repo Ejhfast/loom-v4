@@ -59,20 +59,39 @@ pub(super) fn emit_numeric_instruction(
         | NumericInstr::IntShr
         | NumericInstr::IntUshr
         | NumericInstr::IntRotateLeft
-        | NumericInstr::IntRotateRight => {
+        | NumericInstr::IntRotateRight
+        | NumericInstr::IntRotateLeft32
+        | NumericInstr::IntRotateRight32 => {
             let amount = pop_native(stack)?;
             let value = pop_native(stack)?;
-            let invalid = builder
-                .ins()
-                .icmp_imm(IntCC::UnsignedGreaterThan, amount, 63);
+            let is_32_bit = matches!(
+                operation,
+                NumericInstr::IntRotateLeft32 | NumericInstr::IntRotateRight32
+            );
+            let invalid = builder.ins().icmp_imm(
+                IntCC::UnsignedGreaterThan,
+                amount,
+                if is_32_bit { 31 } else { 63 },
+            );
             emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
-            let value = match operation {
-                NumericInstr::IntShl => builder.ins().ishl(value, amount),
-                NumericInstr::IntShr => builder.ins().sshr(value, amount),
-                NumericInstr::IntUshr => builder.ins().ushr(value, amount),
-                NumericInstr::IntRotateLeft => builder.ins().rotl(value, amount),
-                NumericInstr::IntRotateRight => builder.ins().rotr(value, amount),
-                _ => unreachable!(),
+            let value = if is_32_bit {
+                let value = builder.ins().ireduce(types::I32, value);
+                let amount = builder.ins().ireduce(types::I32, amount);
+                let value = match operation {
+                    NumericInstr::IntRotateLeft32 => builder.ins().rotl(value, amount),
+                    NumericInstr::IntRotateRight32 => builder.ins().rotr(value, amount),
+                    _ => unreachable!(),
+                };
+                builder.ins().uextend(types::I64, value)
+            } else {
+                match operation {
+                    NumericInstr::IntShl => builder.ins().ishl(value, amount),
+                    NumericInstr::IntShr => builder.ins().sshr(value, amount),
+                    NumericInstr::IntUshr => builder.ins().ushr(value, amount),
+                    NumericInstr::IntRotateLeft => builder.ins().rotl(value, amount),
+                    NumericInstr::IntRotateRight => builder.ins().rotr(value, amount),
+                    _ => unreachable!(),
+                }
             };
             push_static(builder, stack, ScalarKind::Int, value)?;
         }

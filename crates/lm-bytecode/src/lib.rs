@@ -694,6 +694,8 @@ pub enum NumericInstr {
     FloatAsinh,
     FloatAcosh,
     FloatAtanh,
+    IntRotateLeft32,
+    IntRotateRight32,
 }
 
 impl NumericInstr {
@@ -777,6 +779,8 @@ impl NumericInstr {
             75 => NumericInstr::FloatAsinh,
             76 => NumericInstr::FloatAcosh,
             77 => NumericInstr::FloatAtanh,
+            78 => NumericInstr::IntRotateLeft32,
+            79 => NumericInstr::IntRotateRight32,
             _ => return None,
         })
     }
@@ -1946,7 +1950,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 70;
+pub const VERSION: u16 = 71;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -5244,6 +5248,8 @@ mod tests {
             Instr::Numeric(NumericInstr::IntWrappingMul),
             Instr::Numeric(NumericInstr::IntRotateLeft),
             Instr::Numeric(NumericInstr::IntRotateRight),
+            Instr::Numeric(NumericInstr::IntRotateLeft32),
+            Instr::Numeric(NumericInstr::IntRotateRight32),
             Instr::Numeric(NumericInstr::IntToFloat),
             Instr::Numeric(NumericInstr::FloatNeg),
             Instr::Numeric(NumericInstr::FloatAdd),

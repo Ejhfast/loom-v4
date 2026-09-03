@@ -946,6 +946,14 @@ fn shift_amount(value: i64) -> Result<u32, FaultCode> {
     Ok(amount)
 }
 
+fn rotation_amount_32(value: i64) -> Result<u32, FaultCode> {
+    let amount = u32::try_from(value).map_err(|_| FaultCode::ShiftOutOfRange)?;
+    if amount > 31 {
+        return Err(FaultCode::ShiftOutOfRange);
+    }
+    Ok(amount)
+}
+
 fn float_eq(left: u64, right: u64) -> bool {
     let left = f64::from_bits(left);
     let right = f64::from_bits(right);

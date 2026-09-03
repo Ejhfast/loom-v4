@@ -55,6 +55,7 @@ fn simple_numeric_operations_stay_native() {
         "  value = value.wrapping_add(i).wrapping_sub(i)\n",
         "  value = value.wrapping_mul(3)\n",
         "  value = value.rotate_left(5).rotate_right(5)\n",
+        "  value = value.rotate_left_32(5).rotate_right_32(5)\n",
         "  float = value.to_float()\n",
         "  same = same and Float.from_bits(float.bits()) == float\n",
         "  same = same and not float.is_nan()\n",
@@ -105,7 +106,12 @@ fn numeric_utility_operations_stay_native() {
 
 #[test]
 fn invalid_shift_amounts_replay_one_instruction() {
-    for source in ["1 << 64\n", "1 >> -1\n", "1.rotate_left(64)\n"] {
+    for source in [
+        "1 << 64\n",
+        "1 >> -1\n",
+        "1.rotate_left(64)\n",
+        "1.rotate_right_32(32)\n",
+    ] {
         let artifact = lm_testkit::compile_text("jit-shift-fault.lm", source)
             .expect("the shift case compiles");
         for fuel in 0..=4 {

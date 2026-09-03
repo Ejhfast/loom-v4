@@ -178,7 +178,9 @@ pub(crate) fn step(
                 | NumericInstr::IntWrappingSub
                 | NumericInstr::IntWrappingMul
                 | NumericInstr::IntRotateLeft
-                | NumericInstr::IntRotateRight => {
+                | NumericInstr::IntRotateRight
+                | NumericInstr::IntRotateLeft32
+                | NumericInstr::IntRotateRight32 => {
                     pop_expect(state, TY_INT)?;
                     pop_expect(state, TY_INT)?;
                     push(state, TY_INT)?;

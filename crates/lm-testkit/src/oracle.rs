@@ -1351,6 +1351,16 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(OV::Int(result as i64))
             }
+            lm_abi::INTRINSIC_INT_ROTATE_LEFT_32 | lm_abi::INTRINSIC_INT_ROTATE_RIGHT_32 => {
+                let value = self.as_int(&values[0])? as u32;
+                let amount = oracle_rotation_32(self.as_int(&values[1])?)?;
+                let result = if intrinsic == lm_abi::INTRINSIC_INT_ROTATE_LEFT_32 {
+                    value.rotate_left(amount)
+                } else {
+                    value.rotate_right(amount)
+                };
+                Ok(OV::Int(i64::from(result)))
+            }
             lm_abi::INTRINSIC_INT_TO_FLOAT => {
                 Ok(OV::Float((self.as_int(&values[0])? as f64).to_bits()))
             }
@@ -2983,6 +2993,14 @@ fn oracle_is_decimal_float_text(text: &str) -> bool {
 fn oracle_shift(value: i64) -> Result<u32, Stop> {
     let value = u32::try_from(value).map_err(|_| Stop::Fault("ShiftOutOfRange"))?;
     if value > 63 {
+        return Err(Stop::Fault("ShiftOutOfRange"));
+    }
+    Ok(value)
+}
+
+fn oracle_rotation_32(value: i64) -> Result<u32, Stop> {
+    let value = u32::try_from(value).map_err(|_| Stop::Fault("ShiftOutOfRange"))?;
+    if value > 31 {
         return Err(Stop::Fault("ShiftOutOfRange"));
     }
     Ok(value)

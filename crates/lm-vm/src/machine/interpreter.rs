@@ -977,7 +977,9 @@ impl Machine {
             | NumericInstr::IntWrappingSub
             | NumericInstr::IntWrappingMul
             | NumericInstr::IntRotateLeft
-            | NumericInstr::IntRotateRight => {
+            | NumericInstr::IntRotateRight
+            | NumericInstr::IntRotateLeft32
+            | NumericInstr::IntRotateRight32 => {
                 let right = self.pop_int()?;
                 let left = self.pop_int()?;
                 let result = match instr {
@@ -1004,6 +1006,12 @@ impl Machine {
                     }
                     NumericInstr::IntRotateRight => {
                         (left as u64).rotate_right(shift_amount(right)?) as i64
+                    }
+                    NumericInstr::IntRotateLeft32 => {
+                        (left as u32).rotate_left(rotation_amount_32(right)?) as i64
+                    }
+                    NumericInstr::IntRotateRight32 => {
+                        (left as u32).rotate_right(rotation_amount_32(right)?) as i64
                     }
                     _ => unreachable!(),
                 };

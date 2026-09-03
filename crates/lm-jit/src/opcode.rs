@@ -297,6 +297,8 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         | NumericInstr::IntUshr
         | NumericInstr::IntRotateLeft
         | NumericInstr::IntRotateRight
+        | NumericInstr::IntRotateLeft32
+        | NumericInstr::IntRotateRight32
         | NumericInstr::FloatToIntValue => dedicated(Inline).with_replay(),
         NumericInstr::SbAppendFloat => dedicated(Helper)
             .with_replay()

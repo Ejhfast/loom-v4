@@ -1097,6 +1097,8 @@ fn numeric_edges(
         | NumericInstr::IntWrappingMul
         | NumericInstr::IntRotateLeft
         | NumericInstr::IntRotateRight
+        | NumericInstr::IntRotateLeft32
+        | NumericInstr::IntRotateRight32
         | NumericInstr::IntToFloat
         | NumericInstr::FloatNeg
         | NumericInstr::FloatAbs

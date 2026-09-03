@@ -16,6 +16,8 @@ positive_zero = 0.0
   (-1.75).trunc(),
   (1.0.is_finite(), infinity.is_finite(), nan.is_finite()),
   (infinity.is_infinite(), nan.is_infinite()),
+  (305419896.rotate_left_32(8), 305419896.rotate_right_32(8),
+    (-1).rotate_left_32(7)),
   ((-1).count_ones(), 0.leading_zeros(), 0.trailing_zeros()),
   (8.leading_zeros(), 8.trailing_zeros()),
   ((-42).signum(), 0.signum(), 42.signum())

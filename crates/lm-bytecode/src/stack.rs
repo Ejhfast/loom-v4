@@ -294,6 +294,8 @@ fn numeric_stack_effect(instruction: NumericInstr) -> (usize, usize) {
         | NumericInstr::IntWrappingMul
         | NumericInstr::IntRotateLeft
         | NumericInstr::IntRotateRight
+        | NumericInstr::IntRotateLeft32
+        | NumericInstr::IntRotateRight32
         | NumericInstr::FloatAdd
         | NumericInstr::FloatSub
         | NumericInstr::FloatMul

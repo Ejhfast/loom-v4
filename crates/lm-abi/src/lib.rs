@@ -654,7 +654,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 30;
+pub const INTRINSIC_ABI_VERSION: u32 = 31;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -913,9 +913,11 @@ pub const INTRINSIC_BYTE_BUFFER_CAPACITY: IntrinsicSlot = 240;
 pub const INTRINSIC_BYTE_BUFFER_TRUNCATE: IntrinsicSlot = 241;
 pub const INTRINSIC_BYTES_READ_U32_BE: IntrinsicSlot = 242;
 pub const INTRINSIC_BYTES_READ_U32_LE: IntrinsicSlot = 243;
+pub const INTRINSIC_INT_ROTATE_LEFT_32: IntrinsicSlot = 244;
+pub const INTRINSIC_INT_ROTATE_RIGHT_32: IntrinsicSlot = 245;
 
 /// Pure intrinsics in stable slot order.
-pub static INTRINSICS: [IntrinsicDef; 244] = [
+pub static INTRINSICS: [IntrinsicDef; 246] = [
     IntrinsicDef {
         name: "int.abs",
         params: &[AbiType::INT],
@@ -2426,6 +2428,18 @@ pub static INTRINSICS: [IntrinsicDef; 244] = [
     IntrinsicDef {
         name: "bytes.read_u32_le",
         params: &[AbiType::BYTES, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rotate_left_32",
+        params: &[AbiType::INT, AbiType::INT],
+        reply: AbiType::INT,
+        semantic_revision: 1,
+    },
+    IntrinsicDef {
+        name: "int.rotate_right_32",
+        params: &[AbiType::INT, AbiType::INT],
         reply: AbiType::INT,
         semantic_revision: 1,
     },

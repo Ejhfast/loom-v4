@@ -1215,7 +1215,15 @@ An invalid shift amount faults with `ShiftOutOfRange`.
 
 `Int.rotate_left` and `rotate_right` rotate all 64 payload bits.
 
-An invalid rotation amount faults with `ShiftOutOfRange`.
+An invalid 64-bit rotation amount faults with `ShiftOutOfRange`.
+
+`Int.rotate_left_32` and `rotate_right_32` rotate the low 32 bits.
+
+They return the zero-extended result as a nonnegative `Int`.
+
+Their rotation amounts must be from 0 through 31.
+
+An invalid 32-bit rotation amount faults with `ShiftOutOfRange`.
 
 `Int.count_ones` counts set bits in the 64-bit two's-complement value.
 
@@ -4959,6 +4967,8 @@ wrapping_sub(other: Int) -> Int
 wrapping_mul(other: Int) -> Int
 rotate_left(amount: Int) -> Int
 rotate_right(amount: Int) -> Int
+rotate_left_32(amount: Int) -> Int
+rotate_right_32(amount: Int) -> Int
 count_ones() -> Int
 leading_zeros() -> Int
 trailing_zeros() -> Int
