@@ -343,10 +343,7 @@ pub(super) fn emit_segment_body(
                     | NativeInstr::BytesIsUtf8
                     | NativeInstr::DigestSha256
                     | NativeInstr::DigestCrc32
-                    | NativeInstr::DigestMd5
-                    | NativeInstr::CompressEncode
-                    | NativeInstr::CompressDecodeStatus
-                    | NativeInstr::CompressDecodeValue,
+                    | NativeInstr::DigestMd5,
                 )
                 | Instr::Numeric(
                     NumericInstr::TextParseFloatStatus

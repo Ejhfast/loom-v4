@@ -2067,43 +2067,6 @@ impl<'m> Oracle<'m> {
                     _ => Ok(OV::Int(i64::from(lm_digest::crc32(&bytes)))),
                 }
             }
-            lm_abi::INTRINSIC_COMPRESS_ENCODE
-            | lm_abi::INTRINSIC_COMPRESS_DECODE_STATUS
-            | lm_abi::INTRINSIC_COMPRESS_DECODE_VALUE => {
-                let bytes = self.as_obj(&values[0])?;
-                let bytes = match &bytes.borrow().kind {
-                    OKind::Bytes(bytes) => bytes.clone(),
-                    _ => return Err(Stop::Limit("compression on a non-bytes value")),
-                };
-                let format = match self.as_int(&values[1])? {
-                    0 => lm_compress::Format::Gzip,
-                    1 => lm_compress::Format::Zlib,
-                    _ => return Err(Stop::Limit("invalid compression format")),
-                };
-                let argument = self.as_int(&values[2])?;
-                if intrinsic == lm_abi::INTRINSIC_COMPRESS_ENCODE {
-                    let level = u32::try_from(argument)
-                        .map_err(|_| Stop::Limit("invalid compression level"))?;
-                    let output = lm_compress::compress(&bytes, format, level)
-                        .map_err(|_| Stop::Limit("compression failed"))?;
-                    return Ok(self.alloc(OKind::Bytes(output)));
-                }
-                let result = usize::try_from(argument)
-                    .ok()
-                    .map(|limit| lm_compress::decompress(&bytes, format, limit));
-                if intrinsic == lm_abi::INTRINSIC_COMPRESS_DECODE_STATUS {
-                    let status = match result {
-                        Some(Ok(_)) => 0,
-                        Some(Err(lm_compress::DecompressError::InvalidData)) => 1,
-                        _ => 2,
-                    };
-                    return Ok(OV::Int(status));
-                }
-                let output = result
-                    .ok_or(Stop::Limit("invalid decompression limit"))?
-                    .map_err(|_| Stop::Limit("decompression failed"))?;
-                Ok(self.alloc(OKind::Bytes(output)))
-            }
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;

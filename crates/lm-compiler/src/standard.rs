@@ -24,7 +24,6 @@ const PATH_PATH: &str = "std.path";
 const URL_PATH: &str = "std.url";
 const DIGEST_PATH: &str = "std.digest";
 const UUID_PATH: &str = "std.uuid";
-const COMPRESS_PATH: &str = "std.compress";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
@@ -39,7 +38,6 @@ const PATH_SOURCE: &str = include_str!("../../../std/path.lm");
 const URL_SOURCE: &str = include_str!("../../../std/url.lm");
 const DIGEST_SOURCE: &str = include_str!("../../../std/digest.lm");
 const UUID_SOURCE: &str = include_str!("../../../std/uuid.lm");
-const COMPRESS_SOURCE: &str = include_str!("../../../std/compress.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
@@ -54,7 +52,6 @@ static PATH: OnceLock<CompiledModule> = OnceLock::new();
 static URL: OnceLock<CompiledModule> = OnceLock::new();
 static DIGEST: OnceLock<CompiledModule> = OnceLock::new();
 static UUID: OnceLock<CompiledModule> = OnceLock::new();
-static COMPRESS: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
@@ -92,7 +89,6 @@ impl StandardCatalog {
             URL_PATH,
             DIGEST_PATH,
             UUID_PATH,
-            COMPRESS_PATH,
         ]
     }
 
@@ -114,7 +110,6 @@ impl StandardCatalog {
             URL_PATH => Some(url_module()),
             DIGEST_PATH => Some(digest()),
             UUID_PATH => Some(uuid()),
-            COMPRESS_PATH => Some(compress()),
             _ => None,
         }
     }
@@ -132,7 +127,6 @@ impl StandardCatalog {
                     needs.tls = true;
                     needs.http = true;
                     needs.url = true;
-                    needs.compress = true;
                 }
                 BASE64_PATH => needs.base64 = true,
                 JSON_PATH => needs.json = true,
@@ -145,7 +139,6 @@ impl StandardCatalog {
                     needs.time = true;
                     needs.uuid = true;
                 }
-                COMPRESS_PATH => needs.compress = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
@@ -220,7 +213,7 @@ fn http() -> &'static CompiledModule {
             HTTP_PATH,
             "std/http.lm",
             HTTP_SOURCE,
-            &[tls(), url_module(), compress()],
+            &[tls(), url_module()],
         )
     })
 }
@@ -257,10 +250,6 @@ fn uuid() -> &'static CompiledModule {
     UUID.get_or_init(|| compile_bundled(UUID_PATH, "std/uuid.lm", UUID_SOURCE, &[time()]))
 }
 
-fn compress() -> &'static CompiledModule {
-    COMPRESS.get_or_init(|| compile_bundled(COMPRESS_PATH, "std/compress.lm", COMPRESS_SOURCE, &[]))
-}
-
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
     [
@@ -277,7 +266,6 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
         URL_PATH,
         DIGEST_PATH,
         UUID_PATH,
-        COMPRESS_PATH,
     ]
     .into_iter()
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
@@ -298,7 +286,6 @@ struct StandardNeeds {
     url: bool,
     digest: bool,
     uuid: bool,
-    compress: bool,
 }
 
 fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
@@ -320,9 +307,6 @@ fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
     }
     if needs.url {
         modules.push(url_module());
-    }
-    if needs.compress {
-        modules.push(compress());
     }
     if needs.http {
         modules.push(http());
@@ -361,7 +345,6 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
                 needs.tls = true;
                 needs.http = true;
                 needs.url = true;
-                needs.compress = true;
             }
             Some(BASE64_PATH) => needs.base64 = true,
             Some(JSON_PATH) => needs.json = true,
@@ -374,7 +357,6 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
                 needs.time = true;
                 needs.uuid = true;
             }
-            Some(COMPRESS_PATH) => needs.compress = true,
             _ => {}
         }
     }
@@ -454,13 +436,12 @@ mod tests {
                 URL_PATH,
                 DIGEST_PATH,
                 UUID_PATH,
-                COMPRESS_PATH,
             ]
         );
         assert!(modules_for_uses(&[]).is_empty());
         let selected = catalog.select(&[HTTP_PATH]).expect("the module exists");
         let paths: Vec<&str> = selected.iter().map(|module| module.path.as_str()).collect();
-        assert_eq!(paths, &[TLS_PATH, URL_PATH, COMPRESS_PATH, HTTP_PATH]);
+        assert_eq!(paths, &[TLS_PATH, URL_PATH, HTTP_PATH]);
         assert!(catalog.select(&["std.missing"]).is_err());
     }
 
@@ -509,10 +490,7 @@ mod tests {
     #[test]
     fn http_source_selects_its_dependency_closure() {
         let compiled = compile("use std.http.Http\nHttp().default_limits().max_headers\n");
-        assert_eq!(
-            compiled.standard_modules,
-            &[TLS_PATH, URL_PATH, COMPRESS_PATH, HTTP_PATH]
-        );
+        assert_eq!(compiled.standard_modules, &[TLS_PATH, URL_PATH, HTTP_PATH]);
     }
 
     #[test]
@@ -549,13 +527,5 @@ mod tests {
     fn url_source_selects_only_url() {
         let compiled = compile("use std.url.parse_url\nparse_url(\"https://example.com\")\n");
         assert_eq!(compiled.standard_modules, &[URL_PATH]);
-    }
-
-    #[test]
-    fn compression_source_selects_only_compression() {
-        let compiled = compile(
-            "use std.compress.CompressionLevel\nuse std.compress.gzip_compress\ngzip_compress(b\"ready\", CompressionLevel.Fast)\n",
-        );
-        assert_eq!(compiled.standard_modules, &[COMPRESS_PATH]);
     }
 }

@@ -932,9 +932,6 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::DigestSha256)
         | Instr::Native(NativeInstr::DigestCrc32)
         | Instr::Native(NativeInstr::DigestMd5)
-        | Instr::Native(NativeInstr::CompressEncode)
-        | Instr::Native(NativeInstr::CompressDecodeStatus)
-        | Instr::Native(NativeInstr::CompressDecodeValue)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -2326,9 +2323,6 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::DigestSha256) => 0x118,
             Instr::Native(NativeInstr::DigestCrc32) => 0x119,
             Instr::Native(NativeInstr::DigestMd5) => 0x11a,
-            Instr::Native(NativeInstr::CompressEncode) => 0x11b,
-            Instr::Native(NativeInstr::CompressDecodeStatus) => 0x11c,
-            Instr::Native(NativeInstr::CompressDecodeValue) => 0x11d,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2682,9 +2676,6 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::DigestSha256)
             | Instr::Native(NativeInstr::DigestCrc32)
             | Instr::Native(NativeInstr::DigestMd5)
-            | Instr::Native(NativeInstr::CompressEncode)
-            | Instr::Native(NativeInstr::CompressDecodeStatus)
-            | Instr::Native(NativeInstr::CompressDecodeValue)
             | Instr::Freeze
             | Instr::Native(NativeInstr::BytesNew)
             | Instr::Native(NativeInstr::BytesLen)

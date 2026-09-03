@@ -10,7 +10,6 @@ members = [
     "crates/lm-verify",
     "crates/lm-math",
     "crates/lm-digest",
-    "crates/lm-compress",
     "crates/lm-regex",
     "crates/lm-jit",
     "crates/lm-link",

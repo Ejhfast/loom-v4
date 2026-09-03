@@ -5179,13 +5179,7 @@ Cleartext HTTP uses `Http.CleartextClient`.
 
 Secure HTTP uses `Http.Client` and an explicit `TlsClientConfig`.
 
-Proxy policy, redirects, cookies, and connection pools remain separate code.
-
-HTTP parsers preserve content-coded body bytes.
-
-Explicit request and response helpers encode or decode `gzip` and `deflate` content.
-
-These helpers remove stale content framing fields and enforce the configured body limit.
+Proxy policy, redirects, cookies, decompression, and connection pools remain separate code.
 
 `Args.Get` returns command-line arguments through the `sys.args()` surface. `Env.Get` reads one environment value. `Fs.CurrentDir` reads the current directory.
 
@@ -5230,15 +5224,7 @@ UUID equality, hashing, and ordering use all 16 bytes.
 
 Both generators set the RFC variant bits. They return explicit errors for unavailable entropy or invalid input.
 
-### 24.13 Compression
-
-`std.compress` provides pure one-shot gzip and zlib-wrapped DEFLATE operations over `Bytes`.
-
-Compression accepts deterministic levels named `Stored`, `Fast`, `Balanced`, and `Best`.
-
-Decompression requires an explicit output byte limit. It rejects invalid data and output beyond that limit.
-
-### 24.14 JSON
+### 24.13 JSON
 
 The distribution includes a small `std/json` module.
 
@@ -5277,7 +5263,7 @@ Stringification rejects non-finite numbers.
 
 JSON uses ordinary Loom code over `String`, `List`, and `Map`.
 
-### 24.15 Typed VM utilities
+### 24.14 Typed VM utilities
 
 The standard library does not reintroduce an `Answer(Any)` decision enum or a variadic helper that would require type packs. Exact-operation elimination is already ordinary and small enough to package in user code:
 
@@ -5306,11 +5292,11 @@ This rule adds no variadic generics, tuple spreading, or dependent native rule.
 
 `std/vm` provides fuel builders, limit builders, terminal-result mapping, and snapshot file helpers.
 
-### 24.16 Procs
+### 24.14 Procs
 
 `std/proc` supplies explicit supervision, bounded send loops, close/drain, cancellation-message conventions, and result aggregation. It does not add shared memory or hide proc effects. `Handle[M,R]` preserves message and result types through `send`, `done`, `pause`, `resume`, transfer, and snapshot restore.
 
-### 24.17 Compiler, reflection, and testing
+### 24.15 Compiler, reflection, and testing
 
 `std/compiler.compile(source)` can supply an empty `CompileEnv` and default options.
 
@@ -5326,11 +5312,11 @@ The runner can use `drive` for deterministic operation transcripts.
 
 The compiler test harness has UI diagnostics, compile-pass, run-pass, run-fail, bytecode-verifier, artifact/snapshot corruption, conformance, fuzz-regression, and benchmark suites.
 
-### 24.18 Deliberate omissions
+### 24.16 Deliberate omissions
 
 The minimal library does not include an iterator trait hierarchy, async/await, database client, GUI, or locale framework.
 
-It also omits HTTP/2, HTTP/3, TLS servers, automatic redirects, cookies, and proxies.
+It also omits HTTP/2, HTTP/3, TLS servers, automatic redirects, cookies, proxies, and decompression.
 
 Richer facilities remain ordinary packages over explicit effects.
 

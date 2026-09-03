@@ -217,7 +217,6 @@ struct SyntaxElementRefs<'a> {
 
 mod alloc;
 mod builders;
-mod compression;
 mod digest;
 mod lists;
 mod maps;
@@ -712,18 +711,6 @@ impl NativeRuntime for MachineRuntime<'_> {
 
     fn digest_md5(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
         self.digest_md5_operation(request)
-    }
-
-    fn compress_encode(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.runtime_compress_encode(request)
-    }
-
-    fn compress_decode_status(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.runtime_compress_decode_status(request)
-    }
-
-    fn compress_decode_value(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.runtime_compress_decode_value(request)
     }
 
     fn text_parse_float_status(
