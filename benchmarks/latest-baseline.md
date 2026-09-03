@@ -1,353 +1,164 @@
-# Latest benchmark baseline
+# Benchmark baseline
 
-The measured tree is the `artifact-packages` worktree after revision `bef119a`.
+These measurements use an AMD Ryzen 9 9950X processor.
 
-The tree compiles source modules against sparse dependencies.
+All measurements use release builds.
 
-The checker selects exact core support declarations.
+Most times are medians of nine measured runs after one warm run.
 
-All comparisons use `main` revision `8f7ba66` in the same session.
+Message times are medians of five measured runs after one warm run.
 
-The measurements use release builds unless this file states a different build.
+Language operation costs subtract the empty-program baseline.
 
-The host uses an AMD Ryzen 9 9950X processor.
+Parallel measurements let the operating system select processors.
 
-The host has 16 physical cores and 32 logical processors.
+## Format versions
 
-Release runtime benchmarks use deterministic mode unless this file states another mode.
-
-Core and operation benchmarks pin each process to logical processor zero.
-
-The operating system selects processors for scheduler benchmark processes.
-
-The bytecode version is 58.
-
-The verifier version is 38.
-
-The snapshot format version is 35.
+| Format | Version |
+| --- | ---: |
+| LMBC | 63 |
+| Compiler ABI | 54 |
+| Verifier | 40 |
+| Artifact container | 3 |
+| Interface | 24 |
+| Snapshot | 35 |
 
 ## Core image
 
 | Measurement | Result |
 | --- | ---: |
 | Classes | 300 |
-| HIR functions | 597 |
+| HIR functions | 599 |
 | HIR types | 566 |
-| Bytecode functions | 897 |
-| Bytecode instructions | 18,899 |
+| Bytecode functions | 899 |
+| Bytecode instructions | 18,907 |
 | Decoded instruction width | 16 bytes |
-| Core LMBC | 304,763 bytes |
-| Pinned intrinsic summaries | 2,388 bytes |
-| Core LMAR | 304,885 bytes |
-| LMAR wrapper | 122 bytes |
-| LMAR encoding | 0.128 ms |
-| LMAR decoding and identity | 3.587 ms |
-| Core checking | 2.526 ms |
-| Core lowering | 1.032 ms |
-| Core compilation | 3.954 ms |
-| Core decoding | 0.456 ms |
-| Core verification | 1.485 ms |
-| Structural verification | 0.583 ms |
-| Verification hash | 0.138 ms |
-| Semantic identity | 2.445 ms |
-| Core namespace publication | 2.320 ms |
-| External core artifact load | 5.946 ms |
-| Repeated artifact publication | less than 0.001 ms |
-| Default interface witnesses | 11 of 3,600 possible entries |
-
-LMBC stores compiler surface facts once.
-
-LMAR adds 122 bytes of package structure.
-
-LMAR does not store an `.lmi` type tree.
-
-No compression or verification cache supplies these results.
-
-The standard core provider decodes the pinned LMBC once in each process.
-
-The generator verifies the core before it writes both pinned files.
-
-The core-image gate compares both files with one fresh build.
-
-### Core comparison
-
-Each timing is the median of three pinned processes.
-
-Each process reports one median from nine measured runs.
-
-| Measurement | `main` | Current | Change |
-| --- | ---: | ---: | ---: |
-| Core LMBC | 274,657 bytes | 304,763 bytes | +11.0% |
-| Core checking | 2.396 ms | 2.526 ms | +5.4% |
-| Core lowering | 1.000 ms | 1.032 ms | +3.2% |
-| Core compilation | 3.788 ms | 3.954 ms | +4.4% |
-| Core decoding | 0.411 ms | 0.456 ms | +10.9% |
-| Core verification | 1.411 ms | 1.485 ms | +5.2% |
-| Structural verification | 0.516 ms | 0.583 ms | +13.0% |
-| Verification hash | 0.137 ms | 0.138 ms | +0.7% |
-| Semantic identity | 2.538 ms | 2.445 ms | -3.7% |
-
-The LMBC growth stores exact source contract facts.
-
-The function and class records keep compiler-only fields after execution fields.
-
-This layout keeps the execution record prefix stable.
-
-The external core load verifies one untrusted core artifact.
-
-Normal program loads use the exact runtime core and do not repeat its verification.
+| Core LMBC | 305,544 bytes |
+| Core artifact | 305,666 bytes |
+| Core checking | 2.159 ms |
+| Core lowering | 0.764 ms |
+| Core compilation | 3.058 ms |
+| Core decoding | 0.367 ms |
+| Artifact encoding | 0.135 ms |
+| Artifact decoding | 3.080 ms |
+| Core verification | 1.296 ms |
+| Structural verification | 0.534 ms |
+| Verification hash | 0.144 ms |
+| Semantic identity | 1.827 ms |
+| Namespace publication | 1.890 ms |
+| External core load | 5.087 ms |
+| Repeated publication | less than 0.001 ms |
+| Interface witnesses | 11 entries |
 
 ## Thin program artifact
 
-The program contains source `1`.
-
-| Measurement | `main` | Current | Change |
-| --- | ---: | ---: | ---: |
-| Artifact bytes | 274,942 | 1,703 | -99.4% |
-| Source compilation | 8.342 ms | 2.101 ms | -74.8% |
-| Cold artifact load | 2.033 ms | 0.811 ms | -60.1% |
-| Compilation and cold load | 10.375 ms | 2.912 ms | -71.9% |
-
-The root unit contains one function and no class.
-
-Artifact decoding takes 0.009 milliseconds.
-
-Dependency collection takes 0.450 milliseconds.
-
-Namespace publication takes 0.824 milliseconds.
-
-The cold-load timing measures decoding and publication together.
-
-## Command startup
-
-Each cell gives the best result from two batches of twenty release executions.
-
-The benchmark alternates the two revisions within each batch.
-
-| Source | `main` | Current | Change |
-| --- | ---: | ---: | ---: |
-| `1` | 10.036 / 9.961 ms | 8.223 / 8.158 ms | -18.1% |
-| Thin `1.lma` | 2.611 / 2.582 ms | 6.036 / 6.007 ms | +131.9% |
-| `use std.json.Json` | 35.413 / 35.370 ms | 14.088 / 14.253 ms | -60.0% |
-| `use std.http.Http` | 53.894 / 55.195 ms | 22.810 / 23.115 ms | -57.9% |
-
-Tiny command startup decodes, identifies, and publishes the pinned runtime core.
-
-The thin artifact path uses the same pinned provider.
-
-The pin generator verifies the core before it writes the pinned files.
-
-Sparse dependency compilation removes repeated core work from standard modules.
-
-## Execution gate
-
-This comparison uses three pinned processes for each revision.
-
-| Operation | `main` | Current | Change |
-| --- | ---: | ---: | ---: |
-| Direct call | 30.4 ns | 30.9 ns | +1.6% |
-| Virtual call | 65.2 ns | 65.9 ns | +1.1% |
-| List index | 44.0 ns | 45.2 ns | +2.7% |
-| String interpolation | 201.3 ns | 205.6 ns | +2.1% |
-| Interface default | 236.1 ns | 207.1 ns | -12.3% |
-| List hash | 823.1 ns | 823.5 ns | +0.0% |
-| List sort | 18,914.8 ns | 19,589.0 ns | +3.6% |
-| Map hashable lookup | 214.5 ns | 217.0 ns | +1.2% |
-| String builder | 40.0 ns | 41.1 ns | +2.8% |
-| Text iteration | 75.7 ns | 76.6 ns | +1.2% |
-| Large bytes decode | 868.1 ns | 899.6 ns | +3.6% |
-| Byte buffer | 36.8 ns | 39.8 ns | +8.2% |
-| Direct clock | 113.1 ns | 120.6 ns | +6.6% |
-
-The mean operation ratio increases by 1.7 percent.
-
-The largest measured increase is 8.2 percent.
-
-Admission and effect rows do not run inside these operation loops.
-
-## Workspace suite
-
-The warm debug suite uses Cargo's default concurrency and full coverage.
-
-| Revision | Tests | Time |
-| --- | ---: | ---: |
-| `main` | 1,637 | 49.55 s |
-| Current | 1,693 | 29.05 s |
-
-The current tree adds 56 tests.
-
-The current suite is 41.4 percent faster.
-
-| Test binary | `main` | Current | Change |
-| --- | ---: | ---: | ---: |
-| Snapshot admission | 11.66 s | 4.58 s | -60.7% |
-| Snapshot mutation fuzzing | 13.87 s | 7.05 s | -49.2% |
-| Snapshot image rules | 0.17 s | 0.20 s | +0.03 s |
-| Snapshot restore rules | 0.40 s | 0.31 s | -0.09 s |
-
-Each test executable decodes one process-local core `LinkUnit` when required.
-
-This cost appears in compile-heavy test executables.
-
-The test harness uses deterministic mode by default.
-
-Parallel scheduler tests use up to four workers.
-
-CLI integration tests use the parallel default.
-
-## Scheduler foundation
-
-These results use the deterministic scheduler.
+The program contains the source expression `1`.
 
 | Measurement | Result |
 | --- | ---: |
-| Proc send and receive | 362.4 ns per message |
-| File open and close | 10.731 us per lifecycle |
-| Cached 1 KiB file read | 4.116 us per read |
-| In-memory file open and close | 1.666 us per lifecycle |
-| One 35 ms sleep | 1 park, 1 timeout wakeup |
-| Sleep with a signal guardian | 1 park, 1 timeout wakeup |
-| Pure-run allocation gate | fewer than 100 allocations |
+| Artifact size | 1,703 bytes |
+| Artifact units | 1 |
+| Classes | 0 |
+| Functions | 1 |
+| Artifact decoding | 0.008 ms |
+| Source compilation | 1.163 ms |
+| Dependency collection | 0.008 ms |
+| Namespace publication | 0.584 ms |
+| Cold artifact load | 0.571 ms |
 
-The shared host queue removed the ten-millisecond polling interval.
+## Interpreter operations
 
-The shared host queue also removed the mixed output and child-wait deadlock.
-
-The owned execution lease passes one real cross-thread execution test.
+| Operation | Iterations | Cost | Total |
+| --- | ---: | ---: | ---: |
+| Integer loop | 1,000,000 | 37.5 ns | 37.754 ms |
+| Direct call | 1,000,000 | 30.7 ns | 30.920 ms |
+| Virtual call | 1,000,000 | 70.0 ns | 70.202 ms |
+| Field read and write | 1,000,000 | 73.3 ns | 73.508 ms |
+| Closure call | 1,000,000 | 99.4 ns | 99.627 ms |
+| Class initialization | 500,000 | 188.2 ns | 94.347 ms |
+| List push | 500,000 | 49.2 ns | 24.847 ms |
+| List index | 1,000,000 | 48.6 ns | 48.831 ms |
+| Map insert | 200,000 | 90.8 ns | 18.403 ms |
+| Map lookup | 1,000,000 | 67.4 ns | 67.620 ms |
+| Map remove and insert | 200,000 | 146.2 ns | 29.474 ms |
+| String interpolation | 200,000 | 187.4 ns | 37.719 ms |
+| Mixed integer arithmetic | 1,000,000 | 61.4 ns | 61.629 ms |
+| Integer bitwise operation | 1,000,000 | 35.6 ns | 35.874 ms |
+| Float addition | 1,000,000 | 34.6 ns | 34.834 ms |
+| 32-byte XOR | 20,000 | 96.7 ns | 2.169 ms |
+| Conditional branch | 1,000,000 | 62.6 ns | 62.806 ms |
+| Integer equality | 1,000,000 | 35.7 ns | 35.957 ms |
+| Text equality | 1,000,000 | 44.0 ns | 44.236 ms |
+| Generic equality | 1,000,000 | 103.2 ns | 103.394 ms |
+| Interface default | 1,000,000 | 199.4 ns | 199.614 ms |
+| List equality | 200,000 | 875.7 ns | 175.366 ms |
+| List hash | 200,000 | 846.8 ns | 169.588 ms |
+| Tuple hash | 200,000 | 375.5 ns | 75.328 ms |
+| List sort | 20,000 | 21,656.1 ns | 433.357 ms |
+| Recursive call | 1,000,000 | 34.2 ns | 34.439 ms |
+| Inherited call | 1,000,000 | 71.9 ns | 72.166 ms |
+| Closure capture | 1,000,000 | 110.7 ns | 110.942 ms |
+| Generic call | 1,000,000 | 64.1 ns | 64.287 ms |
+| Enum case | 1,000,000 | 190.3 ns | 190.583 ms |
+| Option case | 1,000,000 | 177.3 ns | 177.523 ms |
+| String map lookup | 500,000 | 66.5 ns | 33.507 ms |
+| Bytes map lookup | 500,000 | 58.8 ns | 29.616 ms |
+| Hashable map lookup | 500,000 | 222.8 ns | 111.656 ms |
+| String builder | 500,000 | 50.7 ns | 25.602 ms |
+| Text iteration | 600,000 | 88.0 ns | 53.038 ms |
+| Text split piece | 320,000 | 36.0 ns | 11.758 ms |
+| Text split call | 200,000 | 519.3 ns | 104.091 ms |
+| Text trim | 500,000 | 103.8 ns | 52.119 ms |
+| Bytes decode | 200,000 | 298.6 ns | 59.961 ms |
+| Large bytes decode | 20,000 | 907.7 ns | 18.389 ms |
+| Text comparison | 1,000,000 | 79.2 ns | 79.405 ms |
+| Byte buffer | 500,000 | 41.2 ns | 20.813 ms |
+| Scheduled class initialization | 500,000 | 189.8 ns | 94.906 ms |
+| Scheduled integer loop | 1,000,000 | 38.0 ns | 37.981 ms |
+| Direct clock effect | 1,000,000 | 149.9 ns | 149.905 ms |
 
 ## Parallel scheduler
 
-These results use parallel scheduler mode and local worker turns.
-
-Each result is the median of three complete benchmark runs.
-
-Each benchmark run uses nine measured executions after one warm execution.
-
-| Workload | Tasks | Workers | One worker | Stated workers | Speedup |
+| Workload | Tasks | Workers | Serial | Parallel | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Integer loop | 2 | 2 | 46.310 ms | 23.187 ms | 2.005x |
-| Integer loop | 4 | 4 | 90.844 ms | 24.077 ms | 3.773x |
-| Text building | 8 | 4 | 88.099 ms | 23.683 ms | 3.714x |
-| Text building | 8 | 8 | 88.099 ms | 14.102 ms | 6.250x |
-| Text churn | 8 | 8 | 679.415 ms | 103.645 ms | 6.556x |
-| Split n-queens | 12 | 12 | 179.176 ms | 19.635 ms | 9.006x |
+| Integer loop | 2 | 2 | 47.515 ms | 23.313 ms | 2.038x |
+| Integer loop | 4 | 4 | 90.164 ms | 23.563 ms | 3.826x |
+| Native integer loop | 6 | 8 | 66.845 ms | 4.329 ms | 15.440x |
 
-The pool starts only when a second task can run.
+The native case reached six active execution leases.
 
-A root-only parallel run uses the inline execution path.
-
-Boundary-heavy message tasks also remain on the coordinator fast path.
-
-The text-churn row creates one formatted string for each append.
-
-Adaptive local collection limits dead-object retention before the hard heap limit.
-
-### Parallel messages
-
-Each row reports a five-run median and its measured p95.
-
-Each table value is the median of five complete benchmark processes.
+### Message scheduling
 
 The ratio is deterministic time divided by parallel time.
 
-| Case | Messages | Workers | Deterministic | Deterministic p95 | Parallel | Parallel p95 | Ratio |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Ping-pong | 4,003 | 4 | 4.223 ms | 4.391 ms | 4.116 ms | 4.173 ms | 1.026x |
-| Stream | 500 | 4 | 0.181 ms | 0.186 ms | 0.180 ms | 0.183 ms | 0.996x |
-| Independent pairs | 4,012 | 4 | 4.186 ms | 4.203 ms | 4.245 ms | 4.258 ms | 0.987x |
-| Many senders | 800 | 4 | 0.332 ms | 0.336 ms | 0.332 ms | 0.333 ms | 1.007x |
-| Allocated stream | 200 | 4 | 0.154 ms | 0.161 ms | 0.155 ms | 0.160 ms | 0.981x |
-
-The aggregate message ratio is 1.011x.
-
-## Structured parallelism
-
-Each result compares `Iterable.par_map` with equivalent parallel work or sequential `Iterable.map`.
-
-| Mode | Workers | Reference | `par_map` | Ratio | Sequential speedup |
+| Case | Messages | Workers | Deterministic | Parallel | Ratio |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Parallel | 4 | 274.114 ms | 271.932 ms | 0.992x | 3.50x |
-| Parallel | 12 | 113.984 ms | 107.529 ms | 0.943x | 8.86x |
-| Deterministic | 1 | 952.967 ms | 948.985 ms | 0.996x | 1.00x |
+| Ping-pong | 4,003 | 4 | 4.266 ms | 4.333 ms | 0.985x |
+| Stream | 500 | 4 | 0.223 ms | 0.226 ms | 0.986x |
+| Independent pairs | 4,012 | 4 | 4.336 ms | 4.431 ms | 0.979x |
+| Many senders | 800 | 4 | 0.408 ms | 0.418 ms | 0.976x |
+| Allocated stream | 200 | 4 | 0.170 ms | 0.173 ms | 0.979x |
 
-The parallel reference uses hand-written procs with the same chunking policy.
+### Structured parallelism
 
-The deterministic reference uses `Iterable.map`.
+The ratio is `par_map` time divided by reference time.
 
-The acceptance limit is 1.08x for each ratio.
+| Mode | Workers | Reference | `par_map` | Ratio |
+| --- | ---: | ---: | ---: | ---: |
+| Parallel | 4 | 253.294 ms | 242.549 ms | 0.958x |
+| Parallel | 12 | 99.005 ms | 98.083 ms | 0.991x |
+| Deterministic | 1 | 993.120 ms | 940.402 ms | 0.947x |
 
-## Reified VM lifecycle
+## Reproduction
 
-Each result is the median of nine release executions after one warm-up.
+Run each group inside the repository build environment:
 
-The case runs the nine-queen multishot example.
-
-| Reclamation policy | Time | Adaptive divided by policy |
-| --- | ---: | ---: |
-| Adaptive record threshold | 401.369 ms | 1.000x |
-| Former 1,024-child trigger | 402.299 ms | 0.998x |
-
-The adaptive threshold separates record reclamation from hard resource limits.
-
-The acceptance limit is 1.20x.
-
-## Reified VM branching
-
-Each result is the median of nine release executions after one warm-up.
-
-Each execution creates and completes 100 held runs.
-
-| Method | Time | Branch divided by method |
-| --- | ---: | ---: |
-| Reuse one snapshot | 0.315 ms | 1.359x |
-| Fresh capture and restore | 0.512 ms | 0.836x |
-| `Run.branch()` | 0.428 ms | 1.000x |
-| `Run.branch_answer()` | 0.343 ms | 1.248x |
-
-`Run.branch()` is 16 percent faster than a fresh capture and restore.
-
-`Run.branch_answer()` is 20 percent faster than `Run.branch()` plus a separate answer.
-
-A reused snapshot remains faster for repeated copies of one state.
-
-## Parallel multishot search
-
-Each result is the median of nine release executions after one warm-up.
-
-The search uses seven queens and four parallel workers.
-
-| Method | Time | Relative result |
-| --- | ---: | ---: |
-| Direct recursive search | 0.128 ms | 1.000x |
-| Deterministic multishot search | 2,047.484 ms | 15,998.220x overhead |
-| Parallel multishot search | 1,393.175 ms | 1.470x deterministic speedup |
-
-The multishot search creates 3,072 answered copies and processes 3,585 drive events.
-
-Each selected event rebuilds and rearms the current one-shot wait frontier.
-
-The previous duplicate scans also made each frontier validation quadratic.
-
-`BTreeSet` validation removed those scans. One debug execution fell from 46.74 seconds to 16.99 seconds.
-
-The checked five-queen example takes 0.13 seconds in the debug test profile.
-
-World copying and repeated frontier registration still dominate this small search.
-
-Direct recursive search is the correct implementation when each branch has little work.
-
-Parallel multishot search helps when each copied world performs enough work between boundaries.
-
-A future persistent wait collection can remove repeated full-frontier registration.
-
-## Host readiness observations
-
-The former host used a ten-millisecond readiness quantum.
-
-Raw terminal input could wait for two quanta. This path could add 20 milliseconds.
-
-A mixed output and child wait could block for more than 15 seconds.
-
-The shared completion queue removed all three conditions.
-
-The execution boundary keeps resource registry updates on the coordinator.
+```sh
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_core_compilation -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_program_artifact_linking -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_language_operations -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_parallel_cpu_scaling -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_parallel_native_cpu_scaling -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_parallel_messages -- --ignored --nocapture"
+nix-shell --run "cargo test --release -p lm-testkit --test bench bench_parallel_par_map_queens -- --ignored --nocapture"
+```
