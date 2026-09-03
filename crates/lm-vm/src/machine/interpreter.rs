@@ -416,30 +416,8 @@ impl Machine {
             Instr::Add => self.int_binary(i64::checked_add)?,
             Instr::Sub => self.int_binary(i64::checked_sub)?,
             Instr::Mul => self.int_binary(i64::checked_mul)?,
-            Instr::Div => {
-                let (at, a, b) = self.int_pair()?;
-                if b == 0 {
-                    self.vm.operands.truncate(at);
-                    return Err(FaultCode::DivideByZero);
-                }
-                if a == i64::MIN && b == -1 {
-                    self.vm.operands.truncate(at);
-                    return Err(FaultCode::IntegerOverflow);
-                }
-                self.replace_pair(at, Value::Int(a / b));
-            }
-            Instr::Rem => {
-                let (at, a, b) = self.int_pair()?;
-                if b == 0 {
-                    self.vm.operands.truncate(at);
-                    return Err(FaultCode::DivideByZero);
-                }
-                if a == i64::MIN && b == -1 {
-                    self.vm.operands.truncate(at);
-                    return Err(FaultCode::IntegerOverflow);
-                }
-                self.replace_pair(at, Value::Int(a % b));
-            }
+            Instr::Div => self.int_div()?,
+            Instr::Rem => self.int_rem()?,
             Instr::Neg => {
                 let a = self.pop_int()?;
                 let value = a.checked_neg().ok_or(FaultCode::IntegerOverflow)?;

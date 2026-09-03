@@ -178,6 +178,36 @@ impl Machine {
         Ok(())
     }
 
+    #[inline(never)]
+    pub(super) fn int_div(&mut self) -> Result<(), FaultCode> {
+        let (at, left, right) = self.int_pair()?;
+        if right == 0 {
+            self.vm.operands.truncate(at);
+            return Err(FaultCode::DivideByZero);
+        }
+        if left == i64::MIN && right == -1 {
+            self.vm.operands.truncate(at);
+            return Err(FaultCode::IntegerOverflow);
+        }
+        self.replace_pair(at, Value::Int(left / right));
+        Ok(())
+    }
+
+    #[inline(never)]
+    pub(super) fn int_rem(&mut self) -> Result<(), FaultCode> {
+        let (at, left, right) = self.int_pair()?;
+        if right == 0 {
+            self.vm.operands.truncate(at);
+            return Err(FaultCode::DivideByZero);
+        }
+        if left == i64::MIN && right == -1 {
+            self.vm.operands.truncate(at);
+            return Err(FaultCode::IntegerOverflow);
+        }
+        self.replace_pair(at, Value::Int(left % right));
+        Ok(())
+    }
+
     pub(super) fn str_compare(&mut self, want_equal: bool) -> Result<(), FaultCode> {
         let b = self.pop_obj()?;
         let a = self.pop_obj()?;
