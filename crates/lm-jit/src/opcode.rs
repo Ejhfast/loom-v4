@@ -640,9 +640,6 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         NativeInstr::BytesIsUtf8 => dedicated(Helper)
             .with_replay()
             .with_fault_stack(FaultStack::Pop(1)),
-        NativeInstr::DigestCrc32 => dedicated(Helper)
-            .with_replay()
-            .with_fault_stack(FaultStack::Pop(1)),
         NativeInstr::TextTrim
         | NativeInstr::TextTrimStart
         | NativeInstr::TextTrimEnd
@@ -652,9 +649,7 @@ fn native_treatment(operation: NativeInstr) -> InstructionTreatment {
         | NativeInstr::TextBytes
         | NativeInstr::TextToString
         | NativeInstr::BytesText
-        | NativeInstr::BytesHex
-        | NativeInstr::DigestSha256
-        | NativeInstr::DigestMd5 => {
+        | NativeInstr::BytesHex => {
             InstructionTreatment::dedicated(Helper, ExitBehavior::Allocation)
                 .with_replay()
                 .with_fault_stack(FaultStack::Pop(1))

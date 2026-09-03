@@ -1,6 +1,7 @@
 //! Standard digest and UUID values.
 
 use lm_testkit::run_allowed;
+use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
 fn run(source: &str, grants: &[&str]) -> String {
@@ -143,9 +144,9 @@ fn digest_algorithms_match_the_reference_at_block_boundaries() {
         );
         let expected = format!(
             "Done((\"{sha}\", \"{md5}\", {crc}, \"{sha}\", \"{md5}\", {crc}))",
-            sha = hex(&lm_digest::sha256(&bytes)),
-            md5 = hex(&lm_digest::md5(&bytes)),
-            crc = lm_digest::crc32(&bytes)
+            sha = hex(&Sha256::digest(&bytes)),
+            md5 = hex(&md5::Md5::digest(&bytes)),
+            crc = crc32fast::hash(&bytes)
         );
         assert_eq!(run(&source, &[]), expected, "length {length}");
     }

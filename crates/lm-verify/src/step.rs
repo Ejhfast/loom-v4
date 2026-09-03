@@ -2072,22 +2072,6 @@ pub(crate) fn step(
             }
             push(state, TY_STR)?;
         }
-        Instr::Native(
-            lm_bytecode::NativeInstr::DigestSha256 | lm_bytecode::NativeInstr::DigestMd5,
-        ) => {
-            let bytes = pop(state)?;
-            if ctx.ty(bytes) != BcType::Bytes {
-                return Err(fail(format!("digest on non-bytes type {bytes}")));
-            }
-            push(state, bytes)?;
-        }
-        Instr::Native(lm_bytecode::NativeInstr::DigestCrc32) => {
-            let bytes = pop(state)?;
-            if ctx.ty(bytes) != BcType::Bytes {
-                return Err(fail(format!("CRC-32 on non-bytes type {bytes}")));
-            }
-            push(state, TY_INT)?;
-        }
         Instr::Native(lm_bytecode::NativeInstr::BytesIsUtf8) => {
             let bytes = pop(state)?;
             if ctx.ty(bytes) != BcType::Bytes {

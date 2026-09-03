@@ -929,9 +929,6 @@ fn preflight_instr(
         | Instr::Native(NativeInstr::BbSet)
         | Instr::Native(NativeInstr::BbCapacity)
         | Instr::Native(NativeInstr::BbTruncate)
-        | Instr::Native(NativeInstr::DigestSha256)
-        | Instr::Native(NativeInstr::DigestCrc32)
-        | Instr::Native(NativeInstr::DigestMd5)
         | Instr::Native(NativeInstr::BytesNew)
         | Instr::Native(NativeInstr::BytesLen)
         | Instr::Native(NativeInstr::BytesText)
@@ -2320,9 +2317,6 @@ impl<'a> Resolver<'a> {
             Instr::Native(NativeInstr::BbSet) => 0x115,
             Instr::Native(NativeInstr::BbCapacity) => 0x116,
             Instr::Native(NativeInstr::BbTruncate) => 0x117,
-            Instr::Native(NativeInstr::DigestSha256) => 0x118,
-            Instr::Native(NativeInstr::DigestCrc32) => 0x119,
-            Instr::Native(NativeInstr::DigestMd5) => 0x11a,
             Instr::Jump(..) => 0x31,
             Instr::JumpIfFalse(..) => 0x32,
             Instr::JumpIfTrue(..) => 0x33,
@@ -2673,9 +2667,6 @@ impl<'a> Resolver<'a> {
             | Instr::Native(NativeInstr::BbSet)
             | Instr::Native(NativeInstr::BbCapacity)
             | Instr::Native(NativeInstr::BbTruncate)
-            | Instr::Native(NativeInstr::DigestSha256)
-            | Instr::Native(NativeInstr::DigestCrc32)
-            | Instr::Native(NativeInstr::DigestMd5)
             | Instr::Freeze
             | Instr::Native(NativeInstr::BytesNew)
             | Instr::Native(NativeInstr::BytesLen)

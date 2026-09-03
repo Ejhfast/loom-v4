@@ -217,7 +217,6 @@ struct SyntaxElementRefs<'a> {
 
 mod alloc;
 mod builders;
-mod digest;
 mod lists;
 mod maps;
 mod regex;
@@ -699,18 +698,6 @@ impl NativeRuntime for MachineRuntime<'_> {
 
     fn bytes_is_utf8(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
         self.runtime_bytes_is_utf8(request)
-    }
-
-    fn digest_sha256(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.digest_sha256_operation(request)
-    }
-
-    fn digest_crc32(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.digest_crc32_operation(request)
-    }
-
-    fn digest_md5(&mut self, request: HeapOperationRequest<'_>) -> HeapOperationResult {
-        self.digest_md5_operation(request)
     }
 
     fn text_parse_float_status(

@@ -2049,24 +2049,6 @@ impl<'m> Oracle<'m> {
                 };
                 Ok(self.alloc(OKind::Bytes(bytes)))
             }
-            lm_abi::INTRINSIC_DIGEST_SHA256
-            | lm_abi::INTRINSIC_DIGEST_CRC32
-            | lm_abi::INTRINSIC_DIGEST_MD5 => {
-                let bytes = self.as_obj(&values[0])?;
-                let bytes = match &bytes.borrow().kind {
-                    OKind::Bytes(bytes) => bytes.clone(),
-                    _ => return Err(Stop::Limit("digest on a non-bytes value")),
-                };
-                match intrinsic {
-                    lm_abi::INTRINSIC_DIGEST_SHA256 => {
-                        Ok(self.alloc(OKind::Bytes(lm_digest::sha256(&bytes).to_vec())))
-                    }
-                    lm_abi::INTRINSIC_DIGEST_MD5 => {
-                        Ok(self.alloc(OKind::Bytes(lm_digest::md5(&bytes).to_vec())))
-                    }
-                    _ => Ok(OV::Int(i64::from(lm_digest::crc32(&bytes)))),
-                }
-            }
             lm_abi::INTRINSIC_STRING_BUILDER_APPEND => {
                 let builder = self.as_obj(&values[0])?;
                 frozen_guard(&builder)?;

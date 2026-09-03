@@ -5200,7 +5200,26 @@ The module uses ordinary Loom code over `Bytes` and integer bit operators.
 
 ### 24.12 Digests and UUIDs
 
-`std.digest` provides one-shot SHA-256, MD5, and CRC-32/ISO-HDLC operations over `Bytes`.
+`std.digest` implements SHA-256, MD5, and CRC-32/ISO-HDLC in Loom.
+
+`DigestState` defines incremental digest state.
+
+```lm
+interface DigestState: Copyable
+  type Output
+  def update(mut self, bytes: Bytes): Self
+  def finish(mut self): Self.Output
+  def reset(mut self): Self
+end
+```
+
+`Sha256`, `Md5`, and `Crc32` implement this interface.
+
+`finish` does not change the state. `copy` creates independent state.
+
+`digest_reader` reads a `ByteReader` in bounded chunks. It preserves the reader effect and error type.
+
+The module also provides one-shot operations.
 
 ```lm
 sha256(bytes: Bytes) -> Bytes

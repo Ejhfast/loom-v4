@@ -480,15 +480,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lm-digest"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "md-5",
- "sha2",
-]
-
-[[package]]
 name = "lm-graph"
 version = "0.1.0"
 dependencies = [
@@ -604,10 +595,10 @@ dependencies = [
 name = "lm-testkit"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "lm-abi",
  "lm-bytecode",
  "lm-compiler",
- "lm-digest",
  "lm-graph",
  "lm-heap",
  "lm-hir",
@@ -622,7 +613,9 @@ dependencies = [
  "lm-value",
  "lm-verify",
  "lm-vm",
+ "md-5",
  "mimalloc",
+ "sha2",
 ]
 
 [[package]]
@@ -651,7 +644,6 @@ version = "0.1.0"
 dependencies = [
  "lm-abi",
  "lm-bytecode",
- "lm-digest",
  "lm-graph",
  "lm-heap",
  "lm-jit",

@@ -9,7 +9,6 @@ members = [
     "crates/lm-bytecode",
     "crates/lm-verify",
     "crates/lm-math",
-    "crates/lm-digest",
     "crates/lm-regex",
     "crates/lm-jit",
     "crates/lm-link",

@@ -345,10 +345,7 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
             | NativeInstr::BytesStartsWith
             | NativeInstr::BytesFindIndex
             | NativeInstr::BytesHex
-            | NativeInstr::BytesIsUtf8
-            | NativeInstr::DigestSha256
-            | NativeInstr::DigestCrc32
-            | NativeInstr::DigestMd5,
+            | NativeInstr::BytesIsUtf8,
         )
         | Instr::Numeric(
             NumericInstr::TextParseFloatStatus
@@ -606,30 +603,6 @@ pub(super) fn emit(emission: &mut InstructionEmission<'_, '_, '_, '_>) -> Result
                         [bytes, zero, zero],
                         std_mem::offset_of!(RawNativeFunctions, bytes_is_utf8),
                         ScalarKind::Bool,
-                    )
-                }
-                Instr::Native(NativeInstr::DigestSha256) => {
-                    let bytes = pop_native(stack)?;
-                    (
-                        [bytes, zero, zero],
-                        std_mem::offset_of!(RawNativeFunctions, digest_sha256),
-                        ScalarKind::Object(0),
-                    )
-                }
-                Instr::Native(NativeInstr::DigestCrc32) => {
-                    let bytes = pop_native(stack)?;
-                    (
-                        [bytes, zero, zero],
-                        std_mem::offset_of!(RawNativeFunctions, digest_crc32),
-                        ScalarKind::Int,
-                    )
-                }
-                Instr::Native(NativeInstr::DigestMd5) => {
-                    let bytes = pop_native(stack)?;
-                    (
-                        [bytes, zero, zero],
-                        std_mem::offset_of!(RawNativeFunctions, digest_md5),
-                        ScalarKind::Object(0),
                     )
                 }
                 Instr::Numeric(

@@ -11,7 +11,6 @@ lm-types = { path = "../lm-types" }
 lm-hir = { path = "../lm-hir" }
 lm-compiler = { path = "../lm-compiler" }
 lm-bytecode = { path = "../lm-bytecode" }
-lm-digest = { path = "../lm-digest" }
 lm-link = { path = "../lm-link" }
 lm-math = { path = "../lm-math" }
 lm-regex = { path = "../lm-regex" }
@@ -23,6 +22,9 @@ lm-vm = { path = "../lm-vm" }
 lm-proc = { path = "../lm-proc" }
 
 [dev-dependencies]
+crc32fast = "=1.5.0"
 lm-host = { path = "../lm-host" }
 lm-jit = { path = "../lm-jit" }
+md-5 = { version = "=0.11.0", default-features = false }
 mimalloc = "0.1.52"
+sha2 = { version = "=0.11.0", default-features = false }

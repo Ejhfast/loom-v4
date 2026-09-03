@@ -340,10 +340,7 @@ pub(super) fn emit_segment_body(
                     | NativeInstr::BytesStartsWith
                     | NativeInstr::BytesFindIndex
                     | NativeInstr::BytesHex
-                    | NativeInstr::BytesIsUtf8
-                    | NativeInstr::DigestSha256
-                    | NativeInstr::DigestCrc32
-                    | NativeInstr::DigestMd5,
+                    | NativeInstr::BytesIsUtf8,
                 )
                 | Instr::Numeric(
                     NumericInstr::TextParseFloatStatus

@@ -51,7 +51,6 @@ Most implementation code is under `crates/`.
 - `lm-bytecode` defines decoded and serialized bytecode formats.
 - `lm-verify` independently verifies decoded bytecode.
 - `lm-math` supplies pure floating-point math algorithms.
-- `lm-digest` supplies pure content digest algorithms.
 - `lm-regex` supplies bounded regular-expression compilation and execution.
 - `lm-jit` compiles verified bytecode to native code.
 - `lm-link` links artifacts and publishes immutable code namespaces.

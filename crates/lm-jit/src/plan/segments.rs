@@ -1380,9 +1380,7 @@ pub(super) fn analyze_segment(
                 | NativeInstr::TextBytes
                 | NativeInstr::TextToString
                 | NativeInstr::BytesText
-                | NativeInstr::BytesHex
-                | NativeInstr::DigestSha256
-                | NativeInstr::DigestMd5,
+                | NativeInstr::BytesHex,
             )
             | Instr::Numeric(NumericInstr::FloatFixed) => {
                 allocations.push(AllocationSite {

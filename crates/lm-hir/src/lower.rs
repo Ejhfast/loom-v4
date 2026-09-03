@@ -2534,11 +2534,6 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             lm_abi::INTRINSIC_REGEX_MATCH_NAMED => extended(ExtendedInstr::RegexMatchNamed {
                 ty: self.m.bc_ty(reply),
             }),
-            lm_abi::INTRINSIC_DIGEST_SHA256 => {
-                Instr::Native(lm_bytecode::NativeInstr::DigestSha256)
-            }
-            lm_abi::INTRINSIC_DIGEST_CRC32 => Instr::Native(lm_bytecode::NativeInstr::DigestCrc32),
-            lm_abi::INTRINSIC_DIGEST_MD5 => Instr::Native(lm_bytecode::NativeInstr::DigestMd5),
             lm_abi::INTRINSIC_FLOAT_HASH => Instr::Numeric(lm_bytecode::NumericInstr::FloatHash),
             lm_abi::INTRINSIC_FLOAT_BITS => Instr::Numeric(lm_bytecode::NumericInstr::FloatBits),
             lm_abi::INTRINSIC_FLOAT_FROM_BITS => {
@@ -4254,9 +4249,6 @@ fn instr_text(instr: &Instr) -> String {
         Instr::Native(lm_bytecode::NativeInstr::BbSet) => "BbSet".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbCapacity) => "BbCapacity".to_string(),
         Instr::Native(lm_bytecode::NativeInstr::BbTruncate) => "BbTruncate".to_string(),
-        Instr::Native(lm_bytecode::NativeInstr::DigestSha256) => "DigestSha256".to_string(),
-        Instr::Native(lm_bytecode::NativeInstr::DigestCrc32) => "DigestCrc32".to_string(),
-        Instr::Native(lm_bytecode::NativeInstr::DigestMd5) => "DigestMd5".to_string(),
         Instr::Freeze => "Freeze".to_string(),
         Instr::Digest { ty } => format!("Digest {ty}"),
         Instr::EqDigest => "EqDigest".to_string(),
