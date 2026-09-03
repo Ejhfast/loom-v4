@@ -598,9 +598,11 @@ pub enum Object {
     /// One value with its closed static type. Born frozen.
     DynValue { value: Value, ty: u32 },
     /// One compiled regular expression. Born frozen.
-    NativeRegex(lm_regex::Regex),
+    /// The indirection keeps engine destruction outside the collector loop.
+    NativeRegex(std::sync::Arc<lm_regex::Regex>),
     /// One immutable regular-expression match. Born frozen.
-    NativeRegexMatch(Box<NativeRegexMatch>),
+    /// The indirection keeps aggregate destruction outside the collector loop.
+    NativeRegexMatch(std::sync::Arc<NativeRegexMatch>),
 }
 
 /// How a boundary transfer treats one shape.
@@ -1285,10 +1287,11 @@ impl Object {
                 },
                 ty: *ty,
             },
-            Object::NativeRegex(regex) => Object::NativeRegex(regex.clone()),
-            Object::NativeRegexMatch(matched) => {
-                Object::NativeRegexMatch(Box::new((**matched).clone()))
+            // Each copied regex receives one private search cache.
+            Object::NativeRegex(regex) => {
+                Object::NativeRegex(std::sync::Arc::new((**regex).clone()))
             }
+            Object::NativeRegexMatch(matched) => Object::NativeRegexMatch(matched.clone()),
         })
     }
 
@@ -1542,10 +1545,11 @@ impl Object {
             Object::NativeSnapshotRef { image } => Object::NativeSnapshotRef { image: *image },
             Object::Bytes(bytes) => Object::Bytes(bytes.clone()),
             Object::NativeCode(code) => Object::NativeCode(Box::new((**code).clone())),
-            Object::NativeRegex(regex) => Object::NativeRegex(regex.clone()),
-            Object::NativeRegexMatch(matched) => {
-                Object::NativeRegexMatch(Box::new((**matched).clone()))
+            // Each copied regex receives one private search cache.
+            Object::NativeRegex(regex) => {
+                Object::NativeRegex(std::sync::Arc::new((**regex).clone()))
             }
+            Object::NativeRegexMatch(matched) => Object::NativeRegexMatch(matched.clone()),
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
             },
@@ -1891,8 +1895,10 @@ mod tests {
                 vm: 2,
                 generation: 1,
             },
-            Object::NativeRegex(lm_regex::Regex::compile("a").expect("the pattern is valid")),
-            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+            Object::NativeRegex(std::sync::Arc::new(
+                lm_regex::Regex::compile("a").expect("the pattern is valid"),
+            )),
+            Object::NativeRegexMatch(std::sync::Arc::new(NativeRegexMatch {
                 text: "a".into(),
                 start: 0,
                 end: 1,
@@ -2110,8 +2116,10 @@ mod tests {
                 vm: 0,
                 generation: 0,
             },
-            Object::NativeRegex(lm_regex::Regex::compile("a").expect("the pattern is valid")),
-            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+            Object::NativeRegex(std::sync::Arc::new(
+                lm_regex::Regex::compile("a").expect("the pattern is valid"),
+            )),
+            Object::NativeRegexMatch(std::sync::Arc::new(NativeRegexMatch {
                 text: "a".into(),
                 start: 0,
                 end: 1,

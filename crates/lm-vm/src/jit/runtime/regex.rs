@@ -15,7 +15,7 @@ impl MachineRuntime<'_> {
         };
         match lm_regex::Regex::compile(pattern.as_str()) {
             Ok(regex) => match self.allocate_object(
-                crate::Object::NativeRegex(regex),
+                crate::Object::NativeRegex(std::sync::Arc::new(regex)),
                 request.roots,
                 request.allow_collection,
             ) {
@@ -67,7 +67,10 @@ impl MachineRuntime<'_> {
             Ok(regex) => regex,
             Err(_) => return HeapOperationResult::Fault(crate::FaultCode::MalformedState),
         };
-        self.allocate_heap_object(crate::Object::NativeRegex(regex), &request)
+        self.allocate_heap_object(
+            crate::Object::NativeRegex(std::sync::Arc::new(regex)),
+            &request,
+        )
     }
 
     pub(super) fn runtime_regex_source(
@@ -118,7 +121,10 @@ impl MachineRuntime<'_> {
             Err(crate::FaultCode::HeapLimit) => return HeapOperationResult::HeapLimit,
             Err(fault) => return HeapOperationResult::Fault(fault),
         };
-        self.allocate_heap_object(crate::Object::NativeRegexMatch(Box::new(matched)), &request)
+        self.allocate_heap_object(
+            crate::Object::NativeRegexMatch(std::sync::Arc::new(matched)),
+            &request,
+        )
     }
 
     pub(super) fn runtime_regex_count(

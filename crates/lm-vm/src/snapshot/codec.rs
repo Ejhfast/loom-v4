@@ -2468,7 +2468,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             })?;
             cur.budget
                 .charge(regex.memory_usage(), "regular-expression program")?;
-            Object::NativeRegex(regex)
+            Object::NativeRegex(std::sync::Arc::new(regex))
         }
         39 => {
             let text = cur.str(limits.max_string_bytes)?;
@@ -2552,7 +2552,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 previous_index = Some(index);
                 names.push((name, index));
             }
-            Object::NativeRegexMatch(Box::new(NativeRegexMatch {
+            Object::NativeRegexMatch(std::sync::Arc::new(NativeRegexMatch {
                 text: text.into(),
                 start,
                 end,

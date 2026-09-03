@@ -14,7 +14,7 @@ impl Machine {
                 let result = lm_regex::Regex::compile(self.text_value(pattern)?.as_str());
                 let status = match result {
                     Ok(regex) => {
-                        let value = self.alloc(Object::NativeRegex(regex))?;
+                        let value = self.alloc(Object::NativeRegex(std::sync::Arc::new(regex)))?;
                         self.pending_regex_compile = value.as_obj();
                         0
                     }
@@ -44,7 +44,7 @@ impl Machine {
                     }
                     _ => {
                         let regex = lm_regex::Regex::compile(source).map_err(|_| BAD_STATE)?;
-                        self.alloc(Object::NativeRegex(regex))?
+                        self.alloc(Object::NativeRegex(std::sync::Arc::new(regex)))?
                     }
                 };
                 self.push(value)?;
@@ -118,7 +118,7 @@ impl Machine {
             self.push(Value::EmptyCase { ty: family, arm: 1 })?;
             return Ok(());
         };
-        let value = self.alloc(Object::NativeRegexMatch(Box::new(matched)))?;
+        let value = self.alloc(Object::NativeRegexMatch(std::sync::Arc::new(matched)))?;
         self.push(value)
     }
 

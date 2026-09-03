@@ -388,7 +388,7 @@ impl Machine {
                             .and_then(Option::as_ref)
                             .ok_or(BAD_STATE)?
                             .clone();
-                        let value = self.alloc(Object::NativeRegex(regex))?;
+                        let value = self.alloc(Object::NativeRegex(std::sync::Arc::new(regex)))?;
                         self.vm.literals[cache] = value;
                         value
                     }
