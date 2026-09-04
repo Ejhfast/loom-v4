@@ -211,7 +211,7 @@ fn run_reports_a_fault_with_a_stable_code() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, a4ca9d41)\n"
+        "Fault(DivideByZero)\n  at <entry> (tests/run-fault/divide-by-zero.lm:1:1, bytecode 2, 2e4a8ea4)\n"
     );
 }
 
@@ -227,7 +227,7 @@ fn run_with_a_small_fuel_budget_faults_with_out_of_fuel() {
     assert!(!out.status.success());
     assert_eq!(
         stdout(&out),
-        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, a1c57245)\n"
+        "Fault(OutOfFuel)\n  at <entry> (examples/01-basics/control.lm:2:1, bytecode 3, 27d0dff8)\n"
     );
 }
 
@@ -1157,7 +1157,7 @@ fn inspect_dumps_the_checkpoint_container() {
     assert!(out.status.success(), "{}", stderr(&out));
     let dump = stdout(&out);
     assert!(dump.starts_with("container "), "{dump}");
-    assert!(dump.contains("format 36 abi "), "{dump}");
+    assert!(dump.contains("format 37 abi "), "{dump}");
     assert!(dump.contains("artifact 0 bytes "), "{dump}");
     assert!(dump.contains("machine 0 state asked"), "{dump}");
     assert!(dump.contains("pending Clock.Now"), "{dump}");
