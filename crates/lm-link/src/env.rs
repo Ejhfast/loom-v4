@@ -234,6 +234,12 @@ fn imported_module_paths(module: &Module) -> Vec<String> {
         .imports
         .iter()
         .map(|import| import.module.clone())
+        .chain(
+            module
+                .reflections
+                .iter()
+                .map(|reflection| reflection.name.clone()),
+        )
         .collect();
     paths.sort();
     paths.dedup();
@@ -457,6 +463,7 @@ pub(crate) fn collect_environment_with_root(
 ) -> Result<FrozenLinkEnv, LinkError> {
     let order = link_order(root, env)?;
     let mut requests: BTreeMap<String, Vec<(String, ImportKind)>> = BTreeMap::new();
+    let mut complete = BTreeSet::new();
     let mut selected: BTreeMap<String, Module> = BTreeMap::new();
 
     for path in order.iter().rev() {
@@ -473,6 +480,9 @@ pub(crate) fn collect_environment_with_root(
                 }
                 None => collect::collect_link_root(unit.module()),
             }
+        } else if complete.remove(path) {
+            requests.remove(path);
+            collect::collect_compiled_unit(unit.module())
         } else {
             let Some(exports) = requests.remove(path) else {
                 continue;
@@ -487,6 +497,12 @@ pub(crate) fn collect_environment_with_root(
                 .or_default()
                 .push((import.name.clone(), import.kind));
         }
+        complete.extend(
+            module
+                .reflections
+                .iter()
+                .map(|reflection| reflection.name.clone()),
+        );
         selected.insert(path.clone(), module);
     }
 

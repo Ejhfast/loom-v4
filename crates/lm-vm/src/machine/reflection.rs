@@ -2,10 +2,22 @@
 
 use super::*;
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnv};
-use lm_bytecode::{
-    BcRow, BcType, ConstValue, Constant, ExportKind, ReflectionKind, NO_REFLECTION_DEF,
-};
+use lm_bytecode::interface::{ExportEntry, IfaceItem};
+use lm_bytecode::{BcRow, BcType, ConstValue, Constant, Export, ExportKind, ReflectionKind};
 use std::collections::HashSet;
+
+#[derive(Clone, Copy)]
+struct ReflectionSource<'a> {
+    unit: &'a lm_bytecode::artifact::LinkUnit,
+    relocation: &'a lm_link::UnitRelocation,
+}
+
+#[derive(Clone, Copy)]
+struct DeclarationSource<'a> {
+    source: ReflectionSource<'a>,
+    entry: &'a ExportEntry,
+    export: &'a Export,
+}
 
 enum ReflectedValue {
     Callable(u32),
@@ -20,10 +32,7 @@ impl Machine {
         module: &NamespaceRuntime,
         reflection: u32,
     ) -> Result<(), FaultCode> {
-        module
-            .reflections
-            .get(reflection as usize)
-            .ok_or(BAD_STATE)?;
+        reflection_source(module, reflection)?;
         let value = self.alloc_reflection_descriptor(
             module,
             lm_bytecode::corepin::ROLE_MODULE_CODE,
@@ -45,15 +54,17 @@ impl Machine {
             1,
         )?;
         let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let count = module
-            .reflections
-            .get(reflection as usize)
-            .ok_or(BAD_TYPE)?
-            .declarations
-            .len();
+        let declarations: Vec<u32> = reflection_source(module, reflection)?
+            .unit
+            .interface()
+            .exports
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.source && entry.kind != ExportKind::EnumCase)
+            .map(|(index, _)| u32::try_from(index).map_err(|_| BAD_STATE))
+            .collect::<Result<_, _>>()?;
         let base = self.vm.operands.len();
-        for declaration in 0..count {
-            let declaration = u32::try_from(declaration).map_err(|_| BAD_STATE)?;
+        for declaration in declarations {
             let value = self.alloc_reflection_descriptor(
                 module,
                 lm_bytecode::corepin::ROLE_DECLARATION_CODE,
@@ -84,16 +95,18 @@ impl Machine {
         )?;
         let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
         let declaration_index = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = module
-            .reflections
-            .get(reflection as usize)
-            .and_then(|surface| surface.declarations.get(declaration_index))
-            .ok_or(BAD_TYPE)?;
+        let declaration = declaration_source(module, reflection, declaration_index)?;
         let base = self.vm.operands.len();
-        if !matches!(declaration.kind, ExportKind::Class | ExportKind::Enum) {
+        if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
             return self.finish_reflection_list(base);
         }
-        let mut class = declaration.def;
+        let owner = *declaration
+            .source
+            .relocation
+            .classes()
+            .get(declaration.export.def as usize)
+            .ok_or(BAD_STATE)?;
+        let mut class = owner;
         let mut selectors = HashSet::new();
         let mut methods = Vec::new();
         loop {
@@ -113,7 +126,7 @@ impl Machine {
                 module,
                 lm_bytecode::corepin::ROLE_MEMBER_CODE,
                 vec![
-                    Value::Int(i64::from(declaration.def)),
+                    Value::Int(i64::from(owner)),
                     Value::Int(i64::from(selector)),
                     Value::Int(i64::from(function)),
                 ],
@@ -141,24 +154,21 @@ impl Machine {
             let [Value::Int(reflection)] = fields.as_slice() else {
                 return Err(BAD_TYPE);
             };
-            let reflection = usize::try_from(*reflection).map_err(|_| BAD_TYPE)?;
-            module
-                .reflections
-                .get(reflection)
-                .map(|surface| surface.name.clone())
-                .ok_or(BAD_TYPE)?
+            let reflection = u32::try_from(*reflection).map_err(|_| BAD_TYPE)?;
+            reflection_source(module, reflection)?
+                .unit
+                .module_path()
+                .to_string()
         } else if Some(class) == module.core.declaration_code {
             let [Value::Int(reflection), Value::Int(declaration)] = fields.as_slice() else {
                 return Err(BAD_TYPE);
             };
-            let reflection = usize::try_from(*reflection).map_err(|_| BAD_TYPE)?;
+            let reflection = u32::try_from(*reflection).map_err(|_| BAD_TYPE)?;
             let declaration = usize::try_from(*declaration).map_err(|_| BAD_TYPE)?;
-            module
-                .reflections
-                .get(reflection)
-                .and_then(|surface| surface.declarations.get(declaration))
-                .map(|declaration| declaration.name.clone())
-                .ok_or(BAD_TYPE)?
+            declaration_source(module, reflection, declaration)?
+                .entry
+                .name
+                .clone()
         } else if Some(class) == module.core.member_code {
             let [Value::Int(_), Value::Int(selector), Value::Int(_)] = fields.as_slice() else {
                 return Err(BAD_TYPE);
@@ -184,14 +194,13 @@ impl Machine {
             lm_bytecode::corepin::ROLE_DECLARATION_CODE,
             2,
         )?;
-        let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
         let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let role = module
-            .reflections
-            .get(reflection)
-            .and_then(|surface| surface.declarations.get(declaration))
-            .map(|declaration| declaration_kind_role(declaration.kind))
-            .ok_or(BAD_TYPE)?;
+        let role = declaration_kind_role(
+            declaration_source(module, reflection, declaration)?
+                .entry
+                .kind,
+        );
         self.push_reflection_kind(module, role)
     }
 
@@ -222,23 +231,12 @@ impl Machine {
             lm_bytecode::corepin::ROLE_DECLARATION_CODE,
             2,
         )?;
-        let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
         let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = module
-            .reflections
-            .get(reflection)
-            .and_then(|surface| surface.declarations.get(declaration))
-            .ok_or(BAD_TYPE)?;
-        let count = match declaration.kind {
-            ExportKind::Class | ExportKind::Enum => module
-                .classes
-                .get(declaration.def as usize)
-                .map(|class| class.type_params)
-                .ok_or(BAD_TYPE)?,
-            ExportKind::Function
-            | ExportKind::EnumCase
-            | ExportKind::Interface
-            | ExportKind::Constant => 0,
+        let declaration = declaration_source(module, reflection, declaration)?;
+        let count = match &declaration.entry.item {
+            IfaceItem::Class(class) => class.type_params,
+            IfaceItem::Func(_) | IfaceItem::Interface(_) | IfaceItem::Const(_) => 0,
         };
         self.push(Value::Int(i64::from(count)))
     }
@@ -255,29 +253,18 @@ impl Machine {
             lm_bytecode::corepin::ROLE_DECLARATION_CODE,
             2,
         )?;
-        let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
         let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = module
-            .reflections
-            .get(reflection)
-            .and_then(|surface| surface.declarations.get(declaration))
-            .ok_or(BAD_TYPE)?;
+        let declaration = declaration_source(module, reflection, declaration)?;
         let base = self.vm.operands.len();
-        if !matches!(declaration.kind, ExportKind::Class | ExportKind::Enum) {
+        let IfaceItem::Class(class) = &declaration.entry.item else {
             return self.finish_reflection_list(base);
-        }
-        let interfaces = module
+        };
+        let interfaces: Vec<String> = class
             .conformances
             .iter()
-            .filter(|conformance| conformance.class == declaration.def)
-            .map(|conformance| {
-                module
-                    .interfaces
-                    .get(conformance.application.interface as usize)
-                    .map(|interface| interface.key.clone())
-                    .ok_or(BAD_STATE)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|conformance| conformance.application.interface.text())
+            .collect();
         for interface in interfaces {
             let value = self.alloc(Object::Str(interface.into()))?;
             if let Err(error) = self.push(value) {
@@ -347,24 +334,25 @@ impl Machine {
                     lm_bytecode::corepin::ROLE_DECLARATION_CODE,
                     2,
                 )?;
-                let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
                 let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let Some(declaration) = module
-                    .reflections
-                    .get(reflection)
-                    .and_then(|surface| surface.declarations.get(declaration))
+                let declaration = declaration_source(module, reflection, declaration)?;
+                if declaration.entry.kind != ExportKind::Class {
+                    return Ok(None);
+                }
+                let Some(class) = declaration
+                    .source
+                    .relocation
+                    .classes()
+                    .get(declaration.export.def as usize)
+                    .copied()
                 else {
                     return Ok(None);
                 };
-                if declaration.kind != ExportKind::Class {
-                    return Ok(None);
-                }
-                Ok(module.classes.get(declaration.def as usize).map(|_| {
-                    ReflectedValue::ClassDescriptor {
-                        descriptor,
-                        class: declaration.def,
-                    }
-                }))
+                Ok(module
+                    .classes
+                    .get(class as usize)
+                    .map(|_| ReflectedValue::ClassDescriptor { descriptor, class }))
             }
             ReflectionKind::Class | ReflectionKind::Function => {
                 let fields = self.reflection_fields(
@@ -373,27 +361,38 @@ impl Machine {
                     lm_bytecode::corepin::ROLE_DECLARATION_CODE,
                     2,
                 )?;
-                let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
                 let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let Some(declaration) = module
-                    .reflections
-                    .get(reflection)
-                    .and_then(|surface| surface.declarations.get(declaration))
-                else {
-                    return Ok(None);
-                };
+                let declaration = declaration_source(module, reflection, declaration)?;
                 let accepted = matches!(
-                    (kind, declaration.kind),
+                    (kind, declaration.entry.kind),
                     (ReflectionKind::Class, ExportKind::Class)
                         | (ReflectionKind::Function, ExportKind::Function)
                 );
-                if !accepted || declaration.callable == NO_REFLECTION_DEF {
+                if !accepted {
                     return Ok(None);
                 }
+                let local = if kind == ReflectionKind::Class {
+                    declaration.export.ctor
+                } else {
+                    declaration.export.def
+                };
+                if local == lm_bytecode::NO_CTOR {
+                    return Ok(None);
+                }
+                let Some(callable) = declaration
+                    .source
+                    .relocation
+                    .functions()
+                    .get(local as usize)
+                    .copied()
+                else {
+                    return Ok(None);
+                };
                 Ok(module
                     .funcs
-                    .get(declaration.callable as usize)
-                    .map(|_| ReflectedValue::Callable(declaration.callable)))
+                    .get(callable as usize)
+                    .map(|_| ReflectedValue::Callable(callable)))
             }
             ReflectionKind::Method => {
                 let fields = self.reflection_fields(
@@ -420,15 +419,26 @@ impl Machine {
                     lm_bytecode::corepin::ROLE_DECLARATION_CODE,
                     2,
                 )?;
-                let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
                 let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                Ok(module
-                    .reflections
-                    .get(reflection)
-                    .and_then(|surface| surface.declarations.get(declaration))
-                    .filter(|declaration| declaration.kind == ExportKind::Constant)
-                    .and_then(|declaration| declaration.constant.clone())
-                    .map(ReflectedValue::Constant))
+                let declaration = declaration_source(module, reflection, declaration)?;
+                if declaration.entry.kind != ExportKind::Constant {
+                    return Ok(None);
+                }
+                let Some(mut constant) = declaration.export.constant.clone() else {
+                    return Ok(None);
+                };
+                let Some(ty) = declaration
+                    .source
+                    .relocation
+                    .types()
+                    .get(constant.ty as usize)
+                    .copied()
+                else {
+                    return Ok(None);
+                };
+                constant.ty = ty;
+                Ok(Some(ReflectedValue::Constant(constant)))
             }
         }
     }
@@ -667,6 +677,56 @@ impl Machine {
         self.vm.heap.set_frozen(value.as_obj().ok_or(BAD_STATE)?);
         self.push(value)
     }
+}
+
+fn reflection_source(
+    module: &NamespaceRuntime,
+    reflection: u32,
+) -> Result<ReflectionSource<'_>, FaultCode> {
+    let surface = module
+        .reflections
+        .get(reflection as usize)
+        .ok_or(BAD_STATE)?;
+    let unit_id = module
+        .code_namespace()
+        .reflection_unit(reflection)
+        .ok_or(BAD_STATE)?;
+    let unit = module.code_namespace().unit(unit_id).ok_or(BAD_STATE)?;
+    if unit.module_path() != surface.name {
+        return Err(BAD_STATE);
+    }
+    let relocation = module
+        .code_namespace()
+        .relocation(unit_id)
+        .ok_or(BAD_STATE)?;
+    Ok(ReflectionSource { unit, relocation })
+}
+
+fn declaration_source(
+    module: &NamespaceRuntime,
+    reflection: u32,
+    declaration: usize,
+) -> Result<DeclarationSource<'_>, FaultCode> {
+    let source = reflection_source(module, reflection)?;
+    let entry = source
+        .unit
+        .interface()
+        .exports
+        .get(declaration)
+        .filter(|entry| entry.source && entry.kind != ExportKind::EnumCase)
+        .ok_or(BAD_TYPE)?;
+    let export = source
+        .unit
+        .module()
+        .exports
+        .get(declaration)
+        .filter(|export| export.name == entry.name && export.kind == entry.kind)
+        .ok_or(BAD_STATE)?;
+    Ok(DeclarationSource {
+        source,
+        entry,
+        export,
+    })
 }
 
 fn declaration_kind_role(kind: ExportKind) -> usize {

@@ -34,6 +34,7 @@ pub struct CodeNamespace {
     slots: Arc<[u64]>,
     core_artifact: Option<ArtifactId>,
     tables: std::sync::Arc<CodeTables>,
+    reflection_units: Arc<CodeTable<ArtifactId>>,
     dispatch: Arc<CodeTable<DispatchRow>>,
     entry: u32,
     core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
@@ -97,6 +98,11 @@ impl CodeNamespace {
 
     pub fn tables(&self) -> &CodeTables {
         &self.tables
+    }
+
+    /// Return the exact provider unit of one reflection site.
+    pub fn reflection_unit(&self, reflection: u32) -> Option<ArtifactId> {
+        self.reflection_units.get(reflection as usize).copied()
     }
 
     pub fn table_store(&self) -> std::sync::Arc<CodeTables> {
@@ -574,6 +580,7 @@ impl CodeArena {
             slots,
             core_artifact,
             tables,
+            reflection_units: Arc::new(merged.reflection_units.clone()),
             dispatch,
             entry,
             core_roles: view.core_roles,
@@ -774,6 +781,7 @@ impl CodeArena {
             slots,
             core_artifact: base.core_artifact,
             tables,
+            reflection_units: Arc::new(merged.reflection_units.clone()),
             dispatch,
             entry: base.entry,
             core_roles: base.core_roles,
@@ -853,6 +861,7 @@ fn merged_matches_namespace(merged: &Merged, namespace: &CodeNamespace) -> bool 
         && merged.func_bounds.len() == tables.func_bounds.len()
         && merged.slots.len() == tables.slots.len()
         && merged.reflections.len() == tables.reflections.len()
+        && merged.reflection_units.len() == namespace.reflection_units.len()
         && merged.dispatch.len() == namespace.dispatch.len()
 }
 
@@ -899,6 +908,8 @@ pub(crate) struct Merged {
     pub(crate) slot_by_contract: Arc<HashMap<SlotContractKey, u32>>,
     /// Exact source module surfaces used by reflection.
     pub(crate) reflections: CodeTable<ReflectionModule>,
+    /// Exact provider units aligned with reflection sites.
+    pub(crate) reflection_units: CodeTable<ArtifactId>,
     /// Optional source data after table relocation.
     pub(crate) debug: Arc<lm_bytecode::debug::DebugInfo>,
     /// One permanent relocation for each exact unit.

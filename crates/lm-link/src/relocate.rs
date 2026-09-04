@@ -77,7 +77,7 @@ pub(crate) fn merge_unit(
         return Err(fail(format!("the module `{path}` uses another ABI bundle")));
     }
     let identity = unit.identity();
-    let reloc = relocate(merged, view, unit.module(), identity, path, slot_scope)?;
+    let reloc = relocate(merged, view, unit, identity, path, slot_scope)?;
     bind_unit(view, merged, unit, path, &reloc)?;
     Ok(reloc)
 }
@@ -233,11 +233,12 @@ pub(crate) fn seed_extension_providers(
 fn relocate(
     merged: &mut Merged,
     view: &NamespaceBuild,
-    module: &Module,
+    unit: &LinkUnit,
     identity: &ModuleIdentity,
     path: &str,
     slot_scope: ArtifactId,
 ) -> Result<Reloc, LinkError> {
+    let module = unit.module();
     let extern_classes = module.extern_classes();
     for (slot, import) in module.imports.iter().enumerate() {
         if import.kind == ImportKind::Constant {
@@ -438,8 +439,23 @@ fn relocate(
         reloc.slots.push(merged_slot);
     }
     for source in &module.reflections {
+        let provider = if source.name == unit.module_path() {
+            Some(unit.id())
+        } else {
+            unit.dependencies()
+                .iter()
+                .find(|dependency| dependency.module_path() == source.name)
+                .map(lm_bytecode::artifact::ArtifactDependency::artifact)
+        }
+        .ok_or_else(|| {
+            fail(format!(
+                "the reflected module `{}` is not an exact dependency of `{path}`",
+                source.name
+            ))
+        })?;
         let index = merged.reflections.len() as u32;
         merged.reflections.push(reloc_reflection(source, &reloc));
+        merged.reflection_units.push(provider);
         reloc.reflections.push(index);
     }
     // Fill the created definitions, and prove that every shared one
