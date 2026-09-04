@@ -191,6 +191,59 @@ fn descriptor_fields_are_not_source_visible() {
 }
 
 #[test]
+fn a_refinement_can_match_a_nonescaping_callback() {
+    let tree = TempTree::new("nonescaping");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/callbacks.lm",
+        "def apply_nonescaping(f: (Int) -> Int): Int\n  f(41)\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.callbacks
+
+answer = 0
+for declaration in codeof(callbacks).declarations()
+  case declaration
+  in Def[(nonescaping (Int) -> Int) -> Int](call)
+    answer = call(do |value: Int| value + 1 end)
+  in _ then ()
+  end
+end
+answer
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the callback refinement package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done(42)");
+}
+
+#[test]
+fn nonescaping_requires_a_function_type() {
+    let error = lm_testkit::compile_text(
+        "invalid-nonescaping.lm",
+        "def invalid(value: nonescaping Int): Int\n  value\nend\n0\n",
+    )
+    .expect_err("a non-function type cannot be nonescaping");
+    assert!(error.contains("`nonescaping` requires a function type"));
+}
+
+#[test]
 fn a_module_descriptor_survives_an_external_snapshot() {
     let tree = TempTree::new("snapshot");
     tree.write(

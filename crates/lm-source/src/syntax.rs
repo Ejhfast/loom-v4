@@ -323,6 +323,7 @@ fn token_kind(token: &Tok) -> u16 {
         | Tok::KwSuper
         | Tok::KwMut
         | Tok::KwEscaping
+        | Tok::KwNonescaping
         | Tok::KwEnum
         | Tok::KwCase
         | Tok::KwSelect

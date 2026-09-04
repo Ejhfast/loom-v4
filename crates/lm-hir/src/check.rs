@@ -2408,6 +2408,19 @@ pub(crate) fn resolve_type(
             let row = resolve_row(ctx, env, row)?;
             Ok(ctx.store.intern_fn(ptys, muts.clone(), ret, row))
         }
+        ast::TypeExprKind::Nonescaping(inner) => {
+            let resolved = resolve_type(ctx, env, inner)?;
+            match ctx.store.get(resolved).clone() {
+                Type::Fn(params, muts, ret, row) => {
+                    Ok(ctx.store.intern_callback(params, muts, ret, row))
+                }
+                _ => Err(Diagnostic::new(
+                    "E1064",
+                    "`nonescaping` requires a function type",
+                    ty.span,
+                )),
+            }
+        }
     }
 }
 

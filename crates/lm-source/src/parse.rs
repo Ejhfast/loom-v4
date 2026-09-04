@@ -1139,6 +1139,15 @@ impl Parser<'_> {
 
     fn type_expr_inner(&mut self) -> Result<TypeExpr, Diagnostic> {
         match self.peek() {
+            Tok::KwNonescaping => {
+                let start = self.next();
+                let inner = self.type_expr()?;
+                let span = start.span.to(inner.span);
+                Ok(TypeExpr {
+                    kind: TypeExprKind::Nonescaping(Box::new(inner)),
+                    span,
+                })
+            }
             Tok::KwSelf => {
                 let start = self.next();
                 if matches!(self.peek(), Tok::Dot) {
@@ -2664,6 +2673,26 @@ mod tests {
             Some(TypeExprKind::Fn(..))
         ));
         assert!(matches!(binding.kind, PatternKind::Name(ref name) if name == "make"));
+    }
+
+    #[test]
+    fn parses_nonescaping_callback_types() {
+        let source = "case code\nin Def[(nonescaping (Int) -> Int) -> Int](call) then call\nin _ then ()\nend\n";
+        let module = parse(source).unwrap();
+        let ExprKind::Case { arms, .. } = &module.entry[0].kind else {
+            panic!("expected a case expression");
+        };
+        let PatternKind::Reflect { signature, .. } = &arms[0].pattern.kind else {
+            panic!("expected a refinement pattern");
+        };
+        let Some(TypeExpr {
+            kind: TypeExprKind::Fn(params, ..),
+            ..
+        }) = signature
+        else {
+            panic!("expected a function signature");
+        };
+        assert!(matches!(params[0].kind, TypeExprKind::Nonescaping(_)));
     }
 
     #[test]

@@ -186,6 +186,7 @@ impl CoreDemand {
                 }
                 self.add_type(ret);
             }
+            ast::TypeExprKind::Nonescaping(inner) => self.add_type(inner),
         }
     }
 

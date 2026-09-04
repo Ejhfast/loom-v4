@@ -88,6 +88,7 @@ A line comment starts with `#` and extends to the newline. There are no block co
 ```text
 and as break case class continue def do effect else elsif end enum escaping
 false for if in loop mut not or return self super then true use while with const
+nonescaping
 ```
 
 `sys` is a prebound ordinary value, not a keyword.
@@ -5763,6 +5764,7 @@ row_item        = qualified_name | IDENT ;
 type            = primary_type, [ function_type_tail ] ;
 primary_type    = qualified_name, [ type_args ]
                 | "Self", [ ".", IDENT ]
+                | "nonescaping", type
                 | "[", type, "]"
                 | "{", type, ":", type, "}"
                 | "(", [ type_list ], ")"

@@ -253,6 +253,8 @@ pub enum TypeExprKind {
     /// A function type `(A, mut B) -> R with row`. The `bool` list
     /// marks the `mut` parameters and aligns with the parameter list.
     Fn(Vec<TypeExpr>, Vec<bool>, Box<TypeExpr>, Vec<RowItem>),
+    /// A nonescaping function type.
+    Nonescaping(Box<TypeExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -715,6 +717,7 @@ fn dump_type(ty: &TypeExpr) -> String {
                 dump_row(row)
             )
         }
+        TypeExprKind::Nonescaping(inner) => format!("nonescaping {}", dump_type(inner)),
     }
 }
 
