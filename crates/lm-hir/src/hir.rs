@@ -716,6 +716,14 @@ pub enum HExprKind {
     ReflectionMemberKind {
         member: Box<HExpr>,
     },
+    /// Read the generic arity of one class declaration.
+    ReflectionTypeParameterCount {
+        declaration: Box<HExpr>,
+    },
+    /// Read direct interface names from one class declaration.
+    ReflectionInterfaceNames {
+        declaration: Box<HExpr>,
+    },
     /// Read optional source metadata from portable definition code.
     CodeSource {
         code: Box<HExpr>,
@@ -882,6 +890,8 @@ impl HExpr {
             | HExprKind::ReflectionName { descriptor: value }
             | HExprKind::ReflectionDeclarationKind { declaration: value }
             | HExprKind::ReflectionMemberKind { member: value }
+            | HExprKind::ReflectionTypeParameterCount { declaration: value }
+            | HExprKind::ReflectionInterfaceNames { declaration: value }
             | HExprKind::TupleGet { tuple: value, .. }
             | HExprKind::IsType { value, .. }
             | HExprKind::CastType { value, .. }

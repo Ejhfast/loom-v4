@@ -868,6 +868,8 @@ impl<'m> Oracle<'m> {
             | HExprKind::ReflectionName { .. }
             | HExprKind::ReflectionDeclarationKind { .. }
             | HExprKind::ReflectionMemberKind { .. }
+            | HExprKind::ReflectionTypeParameterCount { .. }
+            | HExprKind::ReflectionInterfaceNames { .. }
             | HExprKind::ReflectCase { .. }
             | HExprKind::CodeSource { .. }
             | HExprKind::CodeDefinition { .. }

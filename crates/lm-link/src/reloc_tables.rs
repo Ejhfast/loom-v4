@@ -995,6 +995,8 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind
         | ExtendedInstr::ReflectionMemberKind
+        | ExtendedInstr::ReflectionTypeParameterCount
+        | ExtendedInstr::ReflectionInterfaceNames
         | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen

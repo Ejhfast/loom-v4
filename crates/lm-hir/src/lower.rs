@@ -1957,6 +1957,19 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 self.emit(extended(ExtendedInstr::ReflectionMemberKind));
             }
+            HExprKind::ReflectionTypeParameterCount { declaration } => {
+                if !self.lower_operand(declaration) {
+                    return;
+                }
+                self.emit(extended(ExtendedInstr::ReflectionTypeParameterCount));
+            }
+            HExprKind::ReflectionInterfaceNames { declaration } => {
+                if !self.lower_operand(declaration) {
+                    return;
+                }
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ReflectionInterfaceNames));
+            }
             HExprKind::CodeSource { code, .. } => {
                 if !self.lower_operand(code) {
                     return;
@@ -3311,7 +3324,11 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::ReflectionMembers { declaration: code }
         | HExprKind::ReflectionName { descriptor: code }
         | HExprKind::ReflectionDeclarationKind { declaration: code }
-        | HExprKind::ReflectionMemberKind { member: code } => shift_expr_in_place(code, base, max),
+        | HExprKind::ReflectionMemberKind { member: code }
+        | HExprKind::ReflectionTypeParameterCount { declaration: code }
+        | HExprKind::ReflectionInterfaceNames { declaration: code } => {
+            shift_expr_in_place(code, base, max)
+        }
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -4537,6 +4554,8 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::ReflectionName => "ReflectionName".to_string(),
         ExtendedInstr::ReflectionDeclarationKind => "ReflectionDeclarationKind".to_string(),
         ExtendedInstr::ReflectionMemberKind => "ReflectionMemberKind".to_string(),
+        ExtendedInstr::ReflectionTypeParameterCount => "ReflectionTypeParameterCount".to_string(),
+        ExtendedInstr::ReflectionInterfaceNames => "ReflectionInterfaceNames".to_string(),
         ExtendedInstr::ReflectionRefine { pattern, fail } => format!(
             "ReflectionRefine {:?} fn{} block{fail}",
             pattern.kind(),

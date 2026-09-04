@@ -300,10 +300,17 @@ pub struct CoreLayout {
     pub declaration_code: Option<u32>,
     /// The opaque descriptor of one class member.
     pub member_code: Option<u32>,
+    pub code_kind: Option<u32>,
+    pub code_kind_class: Option<u32>,
+    pub code_kind_enum: Option<u32>,
+    pub code_kind_interface: Option<u32>,
+    pub code_kind_function: Option<u32>,
+    pub code_kind_constant: Option<u32>,
+    pub code_kind_method: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 261] = [
+pub const PINNED_LABELS: [&str; 268] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -565,6 +572,13 @@ pub const PINNED_LABELS: [&str; 261] = [
     "ModuleCode",
     "DeclarationCode",
     "MemberCode",
+    "CodeKind",
+    "CodeKind.Class",
+    "CodeKind.Enum",
+    "CodeKind.Interface",
+    "CodeKind.Function",
+    "CodeKind.Constant",
+    "CodeKind.Method",
 ];
 
 /// The core role of immediate integer values.
@@ -782,6 +796,15 @@ pub const ROLE_FAMILIES: &[&[usize]] = &[
         ROLE_SYNTAX_DIAGNOSTIC,
         ROLE_SYNTAX_PARSE,
     ],
+    &[
+        ROLE_CODE_KIND,
+        ROLE_CODE_KIND_CLASS,
+        ROLE_CODE_KIND_ENUM,
+        ROLE_CODE_KIND_INTERFACE,
+        ROLE_CODE_KIND_FUNCTION,
+        ROLE_CODE_KIND_CONSTANT,
+        ROLE_CODE_KIND_METHOD,
+    ],
 ];
 pub const ROLE_CHILD_INPUT: usize = 222;
 pub const ROLE_CHILD_INPUT_INHERIT: usize = 223;
@@ -828,6 +851,14 @@ pub const ROLE_MODULE_CODE: usize = 258;
 pub const ROLE_DECLARATION_CODE: usize = 259;
 /// The core role of member descriptors.
 pub const ROLE_MEMBER_CODE: usize = 260;
+/// The core role of descriptor categories.
+pub const ROLE_CODE_KIND: usize = 261;
+pub const ROLE_CODE_KIND_CLASS: usize = 262;
+pub const ROLE_CODE_KIND_ENUM: usize = 263;
+pub const ROLE_CODE_KIND_INTERFACE: usize = 264;
+pub const ROLE_CODE_KIND_FUNCTION: usize = 265;
+pub const ROLE_CODE_KIND_CONSTANT: usize = 266;
+pub const ROLE_CODE_KIND_METHOD: usize = 267;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1140,6 +1171,13 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "ModuleCode" => &mut layout.module_code,
         "DeclarationCode" => &mut layout.declaration_code,
         "MemberCode" => &mut layout.member_code,
+        "CodeKind" => &mut layout.code_kind,
+        "CodeKind.Class" => &mut layout.code_kind_class,
+        "CodeKind.Enum" => &mut layout.code_kind_enum,
+        "CodeKind.Interface" => &mut layout.code_kind_interface,
+        "CodeKind.Function" => &mut layout.code_kind_function,
+        "CodeKind.Constant" => &mut layout.code_kind_constant,
+        "CodeKind.Method" => &mut layout.code_kind_method,
         _ => unreachable!("only known labels enter the map"),
     }
 }

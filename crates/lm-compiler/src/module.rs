@@ -973,6 +973,8 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::ReflectionName { descriptor: value }
         | HExprKind::ReflectionDeclarationKind { declaration: value }
         | HExprKind::ReflectionMemberKind { member: value }
+        | HExprKind::ReflectionTypeParameterCount { declaration: value }
+        | HExprKind::ReflectionInterfaceNames { declaration: value }
         | HExprKind::CallArgs { call: value }
         | HExprKind::FaultCodeGet { fault: value }
         | HExprKind::FaultSiteGet { fault: value }

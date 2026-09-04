@@ -91,12 +91,23 @@ const Answer: Int = 42
 use lib.cases
 use lib.cases.Marker
 
+def kind_name(kind: CodeKind): String
+  case kind
+  in CodeKind.Class then "class"
+  in CodeKind.Enum then "enum"
+  in CodeKind.Interface then "interface"
+  in CodeKind.Function then "function"
+  in CodeKind.Constant then "constant"
+  in CodeKind.Method then "method"
+  end
+end
+
 module_code = codeof(cases)
 out = [module_code.name()]
 for declaration in module_code.declarations()
-  out.push("#{declaration.kind()}:#{declaration.name()}")
+  out.push("#{kind_name(declaration.kind())}:#{declaration.name()}")
   for member in declaration.members()
-    out.push("#{declaration.name()}.#{member.kind()}:#{member.name()}")
+    out.push("#{declaration.name()}.#{kind_name(member.kind())}:#{member.name()}")
   end
 end
 for declaration in module_code.declarations()

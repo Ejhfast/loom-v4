@@ -936,7 +936,7 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 Ok(HExpr {
                     flow: Flow::Normal,
-                    ty: STRING,
+                    ty: Self::core_class(ctx, "CodeKind"),
                     mutable: true,
                     kind: HExprKind::ReflectionDeclarationKind {
                         declaration: Box::new(recv_h),
@@ -947,10 +947,32 @@ impl<'o> FnChecker<'o> {
                 Self::expect_no_args(name, args, span)?;
                 Ok(HExpr {
                     flow: Flow::Normal,
-                    ty: STRING,
+                    ty: Self::core_class(ctx, "CodeKind"),
                     mutable: true,
                     kind: HExprKind::ReflectionMemberKind {
                         member: Box::new(recv_h),
+                    },
+                })
+            }
+            ("DeclarationCode", "type_parameter_count") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: INT,
+                    mutable: true,
+                    kind: HExprKind::ReflectionTypeParameterCount {
+                        declaration: Box::new(recv_h),
+                    },
+                })
+            }
+            ("DeclarationCode", "interface_names") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: ctx.store.intern(Type::List(STRING)),
+                    mutable: true,
+                    kind: HExprKind::ReflectionInterfaceNames {
+                        declaration: Box::new(recv_h),
                     },
                 })
             }

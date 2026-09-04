@@ -665,7 +665,9 @@ impl CoreDemand {
             "class_code" => self.add_names(&["CodeError", "Result", "ClassCode"]),
             "declarations" => self.add_names(&["List", "DeclarationCode"]),
             "members" => self.add_names(&["List", "MemberCode"]),
-            "name" | "kind" => self.add_names(&["String"]),
+            "name" => self.name("String"),
+            "kind" => self.name("CodeKind"),
+            "interface_names" => self.add_names(&["List", "String"]),
             "dynamic_entry" => self.add_names(&["CodeError", "Result", "DynValue", "FunctionDef"]),
             "entry" | "function" | "entry_binding" | "function_binding" => {
                 self.add_names(&["CodeError", "Result", "FunctionDef", "FunctionBinding"])

@@ -1124,14 +1124,34 @@ pub(crate) fn step(
                 .plain_inst(ctx.core.declaration_code, "DeclarationCode")
                 .map_err(&fail)?;
             pop_expect(state, declaration_code)?;
-            push(state, TY_STR)?;
+            let code_kind = ctx
+                .plain_inst(ctx.core.code_kind, "CodeKind")
+                .map_err(&fail)?;
+            push(state, code_kind)?;
         }
         Instr::Extended(ExtendedInstr::ReflectionMemberKind) => {
             let member_code = ctx
                 .plain_inst(ctx.core.member_code, "MemberCode")
                 .map_err(&fail)?;
             pop_expect(state, member_code)?;
-            push(state, TY_STR)?;
+            let code_kind = ctx
+                .plain_inst(ctx.core.code_kind, "CodeKind")
+                .map_err(&fail)?;
+            push(state, code_kind)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionTypeParameterCount) => {
+            let declaration_code = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            pop_expect(state, declaration_code)?;
+            push(state, TY_INT)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionInterfaceNames) => {
+            let declaration_code = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            pop_expect(state, declaration_code)?;
+            push(state, ctx.intern(BcType::List(TY_STR)))?;
         }
         Instr::Extended(ExtendedInstr::ReflectionRefine {
             pattern,

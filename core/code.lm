@@ -16,6 +16,16 @@ end
 interface Test
 end
 
+# Descriptor categories use a closed value instead of text.
+enum CodeKind
+  Class
+  Enum
+  Interface
+  Function
+  Constant
+  Method
+end
+
 # Opaque descriptors for exact source definitions.
 frozen class ModuleCode
   _module: Int = 0

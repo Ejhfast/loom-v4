@@ -1258,10 +1258,35 @@ fn extended_edges(
             &["ModuleCode", "DeclarationCode", "MemberCode"],
             edges,
         ),
-        ExtendedInstr::ReflectionDeclarationKind => {
+        ExtendedInstr::ReflectionDeclarationKind => role_edges(
+            module,
+            offsets,
+            &[
+                "DeclarationCode",
+                "CodeKind",
+                "CodeKind.Class",
+                "CodeKind.Enum",
+                "CodeKind.Interface",
+                "CodeKind.Function",
+                "CodeKind.Constant",
+            ],
+            edges,
+        ),
+        ExtendedInstr::ReflectionMemberKind => role_edges(
+            module,
+            offsets,
+            &["MemberCode", "CodeKind", "CodeKind.Method"],
+            edges,
+        ),
+        ExtendedInstr::ReflectionTypeParameterCount => {
             role_edges(module, offsets, &["DeclarationCode"], edges)
         }
-        ExtendedInstr::ReflectionMemberKind => role_edges(module, offsets, &["MemberCode"], edges),
+        ExtendedInstr::ReflectionInterfaceNames => role_edges(
+            module,
+            offsets,
+            &["DeclarationCode", "List", "String"],
+            edges,
+        ),
         ExtendedInstr::OptionSome { ty }
         | ExtendedInstr::OptionNone { ty }
         | ExtendedInstr::OptionPayload { ty }

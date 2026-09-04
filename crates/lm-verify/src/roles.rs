@@ -192,6 +192,13 @@ pub(crate) const ROLE_FILE_HANDLE: usize = 250;
 pub(crate) const ROLE_BRANCH_ERROR: usize = 251;
 pub(crate) const ROLE_BRANCH_RESOURCE_ACTIVE: usize = 252;
 pub(crate) const ROLE_BRANCH_LIMIT_EXCEEDED: usize = 253;
+pub(crate) const ROLE_CODE_KIND: usize = 261;
+pub(crate) const ROLE_CODE_KIND_CLASS: usize = 262;
+pub(crate) const ROLE_CODE_KIND_ENUM: usize = 263;
+pub(crate) const ROLE_CODE_KIND_INTERFACE: usize = 264;
+pub(crate) const ROLE_CODE_KIND_FUNCTION: usize = 265;
+pub(crate) const ROLE_CODE_KIND_CONSTANT: usize = 266;
+pub(crate) const ROLE_CODE_KIND_METHOD: usize = 267;
 
 /// The field shape one core arm must carry.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,7 +221,7 @@ enum FieldShape {
 
 /// One core family: the parent role, the generic arity, and the arm
 /// roles in declaration order.
-const CORE_FAMILIES: [(usize, u32, &[usize], &str); 34] = [
+const CORE_FAMILIES: [(usize, u32, &[usize], &str); 35] = [
     (
         ROLE_OPTION,
         1,
@@ -428,6 +435,19 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 34] = [
         "ParseStatus",
     ),
     (
+        ROLE_CODE_KIND,
+        0,
+        &[
+            ROLE_CODE_KIND_CLASS,
+            ROLE_CODE_KIND_ENUM,
+            ROLE_CODE_KIND_INTERFACE,
+            ROLE_CODE_KIND_FUNCTION,
+            ROLE_CODE_KIND_CONSTANT,
+            ROLE_CODE_KIND_METHOD,
+        ],
+        "CodeKind",
+    ),
+    (
         ROLE_STD_STREAM,
         0,
         &[
@@ -535,7 +555,7 @@ const CORE_FAMILIES: [(usize, u32, &[usize], &str); 34] = [
 ];
 
 /// The field layout every core arm must carry, by role.
-const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 139] = [
+const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 145] = [
     (ROLE_OPTION_SOME, &[FieldShape::Var(0)]),
     (ROLE_OPTION_NONE, &[]),
     (ROLE_RESULT_OK, &[FieldShape::Var(0)]),
@@ -640,6 +660,12 @@ const CORE_ARM_FIELDS: [(usize, &[FieldShape]); 139] = [
     (ROLE_PARSE_COMPLETE, &[]),
     (ROLE_PARSE_INCOMPLETE, &[]),
     (ROLE_PARSE_INVALID, &[]),
+    (ROLE_CODE_KIND_CLASS, &[]),
+    (ROLE_CODE_KIND_ENUM, &[]),
+    (ROLE_CODE_KIND_INTERFACE, &[]),
+    (ROLE_CODE_KIND_FUNCTION, &[]),
+    (ROLE_CODE_KIND_CONSTANT, &[]),
+    (ROLE_CODE_KIND_METHOD, &[]),
     (ROLE_STD_STREAM_INPUT, &[]),
     (ROLE_STD_STREAM_OUTPUT, &[]),
     (ROLE_STD_STREAM_ERROR, &[]),

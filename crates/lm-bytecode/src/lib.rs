@@ -58,7 +58,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 261;
+pub const CORE_ROLE_COUNT: usize = 268;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -907,6 +907,10 @@ pub enum ExtendedInstr {
     ReflectionDeclarationKind,
     /// Pop a member descriptor and push its member kind.
     ReflectionMemberKind,
+    /// Pop a declaration descriptor and push its type parameter count.
+    ReflectionTypeParameterCount,
+    /// Pop a declaration descriptor and push its declared interface names.
+    ReflectionInterfaceNames,
     /// Refine one descriptor against a scoped callable pattern.
     ReflectionRefine {
         pattern: ReflectionPattern,
@@ -2365,6 +2369,8 @@ const EXT_REFLECTION_DECLARATION_KIND: u8 = 30;
 const EXT_REFLECTION_MEMBER_KIND: u8 = 31;
 const EXT_REFLECTION_REFINE: u8 = 32;
 const EXT_REFLECTION_END: u8 = 33;
+const EXT_REFLECTION_TYPE_PARAMETER_COUNT: u8 = 34;
+const EXT_REFLECTION_INTERFACE_NAMES: u8 = 35;
 
 fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
@@ -3487,6 +3493,14 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::ReflectionMemberKind => {
             out.push(OP_EXTENSION);
             out.push(EXT_REFLECTION_MEMBER_KIND);
+        }
+        ExtendedInstr::ReflectionTypeParameterCount => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_TYPE_PARAMETER_COUNT);
+        }
+        ExtendedInstr::ReflectionInterfaceNames => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_INTERFACE_NAMES);
         }
         ExtendedInstr::ReflectionRefine { pattern, fail } => {
             out.push(OP_EXTENSION);
@@ -4733,6 +4747,12 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
                 Instr::Extended(ExtendedInstr::ReflectionDeclarationKind)
             }
             EXT_REFLECTION_MEMBER_KIND => Instr::Extended(ExtendedInstr::ReflectionMemberKind),
+            EXT_REFLECTION_TYPE_PARAMETER_COUNT => {
+                Instr::Extended(ExtendedInstr::ReflectionTypeParameterCount)
+            }
+            EXT_REFLECTION_INTERFACE_NAMES => {
+                Instr::Extended(ExtendedInstr::ReflectionInterfaceNames)
+            }
             EXT_REFLECTION_REFINE => {
                 let kind = ReflectionKind::from_tag(cur.u8()?)
                     .ok_or(DecodeError::BadOpcode(OP_EXTENSION))?;

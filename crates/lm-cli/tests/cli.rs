@@ -316,7 +316,13 @@ end
 "#,
     );
     let all = lm(&["test", package.path()]);
-    assert_eq!(all.status.code(), Some(1));
+    assert_eq!(
+        all.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        stdout(&all),
+        stderr(&all)
+    );
     assert_eq!(
         stdout(&all),
         "2 tests, 1 failure\nFAIL clifilter.suite.FilterTest.fails: selected failure\n"
@@ -325,6 +331,56 @@ end
     let selected = lm(&["test", package.path(), "--", "passes"]);
     assert!(selected.status.success(), "{}", stderr(&selected));
     assert_eq!(stdout(&selected), "1 test, 0 failures\n");
+}
+
+#[test]
+fn test_reports_invalid_classes_and_filters_their_diagnostics() {
+    let package = PackageProbe::new("cliclasses");
+    package.write(
+        "suite.lm",
+        r#"
+use std.test
+
+class ValidTest implements Test
+  def passes(self): Result[(), test.TestFailure]
+    test.pass()
+  end
+end
+
+class EmptyTest implements Test
+end
+
+class ConfiguredTest implements Test
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+end
+
+class GenericTest[T] implements Test
+end
+"#,
+    );
+    let all = lm(&["test", package.path()]);
+    assert_eq!(
+        all.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        stdout(&all),
+        stderr(&all)
+    );
+    assert_eq!(
+        stdout(&all),
+        "1 test, 3 failures\n\
+         FAIL cliclasses.suite.EmptyTest: the test class has no test methods\n\
+         FAIL cliclasses.suite.ConfiguredTest: the test class needs a zero-argument constructor\n\
+         FAIL cliclasses.suite.GenericTest: the test class cannot have type parameters\n"
+    );
+
+    let filtered = lm(&["test", package.path(), "--", "passes"]);
+    assert!(filtered.status.success(), "{}", stderr(&filtered));
+    assert_eq!(stdout(&filtered), "1 test, 0 failures\n");
 }
 
 #[test]

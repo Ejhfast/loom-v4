@@ -478,6 +478,8 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind
         | ExtendedInstr::ReflectionMemberKind
+        | ExtendedInstr::ReflectionTypeParameterCount
+        | ExtendedInstr::ReflectionInterfaceNames
         | ExtendedInstr::ReflectionRefine { .. }
         | ExtendedInstr::ReflectionEnd { .. }
         | ExtendedInstr::CodeSource { .. }

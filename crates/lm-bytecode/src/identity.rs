@@ -1228,6 +1228,8 @@ fn preflight_extended(
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind
         | ExtendedInstr::ReflectionMemberKind
+        | ExtendedInstr::ReflectionTypeParameterCount
+        | ExtendedInstr::ReflectionInterfaceNames
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
@@ -2527,6 +2529,8 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ReflectionMemberKind => 0x11f,
             ExtendedInstr::ReflectionRefine { .. } => 0x120,
             ExtendedInstr::ReflectionEnd { .. } => 0x121,
+            ExtendedInstr::ReflectionTypeParameterCount => 0x122,
+            ExtendedInstr::ReflectionInterfaceNames => 0x123,
         }
     }
 
@@ -2918,6 +2922,8 @@ impl<'a> Resolver<'a> {
             | ExtendedInstr::ReflectionName
             | ExtendedInstr::ReflectionDeclarationKind
             | ExtendedInstr::ReflectionMemberKind
+            | ExtendedInstr::ReflectionTypeParameterCount
+            | ExtendedInstr::ReflectionInterfaceNames
             | ExtendedInstr::CodeDefinition
             | ExtendedInstr::MapInternTextRange
             | ExtendedInstr::ListEpoch

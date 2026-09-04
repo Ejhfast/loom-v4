@@ -27,6 +27,10 @@ final class TestReport implements Display
     self.failures.push("#{name}: #{message}")
   end
 
+  def record_diagnostic(mut self, name: String, message: String)
+    self.failures.push("#{name}: #{message}")
+  end
+
   def failed(self): Int
     self.failures.len()
   end
@@ -98,6 +102,14 @@ def _run_one[C, E: Error, effect e](
   end
 end
 
+def _is_generic_test(declaration: DeclarationCode): Bool
+  if declaration.type_parameter_count() == 0 then return false end
+  for interface_name in declaration.interface_names()
+    if interface_name == "core.Test" then return true end
+  end
+  false
+end
+
 def run_matching(
   modules: List[ModuleCode],
   filters: List[String]
@@ -105,6 +117,16 @@ def run_matching(
   report = TestReport()
   for module in modules
     for declaration in module.declarations()
+      class_name = "#{module.name()}.#{declaration.name()}"
+      if _is_generic_test(declaration)
+        if _selected(class_name, filters)
+          report.record_diagnostic(
+            class_name,
+            "the test class cannot have type parameters"
+          )
+        end
+        continue
+      end
       case declaration
       in Class[type C: Test](class_descriptor)
         case class_descriptor
@@ -121,17 +143,19 @@ def run_matching(
             in _ then ()
             end
           end
-          if runnable == 0
-            report.record_failure(
-              "#{module.name()}.#{declaration.name()}",
+          if runnable == 0 and _selected(class_name, filters)
+            report.record_diagnostic(
+              class_name,
               "the test class has no test methods"
             )
           end
         in _
-          report.record_failure(
-            "#{module.name()}.#{declaration.name()}",
-            "the test class needs a zero-argument constructor"
-          )
+          if _selected(class_name, filters)
+            report.record_diagnostic(
+              class_name,
+              "the test class needs a zero-argument constructor"
+            )
+          end
         end
       in _ then ()
       end

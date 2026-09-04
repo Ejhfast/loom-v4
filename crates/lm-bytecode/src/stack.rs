@@ -379,6 +379,8 @@ fn extended_stack_effect(
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind
         | ExtendedInstr::ReflectionMemberKind
+        | ExtendedInstr::ReflectionTypeParameterCount
+        | ExtendedInstr::ReflectionInterfaceNames
         | ExtendedInstr::SendSlot { .. }
         | ExtendedInstr::SyntaxTreeRoot
         | ExtendedInstr::SyntaxKind

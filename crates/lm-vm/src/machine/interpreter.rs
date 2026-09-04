@@ -275,6 +275,12 @@ impl Machine {
             ExtendedInstr::ReflectionMemberKind => {
                 self.exec_reflection_member_kind(module)?;
             }
+            ExtendedInstr::ReflectionTypeParameterCount => {
+                self.exec_reflection_type_parameter_count(module)?;
+            }
+            ExtendedInstr::ReflectionInterfaceNames => {
+                self.exec_reflection_interface_names(module)?;
+            }
             ExtendedInstr::ReflectionRefine { pattern, fail } => {
                 self.exec_reflection_refine(
                     module,

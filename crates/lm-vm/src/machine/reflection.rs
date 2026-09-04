@@ -172,7 +172,7 @@ impl Machine {
         self.push(value)
     }
 
-    /// Replace one declaration descriptor with its stable kind name.
+    /// Replace one declaration descriptor with its kind value.
     pub(super) fn exec_reflection_declaration_kind(
         &mut self,
         module: &NamespaceRuntime,
@@ -186,17 +186,16 @@ impl Machine {
         )?;
         let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
         let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let kind = module
+        let role = module
             .reflections
             .get(reflection)
             .and_then(|surface| surface.declarations.get(declaration))
-            .map(|declaration| declaration_kind_name(declaration.kind))
+            .map(|declaration| declaration_kind_role(declaration.kind))
             .ok_or(BAD_TYPE)?;
-        let value = self.alloc(Object::Str(kind.into()))?;
-        self.push(value)
+        self.push_reflection_kind(module, role)
     }
 
-    /// Replace one member descriptor with its stable kind name.
+    /// Replace one member descriptor with its kind value.
     pub(super) fn exec_reflection_member_kind(
         &mut self,
         module: &NamespaceRuntime,
@@ -208,8 +207,85 @@ impl Machine {
             lm_bytecode::corepin::ROLE_MEMBER_CODE,
             3,
         )?;
-        let value = self.alloc(Object::Str("method".into()))?;
-        self.push(value)
+        self.push_reflection_kind(module, lm_bytecode::corepin::ROLE_CODE_KIND_METHOD)
+    }
+
+    /// Replace one declaration descriptor with its generic arity.
+    pub(super) fn exec_reflection_type_parameter_count(
+        &mut self,
+        module: &NamespaceRuntime,
+    ) -> Result<(), FaultCode> {
+        let descriptor = self.pop()?;
+        let fields = self.reflection_fields(
+            module,
+            descriptor,
+            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
+            2,
+        )?;
+        let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+        let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
+        let declaration = module
+            .reflections
+            .get(reflection)
+            .and_then(|surface| surface.declarations.get(declaration))
+            .ok_or(BAD_TYPE)?;
+        let count = match declaration.kind {
+            ExportKind::Class | ExportKind::Enum => module
+                .classes
+                .get(declaration.def as usize)
+                .map(|class| class.type_params)
+                .ok_or(BAD_TYPE)?,
+            ExportKind::Function
+            | ExportKind::EnumCase
+            | ExportKind::Interface
+            | ExportKind::Constant => 0,
+        };
+        self.push(Value::Int(i64::from(count)))
+    }
+
+    /// Replace one declaration descriptor with direct interface names.
+    pub(super) fn exec_reflection_interface_names(
+        &mut self,
+        module: &NamespaceRuntime,
+    ) -> Result<(), FaultCode> {
+        let descriptor = self.pop()?;
+        let fields = self.reflection_fields(
+            module,
+            descriptor,
+            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
+            2,
+        )?;
+        let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+        let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
+        let declaration = module
+            .reflections
+            .get(reflection)
+            .and_then(|surface| surface.declarations.get(declaration))
+            .ok_or(BAD_TYPE)?;
+        let base = self.vm.operands.len();
+        if !matches!(declaration.kind, ExportKind::Class | ExportKind::Enum) {
+            return self.finish_reflection_list(base);
+        }
+        let interfaces = module
+            .conformances
+            .iter()
+            .filter(|conformance| conformance.class == declaration.def)
+            .map(|conformance| {
+                module
+                    .interfaces
+                    .get(conformance.application.interface as usize)
+                    .map(|interface| interface.key.clone())
+                    .ok_or(BAD_STATE)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for interface in interfaces {
+            let value = self.alloc(Object::Str(interface.into()))?;
+            if let Err(error) = self.push(value) {
+                self.vm.operands.truncate(base);
+                return Err(error);
+            }
+        }
+        self.finish_reflection_list(base)
     }
 
     /// Refine one descriptor to a callable value in a scoped environment.
@@ -573,16 +649,34 @@ impl Machine {
         self.vm.heap.set_frozen(value.as_obj().ok_or(BAD_STATE)?);
         self.push(value)
     }
+
+    fn push_reflection_kind(
+        &mut self,
+        module: &NamespaceRuntime,
+        arm_role: usize,
+    ) -> Result<(), FaultCode> {
+        let arm = module.core_roles[arm_role];
+        if arm == lm_bytecode::NO_ROLE {
+            return Err(BAD_STATE);
+        }
+        let value = self.alloc(Object::Instance {
+            class: arm,
+            fields: Vec::new().into(),
+            env: Witness::EMPTY,
+        })?;
+        self.vm.heap.set_frozen(value.as_obj().ok_or(BAD_STATE)?);
+        self.push(value)
+    }
 }
 
-fn declaration_kind_name(kind: ExportKind) -> &'static str {
+fn declaration_kind_role(kind: ExportKind) -> usize {
     match kind {
-        ExportKind::Function => "function",
-        ExportKind::Class => "class",
-        ExportKind::Enum => "enum",
-        ExportKind::EnumCase => "enum_case",
-        ExportKind::Interface => "interface",
-        ExportKind::Constant => "constant",
+        ExportKind::Function => lm_bytecode::corepin::ROLE_CODE_KIND_FUNCTION,
+        ExportKind::Class => lm_bytecode::corepin::ROLE_CODE_KIND_CLASS,
+        ExportKind::Enum => lm_bytecode::corepin::ROLE_CODE_KIND_ENUM,
+        ExportKind::EnumCase => lm_bytecode::corepin::ROLE_CODE_KIND_ENUM,
+        ExportKind::Interface => lm_bytecode::corepin::ROLE_CODE_KIND_INTERFACE,
+        ExportKind::Constant => lm_bytecode::corepin::ROLE_CODE_KIND_CONSTANT,
     }
 }
 
