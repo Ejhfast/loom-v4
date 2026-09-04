@@ -66,6 +66,43 @@ impl CodeNamespace {
         self.units.get(&id).map(std::sync::Arc::as_ref)
     }
 
+    /// Build a portable artifact for one exact linked unit.
+    pub fn unit_artifact(&self, id: ArtifactId) -> Result<Artifact, LinkError> {
+        let root = self
+            .units
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| fail(format!("the namespace lacks unit {id}")))?;
+        let mut pending = vec![id];
+        let mut included = BTreeSet::new();
+        while let Some(unit_id) = pending.pop() {
+            if !included.insert(unit_id) {
+                continue;
+            }
+            let unit = self
+                .units
+                .get(&unit_id)
+                .ok_or_else(|| fail(format!("the namespace lacks unit {unit_id}")))?;
+            for dependency in unit.dependencies() {
+                if dependency.module_path() != lm_bytecode::artifact::CORE_MODULE_PATH {
+                    pending.push(dependency.artifact());
+                }
+            }
+        }
+        included.remove(&id);
+        let embedded = included
+            .into_iter()
+            .map(|unit_id| {
+                self.units
+                    .get(&unit_id)
+                    .cloned()
+                    .ok_or_else(|| fail(format!("the namespace lacks unit {unit_id}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Artifact::new_shared(root, embedded)
+            .map_err(|error| fail(format!("the module artifact is invalid: {error}")))
+    }
+
     pub fn active_unit(&self, path: &str) -> Option<&LinkUnit> {
         let id = self.active_units.get(path)?;
         self.unit(*id)

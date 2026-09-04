@@ -377,6 +377,7 @@ pub(super) fn emit_segment_body(
                 | Instr::Extended(ExtendedInstr::ClassCode { .. })
                 | Instr::Extended(ExtendedInstr::ModuleCode { .. })
                 | Instr::Extended(ExtendedInstr::ReflectionDeclarations)
+                | Instr::Extended(ExtendedInstr::ReflectionOpen)
                 | Instr::Extended(ExtendedInstr::ReflectionMembers)
                 | Instr::Extended(ExtendedInstr::ReflectionName)
                 | Instr::Extended(ExtendedInstr::ReflectionDeclarationKind)

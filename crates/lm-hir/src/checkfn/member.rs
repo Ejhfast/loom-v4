@@ -91,7 +91,12 @@ impl<'o> FnChecker<'o> {
         };
         if matches!(
             ctx.classes[class as usize].native_repr,
-            Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+            Some(
+                NativeRepr::ModuleCode
+                    | NativeRepr::DeclarationCode
+                    | NativeRepr::MemberCode
+                    | NativeRepr::OpenCode
+            )
         ) {
             return Err(unknown_field(ctx, class, name, name_span));
         }
@@ -392,6 +397,7 @@ impl<'o> FnChecker<'o> {
                         | NativeRepr::ModuleCode
                         | NativeRepr::DeclarationCode
                         | NativeRepr::MemberCode
+                        | NativeRepr::OpenCode
                 )
             ),
             Type::Inst(class, _) => {

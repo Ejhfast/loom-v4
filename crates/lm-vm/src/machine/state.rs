@@ -232,6 +232,34 @@ impl Machine {
                         Ok(class)
                     }
                 }
+                Object::NativeCodeDescriptor(descriptor) => {
+                    let role = match descriptor.kind {
+                        lm_heap::CodeDescriptorKind::Declaration => {
+                            lm_bytecode::corepin::ROLE_DECLARATION_CODE
+                        }
+                        lm_heap::CodeDescriptorKind::Member => {
+                            lm_bytecode::corepin::ROLE_MEMBER_CODE
+                        }
+                    };
+                    let class = module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
+                Object::NativeLinkedCode(linked) => {
+                    let role = match linked.kind {
+                        lm_heap::LinkedCodeKind::Module => lm_bytecode::corepin::ROLE_MODULE_CODE,
+                        lm_heap::LinkedCodeKind::Open => lm_bytecode::corepin::ROLE_OPEN_CODE,
+                    };
+                    let class = module.core_roles[role];
+                    if class == lm_bytecode::NO_ROLE {
+                        Err(BAD_TYPE)
+                    } else {
+                        Ok(class)
+                    }
+                }
                 Object::NativeCodeHandle { kind, .. } => {
                     let role = match kind {
                         lm_heap::CodeHandleKind::Instance => lm_bytecode::corepin::ROLE_INSTANCE,

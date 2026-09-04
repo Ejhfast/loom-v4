@@ -300,6 +300,8 @@ pub struct CoreLayout {
     pub declaration_code: Option<u32>,
     /// The opaque descriptor of one class member.
     pub member_code: Option<u32>,
+    /// One descriptor opened against a linked module.
+    pub open_code: Option<u32>,
     pub code_kind: Option<u32>,
     pub code_kind_class: Option<u32>,
     pub code_kind_enum: Option<u32>,
@@ -310,7 +312,7 @@ pub struct CoreLayout {
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 268] = [
+pub const PINNED_LABELS: [&str; 269] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -579,6 +581,7 @@ pub const PINNED_LABELS: [&str; 268] = [
     "CodeKind.Function",
     "CodeKind.Constant",
     "CodeKind.Method",
+    "OpenCode",
 ];
 
 /// The core role of immediate integer values.
@@ -859,6 +862,8 @@ pub const ROLE_CODE_KIND_INTERFACE: usize = 264;
 pub const ROLE_CODE_KIND_FUNCTION: usize = 265;
 pub const ROLE_CODE_KIND_CONSTANT: usize = 266;
 pub const ROLE_CODE_KIND_METHOD: usize = 267;
+/// The core role of one linked descriptor open.
+pub const ROLE_OPEN_CODE: usize = 268;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1178,6 +1183,7 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "CodeKind.Function" => &mut layout.code_kind_function,
         "CodeKind.Constant" => &mut layout.code_kind_constant,
         "CodeKind.Method" => &mut layout.code_kind_method,
+        "OpenCode" => &mut layout.open_code,
         _ => unreachable!("only known labels enter the map"),
     }
 }

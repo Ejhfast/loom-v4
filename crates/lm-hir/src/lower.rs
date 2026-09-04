@@ -1932,6 +1932,13 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::ReflectionDeclarations));
             }
+            HExprKind::ReflectionOpen { module, descriptor } => {
+                if !self.lower_operand(module) || !self.lower_operand(descriptor) {
+                    return;
+                }
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ReflectionOpen));
+            }
             HExprKind::ReflectionMembers { declaration } => {
                 if !self.lower_operand(declaration) {
                     return;
@@ -3329,6 +3336,10 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::ReflectionInterfaceNames { declaration: code } => {
             shift_expr_in_place(code, base, max)
         }
+        HExprKind::ReflectionOpen { module, descriptor } => {
+            shift_expr_in_place(module, base, max);
+            shift_expr_in_place(descriptor, base, max);
+        }
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -3798,6 +3809,7 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::ModuleCode
                 | NativeRepr::DeclarationCode
                 | NativeRepr::MemberCode
+                | NativeRepr::OpenCode
                 | NativeRepr::Regex
                 | NativeRepr::RegexMatch
         )
@@ -4549,6 +4561,7 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
         ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
         ExtendedInstr::ModuleCode { module } => format!("ModuleCode module{module}"),
+        ExtendedInstr::ReflectionOpen => "ReflectionOpen".to_string(),
         ExtendedInstr::ReflectionDeclarations => "ReflectionDeclarations".to_string(),
         ExtendedInstr::ReflectionMembers => "ReflectionMembers".to_string(),
         ExtendedInstr::ReflectionName => "ReflectionName".to_string(),

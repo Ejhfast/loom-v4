@@ -1224,6 +1224,7 @@ fn preflight_extended(
         }
         ExtendedInstr::AsCallback
         | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionOpen
         | ExtendedInstr::ReflectionMembers
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind
@@ -2531,6 +2532,7 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ReflectionEnd { .. } => 0x121,
             ExtendedInstr::ReflectionTypeParameterCount => 0x122,
             ExtendedInstr::ReflectionInterfaceNames => 0x123,
+            ExtendedInstr::ReflectionOpen => 0x124,
         }
     }
 
@@ -2918,6 +2920,7 @@ impl<'a> Resolver<'a> {
             }
             ExtendedInstr::AsCallback
             | ExtendedInstr::ReflectionDeclarations
+            | ExtendedInstr::ReflectionOpen
             | ExtendedInstr::ReflectionMembers
             | ExtendedInstr::ReflectionName
             | ExtendedInstr::ReflectionDeclarationKind

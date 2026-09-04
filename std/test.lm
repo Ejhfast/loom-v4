@@ -127,13 +127,13 @@ def run_matching(
         end
         continue
       end
-      case declaration
+      case module.open(declaration)
       in Class[type C: Test](class_descriptor)
-        case class_descriptor
+        case module.open(class_descriptor)
         in Class[() -> C](make)
           runnable = 0
           for member in declaration.members()
-            case member
+            case module.open(member)
             in Method[type E: Error, effect e, (mut C) -> Result[(), E] with e](test)
               runnable = runnable + 1
               name = "#{module.name()}.#{declaration.name()}.#{member.name()}"

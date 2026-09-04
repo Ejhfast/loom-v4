@@ -491,8 +491,7 @@ impl CoreDemand {
                 binding,
             } => {
                 match kind.as_str() {
-                    "Class" | "Def" | "Const" => self.name("DeclarationCode"),
-                    "Method" => self.name("MemberCode"),
+                    "Class" | "Def" | "Const" | "Method" => self.name("OpenCode"),
                     _ => {}
                 }
                 self.add_generics(generics);
@@ -664,7 +663,10 @@ impl CoreDemand {
                 self.add_names(&["CodeError", "Result", "FunctionCode"])
             }
             "class_code" => self.add_names(&["CodeError", "Result", "ClassCode"]),
-            "declarations" => self.add_names(&["List", "DeclarationCode"]),
+            "declarations" => {
+                self.add_names(&["List", "ModuleCode", "VerifiedModule", "DeclarationCode"])
+            }
+            "open" => self.add_names(&["DeclarationCode", "MemberCode", "OpenCode"]),
             "members" => self.add_names(&["List", "MemberCode"]),
             "name" => self.name("String"),
             "kind" => self.name("CodeKind"),

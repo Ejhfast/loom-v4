@@ -983,7 +983,11 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::FaultDenied { reason: value } => collect_dependency_expr(value, out),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
-        | HExprKind::Or(left, right) => {
+        | HExprKind::Or(left, right)
+        | HExprKind::ReflectionOpen {
+            module: left,
+            descriptor: right,
+        } => {
             collect_dependency_expr(left, out);
             collect_dependency_expr(right, out);
         }

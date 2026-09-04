@@ -991,6 +991,7 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         },
         ExtendedInstr::AsCallback
         | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionOpen
         | ExtendedInstr::ReflectionMembers
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind

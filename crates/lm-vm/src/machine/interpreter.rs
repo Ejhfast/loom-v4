@@ -263,6 +263,9 @@ impl Machine {
             ExtendedInstr::ReflectionDeclarations => {
                 self.exec_reflection_declarations(module)?;
             }
+            ExtendedInstr::ReflectionOpen => {
+                self.exec_reflection_open()?;
+            }
             ExtendedInstr::ReflectionMembers => {
                 self.exec_reflection_members(module)?;
             }
@@ -285,6 +288,7 @@ impl Machine {
                 self.exec_reflection_refine(
                     module,
                     envs,
+                    slots,
                     pattern.kind(),
                     pattern.function(),
                     fail,

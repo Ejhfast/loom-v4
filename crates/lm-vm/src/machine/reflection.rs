@@ -1,9 +1,13 @@
 //! Runtime operations for exact reflection descriptors.
 
 use super::*;
+use lm_bytecode::artifact::{Artifact, ArtifactId, ArtifactLimits};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnv};
 use lm_bytecode::interface::{ExportEntry, IfaceItem};
 use lm_bytecode::{BcRow, BcType, ConstValue, Constant, Export, ExportKind, ReflectionKind};
+use lm_heap::{
+    CodeDescriptor, CodeDescriptorKind, LinkedCode, LinkedCodeKind, PortableCode, PortableCodeKind,
+};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
@@ -14,7 +18,6 @@ struct ReflectionSource<'a> {
 
 #[derive(Clone, Copy)]
 struct DeclarationSource<'a> {
-    source: ReflectionSource<'a>,
     entry: &'a ExportEntry,
     export: &'a Export,
 }
@@ -25,6 +28,12 @@ enum ReflectedValue {
     ClassDescriptor { descriptor: Value, class: u32 },
 }
 
+#[derive(Clone)]
+struct OpenDescriptor {
+    linked: LinkedCode,
+    descriptor: CodeDescriptor,
+}
+
 impl Machine {
     /// Push one descriptor for an exact relocated module surface.
     pub(super) fn exec_module_code(
@@ -32,11 +41,29 @@ impl Machine {
         module: &NamespaceRuntime,
         reflection: u32,
     ) -> Result<(), FaultCode> {
-        reflection_source(module, reflection)?;
-        let value = self.alloc_reflection_descriptor(
-            module,
-            lm_bytecode::corepin::ROLE_MODULE_CODE,
-            vec![Value::Int(i64::from(reflection))],
+        let source = reflection_source(module, reflection)?;
+        let unit = source.unit.id();
+        let artifact = module
+            .code_namespace()
+            .unit_artifact(unit)
+            .map_err(|_| BAD_STATE)?;
+        let bytes = lm_bytecode::artifact::encode_with_bundle(&artifact, module.bundle())
+            .map_err(|_| BAD_STATE)?;
+        let portable = self.alloc(Object::NativeCode(Box::new(PortableCode {
+            kind: PortableCodeKind::VerifiedModule,
+            bytes: bytes.into(),
+            slot: None,
+            origin: None,
+        })))?;
+        let portable_ref = portable.as_obj().ok_or(BAD_STATE)?;
+        let value = self.alloc_with_roots(
+            Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: LinkedCodeKind::Module,
+                unit: unit.into_bytes(),
+                module: portable_ref,
+                descriptor: None,
+            })),
+            &[portable],
         )?;
         self.push(value)
     }
@@ -46,16 +73,11 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let fields = self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_MODULE_CODE,
-            1,
-        )?;
-        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let declarations: Vec<u32> = reflection_source(module, reflection)?
-            .unit
+        let module_value = self.pop()?;
+        let module_ref = self.description_module_ref(module_value)?;
+        let artifact = self.description_artifact(module, module_ref)?;
+        let declarations: Vec<u32> = artifact
+            .root()
             .interface()
             .exports
             .iter()
@@ -65,14 +87,12 @@ impl Machine {
             .collect::<Result<_, _>>()?;
         let base = self.vm.operands.len();
         for declaration in declarations {
-            let value = self.alloc_reflection_descriptor(
-                module,
-                lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-                vec![
-                    Value::Int(i64::from(reflection)),
-                    Value::Int(i64::from(declaration)),
-                ],
-            )?;
+            let value = self.alloc(Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                kind: CodeDescriptorKind::Declaration,
+                module: module_ref,
+                declaration,
+                member: None,
+            })))?;
             if let Err(error) = self.push(value) {
                 self.vm.operands.truncate(base);
                 return Err(error);
@@ -81,39 +101,60 @@ impl Machine {
         self.finish_reflection_list(base)
     }
 
+    /// Open one inert descriptor against one linked module.
+    pub(super) fn exec_reflection_open(&mut self) -> Result<(), FaultCode> {
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        if !matches!(
+            self.vm.heap.get(descriptor),
+            Object::NativeCodeDescriptor(_)
+        ) {
+            return Err(BAD_TYPE);
+        }
+        let module = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        let linked = match self.vm.heap.get(module) {
+            Object::NativeLinkedCode(linked)
+                if linked.kind == LinkedCodeKind::Module && linked.descriptor.is_none() =>
+            {
+                (**linked).clone()
+            }
+            _ => return Err(BAD_TYPE),
+        };
+        let value = self.alloc(Object::NativeLinkedCode(Box::new(LinkedCode {
+            kind: LinkedCodeKind::Open,
+            unit: linked.unit,
+            module: linked.module,
+            descriptor: Some(descriptor),
+        })))?;
+        self.push(value)
+    }
+
     /// Replace one declaration descriptor with its effective methods.
     pub(super) fn exec_reflection_members(
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let fields = self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-            2,
-        )?;
-        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let declaration_index = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = declaration_source(module, reflection, declaration_index)?;
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
+        let artifact = self.description_artifact(module, descriptor.module)?;
+        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let base = self.vm.operands.len();
         if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
             return self.finish_reflection_list(base);
         }
-        let owner = *declaration
-            .source
-            .relocation
-            .classes()
-            .get(declaration.export.def as usize)
-            .ok_or(BAD_STATE)?;
-        let mut class = owner;
+        let provider = artifact.root().module();
+        let mut class = declaration.export.def;
         let mut selectors = HashSet::new();
         let mut methods = Vec::new();
         loop {
-            let definition = module.classes.get(class as usize).ok_or(BAD_TYPE)?;
-            for (selector, function) in &definition.methods {
+            let definition = provider.classes.get(class as usize).ok_or(BAD_TYPE)?;
+            for (selector, _) in &definition.methods {
                 if selectors.insert(*selector) {
-                    methods.push((*selector, *function));
+                    let name = provider
+                        .selectors
+                        .get(*selector as usize)
+                        .cloned()
+                        .ok_or(BAD_STATE)?;
+                    methods.push(name);
                 }
             }
             let Some(parent) = definition.parent() else {
@@ -121,16 +162,13 @@ impl Machine {
             };
             class = parent;
         }
-        for (selector, function) in methods {
-            let value = self.alloc_reflection_descriptor(
-                module,
-                lm_bytecode::corepin::ROLE_MEMBER_CODE,
-                vec![
-                    Value::Int(i64::from(owner)),
-                    Value::Int(i64::from(selector)),
-                    Value::Int(i64::from(function)),
-                ],
-            )?;
+        for member in methods {
+            let value = self.alloc(Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                kind: CodeDescriptorKind::Member,
+                module: descriptor.module,
+                declaration: descriptor.declaration,
+                member: Some(member),
+            })))?;
             if let Err(error) = self.push(value) {
                 self.vm.operands.truncate(base);
                 return Err(error);
@@ -144,39 +182,31 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let reference = descriptor.as_obj().ok_or(BAD_TYPE)?;
-        let (class, fields) = match self.vm.heap.get(reference) {
-            Object::Instance { class, fields, .. } => (*class, fields.to_vec()),
+        let value = self.pop()?;
+        let reference = value.as_obj().ok_or(BAD_TYPE)?;
+        let name = match self.vm.heap.get(reference) {
+            Object::NativeLinkedCode(linked)
+                if linked.kind == LinkedCodeKind::Module && linked.descriptor.is_none() =>
+            {
+                let artifact = self.description_artifact(module, linked.module)?;
+                artifact.root().module_path().to_string()
+            }
+            Object::NativeCode(code) if code.kind == PortableCodeKind::VerifiedModule => {
+                let artifact = self.description_artifact(module, reference)?;
+                artifact.root().module_path().to_string()
+            }
+            Object::NativeCodeDescriptor(descriptor) => match descriptor.kind {
+                CodeDescriptorKind::Declaration => {
+                    let descriptor = (**descriptor).clone();
+                    let artifact = self.description_artifact(module, descriptor.module)?;
+                    portable_declaration_source(&artifact, descriptor.declaration as usize)?
+                        .entry
+                        .name
+                        .clone()
+                }
+                CodeDescriptorKind::Member => descriptor.member.clone().ok_or(BAD_STATE)?,
+            },
             _ => return Err(BAD_TYPE),
-        };
-        let name = if Some(class) == module.core.module_code {
-            let [Value::Int(reflection)] = fields.as_slice() else {
-                return Err(BAD_TYPE);
-            };
-            let reflection = u32::try_from(*reflection).map_err(|_| BAD_TYPE)?;
-            reflection_source(module, reflection)?
-                .unit
-                .module_path()
-                .to_string()
-        } else if Some(class) == module.core.declaration_code {
-            let [Value::Int(reflection), Value::Int(declaration)] = fields.as_slice() else {
-                return Err(BAD_TYPE);
-            };
-            let reflection = u32::try_from(*reflection).map_err(|_| BAD_TYPE)?;
-            let declaration = usize::try_from(*declaration).map_err(|_| BAD_TYPE)?;
-            declaration_source(module, reflection, declaration)?
-                .entry
-                .name
-                .clone()
-        } else if Some(class) == module.core.member_code {
-            let [Value::Int(_), Value::Int(selector), Value::Int(_)] = fields.as_slice() else {
-                return Err(BAD_TYPE);
-            };
-            let selector = usize::try_from(*selector).map_err(|_| BAD_TYPE)?;
-            module.selectors.get(selector).cloned().ok_or(BAD_TYPE)?
-        } else {
-            return Err(BAD_TYPE);
         };
         let value = self.alloc(Object::Str(name.into()))?;
         self.push(value)
@@ -187,17 +217,11 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let fields = self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-            2,
-        )?;
-        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
+        let artifact = self.description_artifact(module, descriptor.module)?;
         let role = declaration_kind_role(
-            declaration_source(module, reflection, declaration)?
+            portable_declaration_source(&artifact, descriptor.declaration as usize)?
                 .entry
                 .kind,
         );
@@ -209,13 +233,8 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_MEMBER_CODE,
-            3,
-        )?;
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        self.code_descriptor(descriptor, CodeDescriptorKind::Member)?;
         self.push_reflection_kind(module, lm_bytecode::corepin::ROLE_CODE_KIND_METHOD)
     }
 
@@ -224,16 +243,10 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let fields = self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-            2,
-        )?;
-        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = declaration_source(module, reflection, declaration)?;
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
+        let artifact = self.description_artifact(module, descriptor.module)?;
+        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let count = match &declaration.entry.item {
             IfaceItem::Class(class) => class.type_params,
             IfaceItem::Func(_) | IfaceItem::Interface(_) | IfaceItem::Const(_) => 0,
@@ -246,16 +259,10 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
-        let descriptor = self.pop()?;
-        let fields = self.reflection_fields(
-            module,
-            descriptor,
-            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-            2,
-        )?;
-        let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-        let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-        let declaration = declaration_source(module, reflection, declaration)?;
+        let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
+        let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
+        let artifact = self.description_artifact(module, descriptor.module)?;
+        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let base = self.vm.operands.len();
         let IfaceItem::Class(class) = &declaration.entry.item else {
             return self.finish_reflection_list(base);
@@ -263,7 +270,7 @@ impl Machine {
         let interfaces: Vec<String> = class
             .conformances
             .iter()
-            .map(|conformance| conformance.application.interface.text())
+            .map(|conformance| reflection_name(&conformance.application.interface))
             .collect();
         for interface in interfaces {
             let value = self.alloc(Object::Str(interface.into()))?;
@@ -280,12 +287,13 @@ impl Machine {
         &mut self,
         module: &NamespaceRuntime,
         envs: &mut TypeEnvs,
+        slots: Option<&[ImageSlotTarget]>,
         kind: ReflectionKind,
         pattern: u32,
         fail: u32,
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?;
-        let Some(candidate) = self.reflection_value(module, descriptor, kind)? else {
+        let Some(candidate) = self.reflection_value(module, slots, descriptor, kind)? else {
             return self.finish_reflection_miss(fail);
         };
         let Some(environment) = self.reflection_environment(module, envs, pattern, &candidate)?
@@ -323,25 +331,31 @@ impl Machine {
     fn reflection_value(
         &self,
         module: &NamespaceRuntime,
+        slots: Option<&[ImageSlotTarget]>,
         descriptor: Value,
         kind: ReflectionKind,
     ) -> Result<Option<ReflectedValue>, FaultCode> {
+        let open = self.open_descriptor(module, descriptor)?;
+        let unit_id = ArtifactId::from_bytes(open.linked.unit);
+        let Some(source) = linked_source(module, unit_id) else {
+            return Ok(None);
+        };
+        let artifact = self.description_artifact(module, open.descriptor.module)?;
+        if artifact.id() != unit_id {
+            return Ok(None);
+        }
+        let declaration =
+            portable_declaration_source(&artifact, open.descriptor.declaration as usize)?;
+        if kind != ReflectionKind::Method && open.descriptor.kind != CodeDescriptorKind::Declaration
+        {
+            return Ok(None);
+        }
         match kind {
             ReflectionKind::ClassDescriptor => {
-                let fields = self.reflection_fields(
-                    module,
-                    descriptor,
-                    lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-                    2,
-                )?;
-                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-                let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let declaration = declaration_source(module, reflection, declaration)?;
                 if declaration.entry.kind != ExportKind::Class {
                     return Ok(None);
                 }
-                let Some(class) = declaration
-                    .source
+                let Some(source_class) = source
                     .relocation
                     .classes()
                     .get(declaration.export.def as usize)
@@ -349,21 +363,18 @@ impl Machine {
                 else {
                     return Ok(None);
                 };
+                let class = current_class_target(module, slots, source, declaration.export.def)
+                    .unwrap_or(source_class);
+                let descriptor = open.linked.descriptor.ok_or(BAD_STATE)?;
                 Ok(module
                     .classes
                     .get(class as usize)
-                    .map(|_| ReflectedValue::ClassDescriptor { descriptor, class }))
+                    .map(|_| ReflectedValue::ClassDescriptor {
+                        descriptor: Value::Obj(descriptor),
+                        class,
+                    }))
             }
             ReflectionKind::Class | ReflectionKind::Function => {
-                let fields = self.reflection_fields(
-                    module,
-                    descriptor,
-                    lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-                    2,
-                )?;
-                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-                let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let declaration = declaration_source(module, reflection, declaration)?;
                 let accepted = matches!(
                     (kind, declaration.entry.kind),
                     (ReflectionKind::Class, ExportKind::Class)
@@ -380,14 +391,19 @@ impl Machine {
                 if local == lm_bytecode::NO_CTOR {
                     return Ok(None);
                 }
-                let Some(callable) = declaration
-                    .source
-                    .relocation
-                    .functions()
-                    .get(local as usize)
-                    .copied()
+                let Some(callable) = source.relocation.functions().get(local as usize).copied()
                 else {
                     return Ok(None);
+                };
+                let callable = match kind {
+                    ReflectionKind::Class => {
+                        current_constructor_target(module, slots, source, declaration.export.def)
+                            .unwrap_or(callable)
+                    }
+                    ReflectionKind::Function => {
+                        current_function_target(module, slots, source, local).unwrap_or(callable)
+                    }
+                    _ => unreachable!("the reflection kind was selected above"),
                 };
                 Ok(module
                     .funcs
@@ -395,46 +411,49 @@ impl Machine {
                     .map(|_| ReflectedValue::Callable(callable)))
             }
             ReflectionKind::Method => {
-                let fields = self.reflection_fields(
-                    module,
-                    descriptor,
-                    lm_bytecode::corepin::ROLE_MEMBER_CODE,
-                    3,
-                )?;
-                let owner = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-                let selector = u32::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let candidate = u32::try_from(fields[2]).map_err(|_| BAD_TYPE)?;
-                if method_of(&module.dispatch, owner, selector).ok() != Some(candidate) {
+                if open.descriptor.kind != CodeDescriptorKind::Member {
                     return Ok(None);
                 }
+                let member = open.descriptor.member.as_deref().ok_or(BAD_STATE)?;
+                if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
+                    return Ok(None);
+                }
+                let Some(source_class) = source
+                    .relocation
+                    .classes()
+                    .get(declaration.export.def as usize)
+                    .copied()
+                else {
+                    return Ok(None);
+                };
+                let owner = current_class_target(module, slots, source, declaration.export.def)
+                    .unwrap_or(source_class);
+                let Some(selector) = module
+                    .selectors
+                    .iter()
+                    .position(|selector| selector == member)
+                    .and_then(|selector| u32::try_from(selector).ok())
+                else {
+                    return Ok(None);
+                };
+                let Ok(candidate) = method_of(&module.dispatch, owner, selector) else {
+                    return Ok(None);
+                };
+                let candidate =
+                    current_method_target(module, slots, candidate).unwrap_or(candidate);
                 Ok(module
                     .funcs
                     .get(candidate as usize)
                     .map(|_| ReflectedValue::Callable(candidate)))
             }
             ReflectionKind::Constant => {
-                let fields = self.reflection_fields(
-                    module,
-                    descriptor,
-                    lm_bytecode::corepin::ROLE_DECLARATION_CODE,
-                    2,
-                )?;
-                let reflection = u32::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
-                let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
-                let declaration = declaration_source(module, reflection, declaration)?;
                 if declaration.entry.kind != ExportKind::Constant {
                     return Ok(None);
                 }
                 let Some(mut constant) = declaration.export.constant.clone() else {
                     return Ok(None);
                 };
-                let Some(ty) = declaration
-                    .source
-                    .relocation
-                    .types()
-                    .get(constant.ty as usize)
-                    .copied()
-                else {
+                let Some(ty) = source.relocation.types().get(constant.ty as usize).copied() else {
                     return Ok(None);
                 };
                 constant.ty = ty;
@@ -599,55 +618,77 @@ impl Machine {
         }
     }
 
-    fn reflection_fields(
+    fn description_module_ref(&self, value: Value) -> Result<ObjRef, FaultCode> {
+        let reference = value.as_obj().ok_or(BAD_TYPE)?;
+        match self.vm.heap.get(reference) {
+            Object::NativeCode(code) if code.kind == PortableCodeKind::VerifiedModule => {
+                Ok(reference)
+            }
+            Object::NativeLinkedCode(linked)
+                if linked.kind == LinkedCodeKind::Module && linked.descriptor.is_none() =>
+            {
+                Ok(linked.module)
+            }
+            _ => Err(BAD_TYPE),
+        }
+    }
+
+    fn description_artifact(
+        &self,
+        module: &NamespaceRuntime,
+        reference: ObjRef,
+    ) -> Result<Artifact, FaultCode> {
+        let Object::NativeCode(code) = self.vm.heap.get(reference) else {
+            return Err(BAD_TYPE);
+        };
+        if code.kind != PortableCodeKind::VerifiedModule {
+            return Err(BAD_TYPE);
+        }
+        lm_bytecode::artifact::decode_with_bundle(
+            code.bytes.as_slice(),
+            module.bundle(),
+            ArtifactLimits::default(),
+        )
+        .map_err(|_| BAD_STATE)
+    }
+
+    fn code_descriptor(
+        &self,
+        reference: ObjRef,
+        kind: CodeDescriptorKind,
+    ) -> Result<CodeDescriptor, FaultCode> {
+        match self.vm.heap.get(reference) {
+            Object::NativeCodeDescriptor(descriptor) if descriptor.kind == kind => {
+                Ok((**descriptor).clone())
+            }
+            _ => Err(BAD_TYPE),
+        }
+    }
+
+    fn open_descriptor(
         &self,
         module: &NamespaceRuntime,
         value: Value,
-        role: usize,
-        count: usize,
-    ) -> Result<Vec<i64>, FaultCode> {
-        let class = *module.core_roles.get(role).ok_or(BAD_STATE)?;
-        if class == lm_bytecode::NO_ROLE {
-            return Err(BAD_STATE);
-        }
+    ) -> Result<OpenDescriptor, FaultCode> {
         let reference = value.as_obj().ok_or(BAD_TYPE)?;
-        let Object::Instance {
-            class: found,
-            fields,
-            ..
-        } = self.vm.heap.get(reference)
-        else {
-            return Err(BAD_TYPE);
+        let linked = match self.vm.heap.get(reference) {
+            Object::NativeLinkedCode(linked)
+                if linked.kind == LinkedCodeKind::Open && linked.descriptor.is_some() =>
+            {
+                (**linked).clone()
+            }
+            _ => return Err(BAD_TYPE),
         };
-        if *found != class || fields.len() != count {
-            return Err(BAD_TYPE);
-        }
-        fields
-            .iter()
-            .map(|value| match value {
-                Value::Int(value) => Ok(*value),
-                _ => Err(BAD_TYPE),
-            })
-            .collect()
-    }
-
-    fn alloc_reflection_descriptor(
-        &mut self,
-        module: &NamespaceRuntime,
-        role: usize,
-        fields: Vec<Value>,
-    ) -> Result<Value, FaultCode> {
-        let class = *module.core_roles.get(role).ok_or(BAD_STATE)?;
-        if class == lm_bytecode::NO_ROLE {
+        let linked_artifact = self.description_artifact(module, linked.module)?;
+        if linked_artifact.id().into_bytes() != linked.unit {
             return Err(BAD_STATE);
         }
-        let value = self.alloc(Object::Instance {
-            class,
-            fields: fields.into(),
-            env: Witness::EMPTY,
-        })?;
-        self.vm.heap.set_frozen(value.as_obj().ok_or(BAD_STATE)?);
-        Ok(value)
+        let descriptor = linked.descriptor.ok_or(BAD_STATE)?;
+        let descriptor = match self.vm.heap.get(descriptor) {
+            Object::NativeCodeDescriptor(descriptor) => (**descriptor).clone(),
+            _ => return Err(BAD_TYPE),
+        };
+        Ok(OpenDescriptor { linked, descriptor })
     }
 
     fn finish_reflection_list(&mut self, base: usize) -> Result<(), FaultCode> {
@@ -702,31 +743,122 @@ fn reflection_source(
     Ok(ReflectionSource { unit, relocation })
 }
 
-fn declaration_source(
-    module: &NamespaceRuntime,
-    reflection: u32,
+fn linked_source(module: &NamespaceRuntime, unit: ArtifactId) -> Option<ReflectionSource<'_>> {
+    Some(ReflectionSource {
+        unit: module.code_namespace().unit(unit)?,
+        relocation: module.code_namespace().relocation(unit)?,
+    })
+}
+
+fn portable_declaration_source(
+    artifact: &Artifact,
     declaration: usize,
 ) -> Result<DeclarationSource<'_>, FaultCode> {
-    let source = reflection_source(module, reflection)?;
-    let entry = source
-        .unit
+    let unit = artifact.root();
+    let entry = unit
         .interface()
         .exports
         .get(declaration)
         .filter(|entry| entry.source && entry.kind != ExportKind::EnumCase)
         .ok_or(BAD_TYPE)?;
-    let export = source
-        .unit
+    let export = unit
         .module()
         .exports
         .get(declaration)
         .filter(|export| export.name == entry.name && export.kind == entry.kind)
         .ok_or(BAD_STATE)?;
-    Ok(DeclarationSource {
-        source,
-        entry,
-        export,
-    })
+    Ok(DeclarationSource { entry, export })
+}
+
+fn current_slot_target(
+    module: &NamespaceRuntime,
+    slots: Option<&[ImageSlotTarget]>,
+    slot: u32,
+) -> Option<ImageSlotTarget> {
+    if let Some(slots) = slots {
+        return slots.get(slot as usize).copied();
+    }
+    match module.code_namespace().slot_initials().get(slot as usize)? {
+        Some(lm_bytecode::SlotTarget::Function(function)) => {
+            Some(ImageSlotTarget::Function(*function))
+        }
+        Some(lm_bytecode::SlotTarget::Class { class, constructor }) => {
+            Some(ImageSlotTarget::Class {
+                class: *class,
+                constructor: *constructor,
+            })
+        }
+        None => Some(ImageSlotTarget::Empty),
+    }
+}
+
+fn source_slot(source: ReflectionSource<'_>, target: u32, class: bool) -> Option<u32> {
+    let local = source
+        .unit
+        .module()
+        .slots
+        .iter()
+        .position(|slot| match slot.initial {
+            Some(lm_bytecode::SlotTarget::Function(function)) => !class && function == target,
+            Some(lm_bytecode::SlotTarget::Class { class: found, .. }) => class && found == target,
+            None => false,
+        })?;
+    source.relocation.slots().get(local).copied()
+}
+
+fn current_function_target(
+    module: &NamespaceRuntime,
+    slots: Option<&[ImageSlotTarget]>,
+    source: ReflectionSource<'_>,
+    function: u32,
+) -> Option<u32> {
+    let slot = source_slot(source, function, false)?;
+    match current_slot_target(module, slots, slot)? {
+        ImageSlotTarget::Function(function) => Some(function),
+        _ => None,
+    }
+}
+
+fn current_class_target(
+    module: &NamespaceRuntime,
+    slots: Option<&[ImageSlotTarget]>,
+    source: ReflectionSource<'_>,
+    class: u32,
+) -> Option<u32> {
+    let slot = source_slot(source, class, true)?;
+    match current_slot_target(module, slots, slot)? {
+        ImageSlotTarget::Class { class, .. } => Some(class),
+        _ => None,
+    }
+}
+
+fn current_constructor_target(
+    module: &NamespaceRuntime,
+    slots: Option<&[ImageSlotTarget]>,
+    source: ReflectionSource<'_>,
+    class: u32,
+) -> Option<u32> {
+    let slot = source_slot(source, class, true)?;
+    match current_slot_target(module, slots, slot)? {
+        ImageSlotTarget::Class { constructor, .. } => Some(constructor),
+        _ => None,
+    }
+}
+
+fn current_method_target(
+    module: &NamespaceRuntime,
+    slots: Option<&[ImageSlotTarget]>,
+    function: u32,
+) -> Option<u32> {
+    let slot = module.slots.iter().position(|slot| {
+        matches!(slot.contract, lm_bytecode::SlotContract::Method(_))
+            && slot.initial == Some(lm_bytecode::SlotTarget::Function(function))
+    })?;
+    let slot = u32::try_from(slot).ok()?;
+    match current_slot_target(module, slots, slot)? {
+        ImageSlotTarget::Function(function) => Some(function),
+        _ => None,
+    }
 }
 
 fn declaration_kind_role(kind: ExportKind) -> usize {
@@ -737,6 +869,14 @@ fn declaration_kind_role(kind: ExportKind) -> usize {
         ExportKind::EnumCase => lm_bytecode::corepin::ROLE_CODE_KIND_ENUM,
         ExportKind::Interface => lm_bytecode::corepin::ROLE_CODE_KIND_INTERFACE,
         ExportKind::Constant => lm_bytecode::corepin::ROLE_CODE_KIND_CONSTANT,
+    }
+}
+
+fn reflection_name(name: &lm_bytecode::interface::QualName) -> String {
+    if name.is_core() {
+        format!("core.{}", name.name)
+    } else {
+        name.text()
     }
 }
 

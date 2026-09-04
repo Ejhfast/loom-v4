@@ -255,6 +255,7 @@ pub enum NativeRepr {
     ModuleCode,
     DeclarationCode,
     MemberCode,
+    OpenCode,
     Regex,
     RegexMatch,
 }
@@ -700,6 +701,11 @@ pub enum HExprKind {
     ReflectionDeclarations {
         module: Box<HExpr>,
     },
+    /// Open one description against one linked module.
+    ReflectionOpen {
+        module: Box<HExpr>,
+        descriptor: Box<HExpr>,
+    },
     /// List one declaration's effective methods.
     ReflectionMembers {
         declaration: Box<HExpr>,
@@ -901,6 +907,9 @@ impl HExpr {
             | HExprKind::FaultTraceGet { fault: value }
             | HExprKind::RequestOpName { request: value }
             | HExprKind::FaultDenied { reason: value } => value.flow,
+            HExprKind::ReflectionOpen { module, descriptor } => {
+                Flow::strict([module.flow, descriptor.flow])
+            }
             HExprKind::Binary { left, right, .. } => Flow::strict([left.flow, right.flow]),
             HExprKind::And(left, _) | HExprKind::Or(left, _) => left.flow,
             HExprKind::Call { args, .. }

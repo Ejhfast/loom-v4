@@ -1,5 +1,5 @@
-def inspect(declaration: DeclarationCode): Int
-  case declaration
+def inspect(module: ModuleCode, declaration: DeclarationCode): Int
+  case module.open(declaration)
   in Def[effect e, () -> Int with e](call)
     call()
   in _ then 0

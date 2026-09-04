@@ -77,7 +77,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 149] = [
+pub const PRELUDE_TYPES: [&str; 150] = [
     "Option",
     "Result",
     "Ordering",
@@ -127,6 +127,7 @@ pub const PRELUDE_TYPES: [&str; 149] = [
     "ModuleCode",
     "DeclarationCode",
     "MemberCode",
+    "OpenCode",
     "CodeKind",
     "DefinitionIdentity",
     "DefinitionSpec",
@@ -299,6 +300,7 @@ pub(crate) fn core_native_repr(name: &str) -> Option<NativeRepr> {
         "ModuleCode" => Some(NativeRepr::ModuleCode),
         "DeclarationCode" => Some(NativeRepr::DeclarationCode),
         "MemberCode" => Some(NativeRepr::MemberCode),
+        "OpenCode" => Some(NativeRepr::OpenCode),
         "Regex" => Some(NativeRepr::Regex),
         "RegexMatch" => Some(NativeRepr::RegexMatch),
         name => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
@@ -5516,7 +5518,12 @@ fn resolve_class(
     };
     let reflection_descriptor = matches!(
         native_repr,
-        Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+        Some(
+            NativeRepr::ModuleCode
+                | NativeRepr::DeclarationCode
+                | NativeRepr::MemberCode
+                | NativeRepr::OpenCode
+        )
     );
     let valid_native_shape = native_repr.is_none()
         || valid_native_layout

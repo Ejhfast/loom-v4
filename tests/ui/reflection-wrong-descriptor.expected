@@ -1,2 +1,2 @@
-error[E1004]: expected DeclarationCode, found Int
+error[E1004]: expected OpenCode, found Int
   --> tests/ui/reflection-wrong-descriptor.lm:2:1

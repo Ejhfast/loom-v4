@@ -150,6 +150,7 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::ModuleCode
                             | NativeRepr::DeclarationCode
                             | NativeRepr::MemberCode
+                            | NativeRepr::OpenCode
                     )
                 ) {
                     return Err(Diagnostic::new(

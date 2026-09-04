@@ -521,7 +521,8 @@ impl<'m> Oracle<'m> {
                 | NativeRepr::RegexMatch
                 | NativeRepr::ModuleCode
                 | NativeRepr::DeclarationCode
-                | NativeRepr::MemberCode,
+                | NativeRepr::MemberCode
+                | NativeRepr::OpenCode,
             ) => return Err(Stop::Limit("this native class has no direct constructor")),
             None => {}
         }
@@ -864,6 +865,7 @@ impl<'m> Oracle<'m> {
             | HExprKind::ClassCode { .. }
             | HExprKind::ModuleCode { .. }
             | HExprKind::ReflectionDeclarations { .. }
+            | HExprKind::ReflectionOpen { .. }
             | HExprKind::ReflectionMembers { .. }
             | HExprKind::ReflectionName { .. }
             | HExprKind::ReflectionDeclarationKind { .. }

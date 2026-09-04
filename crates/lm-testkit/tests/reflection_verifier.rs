@@ -74,6 +74,7 @@ fn bytecode_cannot_construct_any_reflection_descriptor() {
         lm_bytecode::corepin::ROLE_MODULE_CODE,
         lm_bytecode::corepin::ROLE_DECLARATION_CODE,
         lm_bytecode::corepin::ROLE_MEMBER_CODE,
+        lm_bytecode::corepin::ROLE_OPEN_CODE,
     ] {
         let mut module = lm_hir::core_image();
         let class = module.core_roles[role];
@@ -133,8 +134,8 @@ fn bytecode_cannot_read_a_module_descriptor_field() {
 
 fn reflection_scope_module() -> (Module, u32, u32) {
     let mut module = lm_hir::core_image();
-    let declaration = module.core_roles[lm_bytecode::corepin::ROLE_DECLARATION_CODE];
-    let descriptor = descriptor_type(&module, declaration);
+    let open = module.core_roles[lm_bytecode::corepin::ROLE_OPEN_CODE];
+    let descriptor = descriptor_type(&module, open);
     let unit = type_index(&module, BcType::Unit);
     let variable = intern_type(&mut module, BcType::Var(0));
     let refined = intern_type(

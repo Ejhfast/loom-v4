@@ -1243,7 +1243,13 @@ fn extended_edges(
         ExtendedInstr::ReflectionDeclarations => role_edges(
             module,
             offsets,
-            &["ModuleCode", "DeclarationCode", "List"],
+            &["ModuleCode", "VerifiedModule", "DeclarationCode", "List"],
+            edges,
+        ),
+        ExtendedInstr::ReflectionOpen => role_edges(
+            module,
+            offsets,
+            &["ModuleCode", "DeclarationCode", "MemberCode", "OpenCode"],
             edges,
         ),
         ExtendedInstr::ReflectionMembers => role_edges(

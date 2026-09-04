@@ -549,8 +549,7 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<(HReflectArm, bool), Diagnostic> {
         let descriptor_name = match kind_name {
-            "Class" | "Def" | "Const" => "DeclarationCode",
-            "Method" => "MemberCode",
+            "Class" | "Def" | "Const" | "Method" => "OpenCode",
             _ => {
                 return Err(Diagnostic::new(
                     "E1041",
@@ -634,7 +633,7 @@ impl<'o> FnChecker<'o> {
                 (
                     ReflectKind::ClassDescriptor,
                     ctx.store.intern(Type::Var(first_type)),
-                    required_descriptor,
+                    Self::core_class(ctx, "DeclarationCode"),
                 )
             }
         };

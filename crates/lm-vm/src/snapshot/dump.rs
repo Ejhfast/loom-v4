@@ -366,6 +366,17 @@ fn payload(object: &Object) -> String {
                 matched.start, matched.end, matched.text
             )
         }
+        Object::NativeCodeDescriptor(descriptor) => format!(
+            "code {:?} declaration {} member {:?} module #{}",
+            descriptor.kind, descriptor.declaration, descriptor.member, descriptor.module.slot
+        ),
+        Object::NativeLinkedCode(linked) => format!(
+            "linked {:?} unit {} module #{} descriptor {:?}",
+            linked.kind,
+            hex(&linked.unit),
+            linked.module.slot,
+            linked.descriptor.map(|descriptor| descriptor.slot)
+        ),
         Object::NativeSlotChange {
             image,
             generation,

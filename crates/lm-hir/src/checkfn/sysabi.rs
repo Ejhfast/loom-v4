@@ -811,6 +811,7 @@ impl<'o> FnChecker<'o> {
                 "ModuleCode",
                 "DeclarationCode",
                 "MemberCode",
+                "OpenCode",
             ]
             .into_iter()
             .find(|name| ctx.core_types.get(*name) == Some(&class.0)),
@@ -897,7 +898,7 @@ impl<'o> FnChecker<'o> {
             Self::core_inst(ctx, "Result", vec![ok, code_error])
         };
         match (class, name) {
-            ("ModuleCode", "declarations") => {
+            ("ModuleCode" | "VerifiedModule", "declarations") => {
                 Self::expect_no_args(name, args, span)?;
                 let item = Self::core_class(ctx, "DeclarationCode");
                 Ok(HExpr {
@@ -906,6 +907,37 @@ impl<'o> FnChecker<'o> {
                     mutable: true,
                     kind: HExprKind::ReflectionDeclarations {
                         module: Box::new(recv_h),
+                    },
+                })
+            }
+            ("ModuleCode", "open") => {
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "E1006",
+                        format!("`open` expects 1 argument, found {}", args.len()),
+                        span,
+                    ));
+                }
+                let descriptor = self.synth_expr(ctx, &args[0])?;
+                let declaration = Self::core_class(ctx, "DeclarationCode");
+                let member = Self::core_class(ctx, "MemberCode");
+                if descriptor.ty != declaration && descriptor.ty != member {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        format!(
+                            "expected DeclarationCode or MemberCode, found {}",
+                            ctx.display_type(&self.env, descriptor.ty)
+                        ),
+                        args[0].span,
+                    ));
+                }
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: Self::core_class(ctx, "OpenCode"),
+                    mutable: true,
+                    kind: HExprKind::ReflectionOpen {
+                        module: Box::new(recv_h),
+                        descriptor: Box::new(descriptor),
                     },
                 })
             }
@@ -921,7 +953,7 @@ impl<'o> FnChecker<'o> {
                     },
                 })
             }
-            ("ModuleCode" | "DeclarationCode" | "MemberCode", "name") => {
+            ("ModuleCode" | "VerifiedModule" | "DeclarationCode" | "MemberCode", "name") => {
                 Self::expect_no_args(name, args, span)?;
                 Ok(HExpr {
                     flow: Flow::Normal,

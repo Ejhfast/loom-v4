@@ -1792,6 +1792,8 @@ fn relocate_object_code(
         | Object::NativeRun { .. }
         | Object::NativeDynRef { .. }
         | Object::NativeCode(_)
+        | Object::NativeCodeDescriptor(_)
+        | Object::NativeLinkedCode(_)
         | Object::NativeTable { .. }
         | Object::NativeRequest { .. }
         | Object::NativeCall { .. }

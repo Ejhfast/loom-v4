@@ -26,20 +26,19 @@ enum CodeKind
   Method
 end
 
-# Opaque descriptors for exact source definitions.
+# One module linked in this machine.
 frozen class ModuleCode
-  _module: Int = 0
 end
 
+# Inert descriptions of exact source definitions.
 frozen class DeclarationCode
-  _module: Int = 0
-  _declaration: Int = 0
 end
 
 frozen class MemberCode
-  _owner: Int = 0
-  _selector: Int = 0
-  _function: Int = 0
+end
+
+# One descriptor opened against a linked module.
+frozen class OpenCode
 end
 
 final class DefinitionIdentity

@@ -35,9 +35,9 @@ use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
-    CodeHandleKind, FaultSite, MapEntry, MapIndex, NativeByteBuffer, NativeRegexMatch,
-    NativeStringBuilder, Object, PortableCode, PortableCodeKind, RegexCaptureRange, SlotChangeKind,
-    StructuralEpoch,
+    CodeDescriptor, CodeDescriptorKind, CodeHandleKind, FaultSite, LinkedCode, LinkedCodeKind,
+    MapEntry, MapIndex, NativeByteBuffer, NativeRegexMatch, NativeStringBuilder, Object,
+    PortableCode, PortableCodeKind, RegexCaptureRange, SlotChangeKind, StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
@@ -753,6 +753,36 @@ fn encode_object(out: &mut Out, object: &Object) {
             for (name, index) in &matched.names {
                 out.str(name);
                 out.leb(u64::from(*index));
+            }
+        }
+        Object::NativeCodeDescriptor(descriptor) => {
+            out.u8(match descriptor.kind {
+                CodeDescriptorKind::Declaration => 0,
+                CodeDescriptorKind::Member => 1,
+            });
+            out.value(Value::Obj(descriptor.module));
+            out.leb(u64::from(descriptor.declaration));
+            match &descriptor.member {
+                Some(member) => {
+                    out.u8(1);
+                    out.str(member);
+                }
+                None => out.u8(0),
+            }
+        }
+        Object::NativeLinkedCode(linked) => {
+            out.u8(match linked.kind {
+                LinkedCodeKind::Module => 0,
+                LinkedCodeKind::Open => 1,
+            });
+            out.hash(&linked.unit);
+            out.value(Value::Obj(linked.module));
+            match linked.descriptor {
+                Some(descriptor) => {
+                    out.u8(1);
+                    out.value(Value::Obj(descriptor));
+                }
+                None => out.u8(0),
             }
         }
     }
@@ -2558,6 +2588,60 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 end,
                 groups: groups.into_boxed_slice(),
                 names: names.into_boxed_slice(),
+            }))
+        }
+        40 => {
+            let kind = match cur.u8()? {
+                0 => CodeDescriptorKind::Declaration,
+                1 => CodeDescriptorKind::Member,
+                _ => return err(ImageReason::Layout, "a code descriptor kind is invalid"),
+            };
+            let module = decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
+                ImageError::new(
+                    ImageReason::Layout,
+                    "a code descriptor module is not an object",
+                )
+            })?;
+            let declaration = u32::try_from(cur.leb()?).map_err(|_| {
+                ImageError::new(ImageReason::Reference, "a declaration index is too large")
+            })?;
+            let member = match cur.u8()? {
+                0 => None,
+                1 => Some(cur.str(limits.max_string_bytes)?),
+                _ => return err(ImageReason::Layout, "a code member flag is invalid"),
+            };
+            Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                kind,
+                module,
+                declaration,
+                member,
+            }))
+        }
+        41 => {
+            let kind = match cur.u8()? {
+                0 => LinkedCodeKind::Module,
+                1 => LinkedCodeKind::Open,
+                _ => return err(ImageReason::Layout, "a linked code kind is invalid"),
+            };
+            let unit = cur.hash()?;
+            let module = decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
+                ImageError::new(
+                    ImageReason::Layout,
+                    "a linked module source is not an object",
+                )
+            })?;
+            let descriptor = match cur.u8()? {
+                0 => None,
+                1 => Some(decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
+                    ImageError::new(ImageReason::Layout, "an opened descriptor is not an object")
+                })?),
+                _ => return err(ImageReason::Layout, "an opened descriptor flag is invalid"),
+            };
+            Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind,
+                unit,
+                module,
+                descriptor,
             }))
         }
         other => {

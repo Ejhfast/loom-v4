@@ -436,6 +436,44 @@ pub struct PortableCode {
     pub origin: Option<[u8; 32]>,
 }
 
+/// One portable reflection descriptor kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeDescriptorKind {
+    Declaration,
+    Member,
+}
+
+/// One inert description from one verified module.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeDescriptor {
+    pub kind: CodeDescriptorKind,
+    /// A `VerifiedModule` object in this heap.
+    pub module: ObjRef,
+    /// The source export index in the root module interface.
+    pub declaration: u32,
+    /// The method name for a member descriptor.
+    pub member: Option<String>,
+}
+
+/// One holder-local linked reflection value kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkedCodeKind {
+    Module,
+    Open,
+}
+
+/// One linked module or one descriptor opened against it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedCode {
+    pub kind: LinkedCodeKind,
+    /// The exact linked unit identity.
+    pub unit: [u8; 32],
+    /// A `VerifiedModule` object for portable description.
+    pub module: ObjRef,
+    /// A `CodeDescriptor` object for an open value.
+    pub descriptor: Option<ObjRef>,
+}
+
 /// One capture range relative to the complete matched text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegexCaptureRange {
@@ -603,6 +641,10 @@ pub enum Object {
     /// One immutable regular-expression match. Born frozen.
     /// The indirection keeps aggregate destruction outside the collector loop.
     NativeRegexMatch(std::sync::Arc<NativeRegexMatch>),
+    /// One inert and sendable code description.
+    NativeCodeDescriptor(Box<CodeDescriptor>),
+    /// One holder-local linked code value.
+    NativeLinkedCode(Box<LinkedCode>),
 }
 
 /// How a boundary transfer treats one shape.
@@ -1037,9 +1079,29 @@ const SHAPE_REGEX_MATCH: ShapeDesc = ShapeDesc {
     snapshot: SnapshotClass::MachineState,
 };
 
+const SHAPE_CODE_DESCRIPTOR: ShapeDesc = ShapeDesc {
+    name: "CodeDescriptor",
+    has_refs: true,
+    born_frozen: true,
+    child_order: "the verified module",
+    boundary: BoundaryPolicy::Sendable,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
+const SHAPE_LINKED_CODE: ShapeDesc = ShapeDesc {
+    name: "LinkedCode",
+    has_refs: true,
+    born_frozen: true,
+    child_order: "the verified module, then the opened descriptor",
+    boundary: BoundaryPolicy::HolderLocal,
+    digestible: false,
+    snapshot: SnapshotClass::MachineState,
+};
+
 /// Every shape descriptor, in shape-tag order. The tag is the index,
 /// and the canonical digest encoding reads it.
-pub const SHAPES: [&ShapeDesc; 40] = [
+pub const SHAPES: [&ShapeDesc; 42] = [
     &SHAPE_STR,
     &SHAPE_INSTANCE,
     &SHAPE_LIST,
@@ -1080,6 +1142,8 @@ pub const SHAPES: [&ShapeDesc; 40] = [
     &SHAPE_DYN_REF,
     &SHAPE_REGEX,
     &SHAPE_REGEX_MATCH,
+    &SHAPE_CODE_DESCRIPTOR,
+    &SHAPE_LINKED_CODE,
 ];
 
 impl Object {
@@ -1292,6 +1356,20 @@ impl Object {
                 Object::NativeRegex(std::sync::Arc::new((**regex).clone()))
             }
             Object::NativeRegexMatch(matched) => Object::NativeRegexMatch(matched.clone()),
+            Object::NativeCodeDescriptor(descriptor) => {
+                Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                    kind: descriptor.kind,
+                    module: map(descriptor.module),
+                    declaration: descriptor.declaration,
+                    member: descriptor.member.clone(),
+                }))
+            }
+            Object::NativeLinkedCode(linked) => Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: linked.kind,
+                unit: linked.unit,
+                module: map(linked.module),
+                descriptor: linked.descriptor.map(&mut map),
+            })),
         })
     }
 
@@ -1340,6 +1418,8 @@ impl Object {
             Object::NativeDynRef { .. } => 37,
             Object::NativeRegex(_) => 38,
             Object::NativeRegexMatch(_) => 39,
+            Object::NativeCodeDescriptor(_) => 40,
+            Object::NativeLinkedCode(_) => 41,
         }
     }
 
@@ -1418,6 +1498,11 @@ impl Object {
                             .map(|(name, _)| name.len().saturating_add(4))
                             .sum::<usize>(),
                     ),
+                Object::NativeCodeDescriptor(descriptor) => descriptor
+                    .member
+                    .as_ref()
+                    .map_or(VALUE_COST, |member| VALUE_COST.saturating_add(member.len())),
+                Object::NativeLinkedCode(_) => VALUE_COST,
             }
     }
 
@@ -1491,6 +1576,13 @@ impl Object {
             | Object::NativeHostResource { .. } => {}
             Object::NativeRegex(_) | Object::NativeRegexMatch(_) => {}
             Object::Substring(_) => {}
+            Object::NativeCodeDescriptor(descriptor) => out.push(descriptor.module),
+            Object::NativeLinkedCode(linked) => {
+                out.push(linked.module);
+                if let Some(descriptor) = linked.descriptor {
+                    out.push(descriptor);
+                }
+            }
             Object::DynValue { value, .. } => visit(value),
             Object::NativeSlotChange { target, .. } => visit(target),
             Object::Instance { fields, .. } => fields.iter().for_each(&mut visit),
@@ -1550,6 +1642,14 @@ impl Object {
                 Object::NativeRegex(std::sync::Arc::new((**regex).clone()))
             }
             Object::NativeRegexMatch(matched) => Object::NativeRegexMatch(matched.clone()),
+            Object::NativeCodeDescriptor(descriptor) => {
+                Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                    kind: descriptor.kind,
+                    module: descriptor.module,
+                    declaration: descriptor.declaration,
+                    member: descriptor.member.clone(),
+                }))
+            }
             Object::NativeFileHandle { resource } => Object::NativeFileHandle {
                 resource: *resource,
             },
@@ -1646,6 +1746,20 @@ impl Object {
             | Object::NativeSnapshot(_)
             | Object::NativeSnapshotRef { .. } => return None,
             Object::NativeRegex(_) | Object::NativeRegexMatch(_) => return None,
+            Object::NativeCodeDescriptor(descriptor) => {
+                Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                    kind: descriptor.kind,
+                    module: map(descriptor.module),
+                    declaration: descriptor.declaration,
+                    member: descriptor.member.clone(),
+                }))
+            }
+            Object::NativeLinkedCode(linked) => Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: linked.kind,
+                unit: linked.unit,
+                module: map(linked.module),
+                descriptor: linked.descriptor.map(&mut map),
+            })),
             Object::NativeCode(_) => return None,
             Object::Bytes(_)
             | Object::NativeFileHandle { .. }

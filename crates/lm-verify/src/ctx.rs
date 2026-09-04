@@ -147,6 +147,7 @@ impl<'m> Ctx<'m> {
             self.core.module_code,
             self.core.declaration_code,
             self.core.member_code,
+            self.core.open_code,
         ]
         .into_iter()
         .chain(self.core.tuples)
@@ -159,6 +160,7 @@ impl<'m> Ctx<'m> {
             self.core.module_code,
             self.core.declaration_code,
             self.core.member_code,
+            self.core.open_code,
         ]
         .contains(&Some(class))
     }

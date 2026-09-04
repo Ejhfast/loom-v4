@@ -881,6 +881,14 @@ impl World {
                     Object::NativeRegexMatch(matched) => {
                         format!("<match {}..{}>", matched.start, matched.end)
                     }
+                    Object::NativeCodeDescriptor(descriptor) => match &descriptor.member {
+                        Some(member) => format!("<member {member}>"),
+                        None => format!("<declaration {}>", descriptor.declaration),
+                    },
+                    Object::NativeLinkedCode(linked) => match linked.kind {
+                        lm_heap::LinkedCodeKind::Module => "<linked module>".to_string(),
+                        lm_heap::LinkedCodeKind::Open => "<opened code>".to_string(),
+                    },
                 }
             }
         }

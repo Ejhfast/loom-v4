@@ -906,7 +906,12 @@ impl<'o> FnChecker<'o> {
         };
         if matches!(
             ctx.classes[class as usize].native_repr,
-            Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+            Some(
+                NativeRepr::ModuleCode
+                    | NativeRepr::DeclarationCode
+                    | NativeRepr::MemberCode
+                    | NativeRepr::OpenCode
+            )
         ) {
             return Err(unknown_field(ctx, class, field, field_span));
         }

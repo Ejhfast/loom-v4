@@ -19,13 +19,13 @@ mod value_array;
 
 use lm_value::{ObjRef, Value, Witness};
 pub use shape::{
-    dump_shapes, BoundaryPolicy, CodeHandleKind, FaultSite, MapEntry, MapEntryArray, MapIndex,
-    NativeRegexMatch, Object, PortableCode, PortableCodeKind, RegexCaptureRange, ShapeDesc,
-    SlotChangeKind, StructuralEpoch, EMPTY_MAP_ENTRY, MAP_ENTRY_KEY_OFFSET,
-    MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE, MAP_ENTRY_VALUE_OFFSET, MAP_INDEX_BUILT_OFFSET,
-    MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET, MAP_INDEX_SLOTS_DATA_OFFSET,
-    MAP_INDEX_SLOTS_LEN_OFFSET, MAP_SLOT_ENTRY_OFFSET, MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE,
-    MIN_OBJECT_COST, SHAPES,
+    dump_shapes, BoundaryPolicy, CodeDescriptor, CodeDescriptorKind, CodeHandleKind, FaultSite,
+    LinkedCode, LinkedCodeKind, MapEntry, MapEntryArray, MapIndex, NativeRegexMatch, Object,
+    PortableCode, PortableCodeKind, RegexCaptureRange, ShapeDesc, SlotChangeKind, StructuralEpoch,
+    EMPTY_MAP_ENTRY, MAP_ENTRY_KEY_OFFSET, MAP_ENTRY_SEMANTIC_HASH_OFFSET, MAP_ENTRY_SIZE,
+    MAP_ENTRY_VALUE_OFFSET, MAP_INDEX_BUILT_OFFSET, MAP_INDEX_EPOCH_OFFSET, MAP_INDEX_LIVE_OFFSET,
+    MAP_INDEX_SLOTS_DATA_OFFSET, MAP_INDEX_SLOTS_LEN_OFFSET, MAP_SLOT_ENTRY_OFFSET,
+    MAP_SLOT_HASH_OFFSET, MAP_SLOT_SIZE, MIN_OBJECT_COST, SHAPES,
 };
 pub use shared::{
     keyed_lookup_hash, process_lookup_hash, process_lookup_key, NativeByteBuffer,

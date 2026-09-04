@@ -395,6 +395,7 @@ fn extended_stack_effect(
         | ExtendedInstr::SyntaxToTree
         | ExtendedInstr::MapProbeFound
         | ExtendedInstr::MapWriteGuard => (1, 1),
+        ExtendedInstr::ReflectionOpen => (2, 1),
         ExtendedInstr::ReflectionRefine { .. } => (1, 1),
         ExtendedInstr::ReflectionEnd { .. } => (0, 0),
         ExtendedInstr::CallSlot { slot, .. } | ExtendedInstr::NewSlot { slot, .. } => {

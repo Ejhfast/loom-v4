@@ -36,8 +36,11 @@ use super::{
 use lm_bytecode::closed::{ClosedType, TypeEnv, TypeEnvs};
 use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, SlotContract};
-use lm_heap::{CodeHandleKind, Object, PortableCodeKind};
-use lm_value::Value;
+use lm_heap::{
+    CodeDescriptor, CodeDescriptorKind, CodeHandleKind, LinkedCode, LinkedCodeKind, Object,
+    PortableCodeKind,
+};
+use lm_value::{ObjRef, Value};
 use std::cell::RefCell;
 use std::collections::HashSet;
 
@@ -783,6 +786,175 @@ impl Admit<'_> {
         Ok(())
     }
 
+    /// Read one verified module from a portable heap object.
+    fn verified_module_artifact(
+        &self,
+        objects: &[super::ImageObject],
+        reference: ObjRef,
+        location: &str,
+    ) -> Result<lm_bytecode::artifact::Artifact, ImageError> {
+        let Some(entry) = objects.get(reference.slot as usize) else {
+            return fail(
+                ImageReason::Reference,
+                format!("{location} names no verified module object"),
+            );
+        };
+        let Object::NativeCode(code) = &entry.object else {
+            return fail(
+                ImageReason::Code,
+                format!("{location} does not name a verified module"),
+            );
+        };
+        if code.kind != PortableCodeKind::VerifiedModule {
+            return fail(
+                ImageReason::Code,
+                format!("{location} does not name a verified module"),
+            );
+        }
+        self.check_portable_code(code.kind, code.bytes.as_slice(), code.slot, code.origin)?;
+        lm_bytecode::artifact::decode_with_bundle(
+            code.bytes.as_slice(),
+            self.bundle,
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|error| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("{location} has invalid module code: {error}"),
+            )
+        })
+    }
+
+    /// Prove one inert code descriptor.
+    fn check_code_descriptor(
+        &self,
+        objects: &[super::ImageObject],
+        descriptor: &CodeDescriptor,
+        location: &str,
+    ) -> Result<(), ImageError> {
+        let artifact = self.verified_module_artifact(objects, descriptor.module, location)?;
+        let unit = artifact.root();
+        let declaration = descriptor.declaration as usize;
+        let Some(entry) = unit
+            .interface()
+            .exports
+            .get(declaration)
+            .filter(|entry| entry.source && entry.kind != lm_bytecode::ExportKind::EnumCase)
+        else {
+            return fail(
+                ImageReason::Code,
+                format!("{location} names no source declaration"),
+            );
+        };
+        let Some(export) = unit
+            .module()
+            .exports
+            .get(declaration)
+            .filter(|export| export.name == entry.name && export.kind == entry.kind)
+        else {
+            return fail(
+                ImageReason::Code,
+                format!("{location} has inconsistent declaration data"),
+            );
+        };
+        match descriptor.kind {
+            CodeDescriptorKind::Declaration if descriptor.member.is_none() => Ok(()),
+            CodeDescriptorKind::Declaration => fail(
+                ImageReason::Code,
+                format!("{location} gives a member name to a declaration"),
+            ),
+            CodeDescriptorKind::Member => {
+                let Some(member) = descriptor.member.as_deref() else {
+                    return fail(ImageReason::Code, format!("{location} has no member name"));
+                };
+                if !matches!(
+                    entry.kind,
+                    lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum
+                ) {
+                    return fail(
+                        ImageReason::Code,
+                        format!("{location} names a member of a non-class declaration"),
+                    );
+                }
+                let module = unit.module();
+                let mut class = export.def;
+                for _ in 0..=module.classes.len() {
+                    let Some(definition) = module.classes.get(class as usize) else {
+                        break;
+                    };
+                    let found = definition.methods.iter().any(|(selector, _)| {
+                        module
+                            .selectors
+                            .get(*selector as usize)
+                            .is_some_and(|name| name == member)
+                    });
+                    if found {
+                        return Ok(());
+                    }
+                    let Some(parent) = definition.parent() else {
+                        break;
+                    };
+                    class = parent;
+                }
+                fail(
+                    ImageReason::Code,
+                    format!("{location} names no effective method"),
+                )
+            }
+        }
+    }
+
+    /// Prove one linked module value or one explicit open value.
+    fn check_linked_code(
+        &self,
+        objects: &[super::ImageObject],
+        namespace: &crate::NamespaceRuntime,
+        linked: &LinkedCode,
+        location: &str,
+    ) -> Result<(), ImageError> {
+        let artifact = self.verified_module_artifact(objects, linked.module, location)?;
+        let unit = lm_bytecode::artifact::ArtifactId::from_bytes(linked.unit);
+        if artifact.id() != unit {
+            return fail(
+                ImageReason::Code,
+                format!("{location} has a different linked unit"),
+            );
+        }
+        let code = namespace.code_namespace();
+        if code.unit(unit).is_none() || code.relocation(unit).is_none() {
+            return fail(
+                ImageReason::Code,
+                format!("{location} names an unlinked unit"),
+            );
+        }
+        match (linked.kind, linked.descriptor) {
+            (LinkedCodeKind::Module, None) => Ok(()),
+            (LinkedCodeKind::Open, Some(descriptor)) => {
+                if matches!(
+                    objects
+                        .get(descriptor.slot as usize)
+                        .map(|entry| &entry.object),
+                    Some(Object::NativeCodeDescriptor(_))
+                ) {
+                    Ok(())
+                } else {
+                    fail(
+                        ImageReason::Code,
+                        format!("{location} has an invalid opened descriptor"),
+                    )
+                }
+            }
+            (LinkedCodeKind::Module, Some(_)) => fail(
+                ImageReason::Code,
+                format!("{location} gives a descriptor to a module"),
+            ),
+            (LinkedCodeKind::Open, None) => fail(
+                ImageReason::Code,
+                format!("{location} has no opened descriptor"),
+            ),
+        }
+    }
+
     /// Prove each captured target against its immutable module contract.
     ///
     /// Each image binds its own namespace, so the contract comes from
@@ -1052,6 +1224,13 @@ impl Admit<'_> {
                         code.bytes.as_slice(),
                         code.slot,
                         code.origin,
+                    )?;
+                }
+                Object::NativeCodeDescriptor(descriptor) => {
+                    self.check_code_descriptor(
+                        &record.objects,
+                        descriptor,
+                        &at(&format!("object {ordinal}")),
                     )?;
                 }
                 _ => {}
@@ -1498,6 +1677,21 @@ impl Admit<'_> {
             }
             if let Object::NativeCode(code) = &entry.object {
                 self.check_portable_code(code.kind, code.bytes.as_slice(), code.slot, code.origin)?;
+            }
+            if let Object::NativeCodeDescriptor(descriptor) = &entry.object {
+                self.check_code_descriptor(
+                    &m.objects,
+                    descriptor,
+                    &at(&format!("object {ordinal}")),
+                )?;
+            }
+            if let Object::NativeLinkedCode(linked) = &entry.object {
+                self.check_linked_code(
+                    &m.objects,
+                    namespace,
+                    linked,
+                    &at(&format!("object {ordinal}")),
+                )?;
             }
             if let Object::NativeFault { trace, .. } = &entry.object {
                 self.check_fault_trace(trace, &at(&format!("object {ordinal}")))?;

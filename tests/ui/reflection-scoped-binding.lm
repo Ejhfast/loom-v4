@@ -1,5 +1,5 @@
-def inspect(declaration: DeclarationCode)
-  case declaration
+def inspect(module: ModuleCode, declaration: DeclarationCode)
+  case module.open(declaration)
   in Def[() -> Int](call) then ()
   in _ then ()
   end

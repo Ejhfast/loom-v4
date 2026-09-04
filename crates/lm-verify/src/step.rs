@@ -1090,14 +1090,44 @@ pub(crate) fn step(
             push(state, module_code)?;
         }
         Instr::Extended(ExtendedInstr::ReflectionDeclarations) => {
+            let receiver = pop(state)?;
             let module_code = ctx
                 .plain_inst(ctx.core.module_code, "ModuleCode")
                 .map_err(&fail)?;
-            pop_expect(state, module_code)?;
+            let verified = ctx
+                .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                .map_err(&fail)?;
+            if receiver != module_code && receiver != verified {
+                return Err(fail(
+                    "reflection declarations need ModuleCode or VerifiedModule".to_string(),
+                ));
+            }
             let declaration_code = ctx
                 .plain_inst(ctx.core.declaration_code, "DeclarationCode")
                 .map_err(&fail)?;
             push(state, ctx.intern(BcType::List(declaration_code)))?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionOpen) => {
+            let declaration = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            let member = ctx
+                .plain_inst(ctx.core.member_code, "MemberCode")
+                .map_err(&fail)?;
+            let found = pop(state)?;
+            if found != declaration && found != member {
+                return Err(fail(
+                    "reflection open needs a declaration or member descriptor".to_string(),
+                ));
+            }
+            let module_code = ctx
+                .plain_inst(ctx.core.module_code, "ModuleCode")
+                .map_err(&fail)?;
+            pop_expect(state, module_code)?;
+            let open_code = ctx
+                .plain_inst(ctx.core.open_code, "OpenCode")
+                .map_err(&fail)?;
+            push(state, open_code)?;
         }
         Instr::Extended(ExtendedInstr::ReflectionMembers) => {
             let declaration_code = ctx
@@ -1159,17 +1189,9 @@ pub(crate) fn step(
         }) => {
             let kind = pattern.kind();
             let pattern = pattern.function();
-            let descriptor = match kind {
-                lm_bytecode::ReflectionKind::Class
-                | lm_bytecode::ReflectionKind::Function
-                | lm_bytecode::ReflectionKind::Constant
-                | lm_bytecode::ReflectionKind::ClassDescriptor => ctx
-                    .plain_inst(ctx.core.declaration_code, "DeclarationCode")
-                    .map_err(&fail)?,
-                lm_bytecode::ReflectionKind::Method => ctx
-                    .plain_inst(ctx.core.member_code, "MemberCode")
-                    .map_err(&fail)?,
-            };
+            let descriptor = ctx
+                .plain_inst(ctx.core.open_code, "OpenCode")
+                .map_err(&fail)?;
             pop_expect(state, descriptor)?;
             let miss = state.clone();
             edge(*target as usize, miss)?;
@@ -1213,7 +1235,10 @@ pub(crate) fn step(
             }
             state.scopes.push(pattern);
             if kind == lm_bytecode::ReflectionKind::ClassDescriptor {
-                push(state, descriptor)?;
+                let declaration = ctx
+                    .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                    .map_err(&fail)?;
+                push(state, declaration)?;
             } else {
                 push(state, metadata.params[0])?;
             }

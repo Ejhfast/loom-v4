@@ -111,7 +111,7 @@ for declaration in module_code.declarations()
   end
 end
 for declaration in module_code.declarations()
-  case declaration
+  case module_code.open(declaration)
   in Class[type C: Marker](class_descriptor)
     out.push("matched:#{class_descriptor.name()}")
   in _ then ()
@@ -135,6 +135,48 @@ out
          \"Sample.method:marked\", \"Sample.method:base\", \"enum:Choice\", \
          \"function:twice\", \"constant:Answer\", \"matched:Sample\"])"
     );
+}
+
+#[test]
+fn portable_descriptions_keep_generic_class_metadata() {
+    let tree = TempTree::new("generic-description");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "use std.test\n\nclass Box[T] implements Test\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r##"
+use lib.cases
+
+module = codeof(cases)
+out = List[String]()
+for declaration in module.declarations()
+  if declaration.name() == "Box"
+    out.push("#{declaration.type_parameter_count()}:#{declaration.interface_names().at(0)}")
+  end
+end
+out
+"##,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the reflective package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut vm = Vm::new(arena, namespace, VmConfig::default());
+    let outcome = vm.run();
+    assert_eq!(vm.show_outcome(&outcome), "Done([\"1:core.Test\"])");
 }
 
 #[test]
@@ -166,8 +208,9 @@ fn a_scoped_effect_row_cannot_escape_its_reflection_arm() {
         r#"
 use lib.cases
 
-for declaration in codeof(cases).declarations()
-  case declaration
+module_code = codeof(cases)
+for declaration in module_code.declarations()
+  case module_code.open(declaration)
   in Def[effect e, () -> Int with e](call)
     call()
   in _ then ()
@@ -203,8 +246,9 @@ fn a_scoped_effect_row_cannot_enter_an_inferred_closure() {
         r#"
 use lib.cases
 
-for declaration in codeof(cases).declarations()
-  case declaration
+module_code = codeof(cases)
+for declaration in module_code.declarations()
+  case module_code.open(declaration)
   in Def[effect e, () -> Int with e](call)
     action = do || call() end
     action()
@@ -244,7 +288,7 @@ use lib.cases
 
 def run(module_code: ModuleCode): Int with Vm
   for declaration in module_code.declarations()
-    case declaration
+    case module_code.open(declaration)
     in Def[effect e, () -> Int with e](call)
       program = do ||: Int with e
         call() + 100
@@ -307,7 +351,7 @@ end
 
 def run(module_code: ModuleCode): Int with Vm
   for declaration in module_code.declarations()
-    case declaration
+    case module_code.open(declaration)
     in Def[effect e, () -> Int with e](call)
       program = do ||: Int with e
         nested = preserve(do || call() end)
@@ -374,8 +418,9 @@ fn a_refinement_can_match_a_nonescaping_callback() {
 use lib.callbacks
 
 answer = 0
-for declaration in codeof(callbacks).declarations()
-  case declaration
+module_code = codeof(callbacks)
+for declaration in module_code.declarations()
+  case module_code.open(declaration)
   in Def[(nonescaping (Int) -> Int) -> Int](call)
     answer = call(do |value: Int| value + 1 end)
   in _ then ()
@@ -498,7 +543,7 @@ use lib.data
 
 def inspect(module_code: ModuleCode): Int
   for declaration in module_code.declarations()
-    case declaration
+    case module_code.open(declaration)
     in Def[type T, (T) -> T](call)
       i = 0
       while i < 1000
@@ -623,7 +668,7 @@ end
 
 def reflected_answer(module_code: ModuleCode): Int
   for declaration in module_code.declarations()
-    case declaration
+    case module_code.open(declaration)
     in Def[() -> Int](call) then return call()
     in _ then ()
     end
@@ -633,11 +678,11 @@ end
 
 def activate_reflected(module_code: ModuleCode): Int with Vm
   for declaration in module_code.declarations()
-    case declaration
+    case module_code.open(declaration)
     in Class[type C: Marker, () -> C](make)
       instance = make()
       for member in declaration.members()
-        case member
+        case module_code.open(member)
         in Method[(mut C) -> Int](read)
           child = sys.vm.Vm().activate_or_fault(read, args: (instance,))
           case child.run()
@@ -654,12 +699,13 @@ def activate_reflected(module_code: ModuleCode): Int with Vm
 end
 
 total = 0
-for declaration in codeof(cases).declarations()
-  case declaration
+module_code = codeof(cases)
+for declaration in module_code.declarations()
+  case module_code.open(declaration)
   in Class[type C: Marker, () -> C](make)
     instance = make()
     for member in declaration.members()
-      case member
+      case module_code.open(member)
       in Method[(C) -> Int](read)
         total = total + apply(instance, read)
       in _ then ()
@@ -673,8 +719,8 @@ for declaration in codeof(cases).declarations()
   end
 end
 first = 0
-for declaration in codeof(cases).declarations()
-  case declaration
+for declaration in module_code.declarations()
+  case module_code.open(declaration)
   in Def[() -> Int](call)
     first = call()
     break

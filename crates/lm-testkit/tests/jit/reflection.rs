@@ -6,8 +6,9 @@ fn reflection_resumes_native_execution() {
 use std.test
 
 found = 0
-for declaration in codeof(test).declarations()
-  case declaration
+module = codeof(test)
+for declaration in module.declarations()
+  case module.open(declaration)
   in Class[type C](class_descriptor)
     class_descriptor.name()
     found = found + 1

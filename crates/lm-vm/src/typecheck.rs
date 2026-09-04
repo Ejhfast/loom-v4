@@ -169,6 +169,10 @@ enum Kind {
     UdpSocket,
     Artifact,
     VerifiedModule,
+    ModuleCode,
+    DeclarationCode,
+    MemberCode,
+    OpenCode,
     FunctionCode,
     ClassCode,
     SlotSpec,
@@ -344,6 +348,14 @@ fn resolve(
                 Node::Heap(Kind::Artifact)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE] == *class {
                 Node::Heap(Kind::VerifiedModule)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_MODULE_CODE] == *class {
+                Node::Heap(Kind::ModuleCode)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_DECLARATION_CODE] == *class {
+                Node::Heap(Kind::DeclarationCode)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_MEMBER_CODE] == *class {
+                Node::Heap(Kind::MemberCode)
+            } else if module.core_roles[lm_bytecode::corepin::ROLE_OPEN_CODE] == *class {
+                Node::Heap(Kind::OpenCode)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_CLASS_CODE] == *class {
                 Node::Heap(Kind::ClassCode)
             } else if module.core_roles[lm_bytecode::corepin::ROLE_SLOT_SPEC] == *class {
@@ -459,6 +471,14 @@ fn kind_of(object: &Object) -> Kind {
             lm_heap::PortableCodeKind::SlotSpec => Kind::SlotSpec,
             lm_heap::PortableCodeKind::Function => Kind::FunctionCode,
             lm_heap::PortableCodeKind::Class => Kind::ClassCode,
+        },
+        Object::NativeCodeDescriptor(descriptor) => match descriptor.kind {
+            lm_heap::CodeDescriptorKind::Declaration => Kind::DeclarationCode,
+            lm_heap::CodeDescriptorKind::Member => Kind::MemberCode,
+        },
+        Object::NativeLinkedCode(linked) => match linked.kind {
+            lm_heap::LinkedCodeKind::Module => Kind::ModuleCode,
+            lm_heap::LinkedCodeKind::Open => Kind::OpenCode,
         },
         Object::NativeCodeHandle { kind, .. } => match kind {
             lm_heap::CodeHandleKind::Instance => Kind::CodeInstance,

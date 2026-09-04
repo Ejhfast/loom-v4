@@ -474,6 +474,7 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         | ExtendedInstr::ClassCode { .. }
         | ExtendedInstr::ModuleCode { .. }
         | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionOpen
         | ExtendedInstr::ReflectionMembers
         | ExtendedInstr::ReflectionName
         | ExtendedInstr::ReflectionDeclarationKind

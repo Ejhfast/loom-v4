@@ -58,7 +58,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 268;
+pub const CORE_ROLE_COUNT: usize = 269;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -899,6 +899,8 @@ pub enum ExtendedInstr {
     ModuleCode { module: u32 },
     /// Pop a module descriptor and push its source declarations.
     ReflectionDeclarations,
+    /// Open one descriptor against one linked module.
+    ReflectionOpen,
     /// Pop a declaration descriptor and push its effective methods.
     ReflectionMembers,
     /// Pop a reflection descriptor and push its source name.
@@ -2103,7 +2105,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 73;
+pub const VERSION: u16 = 74;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2371,6 +2373,7 @@ const EXT_REFLECTION_REFINE: u8 = 32;
 const EXT_REFLECTION_END: u8 = 33;
 const EXT_REFLECTION_TYPE_PARAMETER_COUNT: u8 = 34;
 const EXT_REFLECTION_INTERFACE_NAMES: u8 = 35;
+const EXT_REFLECTION_OPEN: u8 = 36;
 
 fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
@@ -3477,6 +3480,10 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::ReflectionDeclarations => {
             out.push(OP_EXTENSION);
             out.push(EXT_REFLECTION_DECLARATIONS);
+        }
+        ExtendedInstr::ReflectionOpen => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_OPEN);
         }
         ExtendedInstr::ReflectionMembers => {
             out.push(OP_EXTENSION);
@@ -4741,6 +4748,7 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             EXT_BYTES_READ_U32_LE => Instr::Native(NativeInstr::BytesReadU32Le),
             EXT_MODULE_CODE => Instr::Extended(ExtendedInstr::ModuleCode { module: cur.u32()? }),
             EXT_REFLECTION_DECLARATIONS => Instr::Extended(ExtendedInstr::ReflectionDeclarations),
+            EXT_REFLECTION_OPEN => Instr::Extended(ExtendedInstr::ReflectionOpen),
             EXT_REFLECTION_MEMBERS => Instr::Extended(ExtendedInstr::ReflectionMembers),
             EXT_REFLECTION_NAME => Instr::Extended(ExtendedInstr::ReflectionName),
             EXT_REFLECTION_DECLARATION_KIND => {
