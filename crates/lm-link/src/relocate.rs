@@ -454,7 +454,7 @@ fn relocate(
             ))
         })?;
         let index = merged.reflections.len() as u32;
-        merged.reflections.push(reloc_reflection(source, &reloc));
+        merged.reflections.push(reloc_reflection(source));
         merged.reflection_units.push(provider);
         reloc.reflections.push(index);
     }

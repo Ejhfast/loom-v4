@@ -1,8 +1,8 @@
 //! Verifier checks for opaque reflection descriptors.
 
 use lm_bytecode::{
-    BcType, ConstValue, Constant, ExportKind, ExtendedInstr, Func, Instr, Module, ReflectionBases,
-    ReflectionDeclaration, ReflectionKind, ReflectionModule, ReflectionPattern, NO_REFLECTION_DEF,
+    BcType, ExtendedInstr, Func, Instr, Module, ReflectionBases, ReflectionKind, ReflectionModule,
+    ReflectionPattern,
 };
 
 fn type_index(module: &Module, ty: BcType) -> u32 {
@@ -266,21 +266,15 @@ fn a_refined_value_cannot_escape_its_scope() {
 }
 
 #[test]
-fn reflected_constant_metadata_keeps_its_declared_type() {
+fn reflected_provider_names_are_unique() {
     let mut module = lm_hir::core_image();
-    let int = type_index(&module, BcType::Int);
     module.reflections.push(ReflectionModule {
-        name: "bad.constants".to_string(),
-        declarations: vec![ReflectionDeclaration {
-            kind: ExportKind::Constant,
-            name: "Answer".to_string(),
-            def: NO_REFLECTION_DEF,
-            callable: NO_REFLECTION_DEF,
-            constant: Some(Constant {
-                ty: int,
-                value: ConstValue::Bool(true),
-            }),
-        }],
+        name: "same.module".to_string(),
+        semantic_hash: [1; 32],
     });
-    assert_rejected(&module, "has invalid targets");
+    module.reflections.push(ReflectionModule {
+        name: "same.module".to_string(),
+        semantic_hash: [1; 32],
+    });
+    assert_rejected(&module, "repeats module");
 }

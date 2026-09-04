@@ -788,7 +788,8 @@ fn reflection_source(
         .reflection_unit(reflection)
         .ok_or(BAD_STATE)?;
     let unit = module.code_namespace().unit(unit_id).ok_or(BAD_STATE)?;
-    if unit.module_path() != surface.name {
+    if unit.module_path() != surface.name || unit.identity().semantic_hash != surface.semantic_hash
+    {
         return Err(BAD_STATE);
     }
     let relocation = module

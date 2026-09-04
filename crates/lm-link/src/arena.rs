@@ -3,7 +3,8 @@
 use crate::collect;
 use crate::env::{
     artifact_from_order, collect_environment_with_root, fail, link_order, resolve_artifact,
-    validate_untrusted_units, DefinitionSelection, FrozenLinkEnv, LinkError,
+    validate_reflection_providers, validate_untrusted_units, DefinitionSelection, FrozenLinkEnv,
+    LinkError,
 };
 use crate::reloc_tables::{CodeRelocation, Reloc, UnitRelocation};
 use crate::relocate::{bind_unit, merge_unit, relocated_exports, seed_extension_providers};
@@ -556,6 +557,7 @@ impl CodeArena {
         }
         let unchecked: BTreeSet<ArtifactId> =
             untrusted.difference(&self.verified).copied().collect();
+        validate_reflection_providers(&env)?;
         validate_untrusted_units(&env, &unchecked, &self.bundle)?;
 
         let order = link_order(&root_path, &env)?;
@@ -737,6 +739,7 @@ impl CodeArena {
         }
         let unchecked: BTreeSet<ArtifactId> =
             untrusted.difference(&self.verified).copied().collect();
+        validate_reflection_providers(&env)?;
         validate_untrusted_units(&env, &unchecked, &self.bundle)?;
 
         let order = link_order(&root_path, &env)?;

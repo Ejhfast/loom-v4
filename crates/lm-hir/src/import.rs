@@ -34,7 +34,7 @@ use lm_bytecode::ImportKind;
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{ClassId, ClassKind, Row, RowElem, Type, TypeId};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 /// The interfaces one module may import, and the root names its `use`
@@ -120,36 +120,6 @@ pub(crate) fn add_used_core_names(
         }
     }
 
-    let mut seen = HashSet::new();
-    while let Some((module, name)) = work.pop() {
-        if !seen.insert((module.clone(), name.clone())) {
-            continue;
-        }
-        let Some(entry) = env.module(&module).and_then(|item| item.find(&name)) else {
-            continue;
-        };
-        add_item_core_names(&module, &name, &entry.item, names, &mut work);
-    }
-}
-
-/// Add core names used by complete reflected module surfaces.
-pub(crate) fn add_reflection_core_names(
-    env: &ImportEnv,
-    modules: &BTreeSet<String>,
-    names: &mut HashSet<String>,
-) {
-    let mut work = Vec::new();
-    for module in modules {
-        let Some(interface) = env.module(module) else {
-            continue;
-        };
-        work.extend(
-            interface
-                .exports
-                .iter()
-                .map(|export| (module.clone(), export.name.clone())),
-        );
-    }
     let mut seen = HashSet::new();
     while let Some((module, name)) = work.pop() {
         if !seen.insert((module.clone(), name.clone())) {
@@ -421,39 +391,6 @@ impl<'a> Materializer<'a> {
             core: true,
             ..Materializer::new(env)
         }
-    }
-
-    /// Reserve every source declaration needed by one reflected module.
-    pub(crate) fn reserve_reflection_module(
-        &mut self,
-        ctx: &mut Ctx,
-        module: &str,
-        span: Span,
-    ) -> Result<(), Diagnostic> {
-        let interface = self
-            .env
-            .module(module)
-            .cloned()
-            .ok_or_else(|| error(span, format!("the module `{module}` is not visible here")))?;
-        for export in interface.exports.into_iter().filter(|item| item.source) {
-            let bound = format!("$reflection.{module}.{}", export.name);
-            match export.item {
-                IfaceItem::Class(class) if class.kind != IfaceClassKind::EnumCase => {
-                    self.reserve_class(ctx, module, &export.name, span)?;
-                }
-                IfaceItem::Class(_) => {}
-                IfaceItem::Interface(_) => {
-                    self.reserve_interface(ctx, module, &export.name, span)?;
-                }
-                IfaceItem::Func(_) => {
-                    self.reserve_func(ctx, &bound, module, &export.name, span)?;
-                }
-                IfaceItem::Const(_) => {
-                    self.reserve_const(ctx, &bound, module, &export.name, span)?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Find one export of one module.
@@ -2056,45 +1993,6 @@ impl<'a> Materializer<'a> {
         };
         Ok(id)
     }
-}
-
-/// Resolve one reflected constant through definitions already in the checker.
-pub(crate) fn reflection_constant(
-    ctx: &mut Ctx,
-    env: &ImportEnv,
-    constant: &IfaceConst,
-    name: &str,
-    span: Span,
-) -> Result<crate::hir::HirConst, Diagnostic> {
-    let mut resolver = Materializer::new(env);
-    for import in &ctx.imports {
-        if import.kind == ImportKind::Class {
-            let HirImportDef::Class(class) = import.def else {
-                continue;
-            };
-            resolver
-                .classes
-                .insert((import.module.clone(), import.name.clone()), class);
-        }
-    }
-    for (index, interface) in ctx.interfaces.iter().enumerate() {
-        if let Some(origin) = &interface.origin {
-            resolver.interfaces.insert(origin.clone(), index as u32);
-        }
-    }
-    let ty = resolver.resolve_type(ctx, &constant.ty, span)?;
-    let value = const_value_expr(ctx, &constant.value, ty).ok_or_else(|| {
-        Diagnostic::new(
-            "E1053",
-            format!("the reflected constant `{name}` has an invalid value"),
-            span,
-        )
-    })?;
-    Ok(crate::hir::HirConst {
-        name: name.to_string(),
-        ty,
-        value,
-    })
 }
 
 /// Build one imported literal expression without runtime storage.

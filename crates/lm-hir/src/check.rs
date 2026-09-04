@@ -396,8 +396,6 @@ pub struct CheckOptions {
     pub core_intrinsics: std::sync::Arc<[Option<lm_abi::IntrinsicSlot>]>,
     /// Extra core definitions required by a lowering option.
     pub core_roots: BTreeSet<String>,
-    /// Exact visible modules available to qualified `codeof` paths.
-    pub reflection_modules: BTreeSet<String>,
 }
 
 impl Default for CheckOptions {
@@ -411,7 +409,6 @@ impl Default for CheckOptions {
             core: None,
             core_intrinsics: std::sync::Arc::from([]),
             core_roots: BTreeSet::new(),
-            reflection_modules: BTreeSet::new(),
         }
     }
 }
@@ -1119,7 +1116,7 @@ impl Ctx {
         lm_bytecode::qualified_key(module_path, &info.name)
     }
 
-    /// Intern one exact imported source module surface.
+    /// Intern one exact imported source module provider.
     pub(crate) fn reflection_module(&mut self, path: &str, span: Span) -> Result<u32, Diagnostic> {
         if let Some(index) = self.reflection_indices.get(path) {
             return Ok(*index);
@@ -1131,102 +1128,10 @@ impl Ctx {
                 span,
             )
         })?;
-        let mut declarations = Vec::new();
-        for export in interface.exports.into_iter().filter(|export| export.source) {
-            let mut constant = None;
-            let (def, callable) = match export.kind {
-                lm_bytecode::ExportKind::Function => {
-                    let function = self.imports.iter().find_map(|import| {
-                        (import.module == path
-                            && import.name == export.name
-                            && import.kind == lm_bytecode::ImportKind::Func)
-                            .then_some(import.def)
-                    });
-                    let Some(HirImportDef::Func(function)) = function else {
-                        return Err(Diagnostic::new(
-                            "E1052",
-                            format!("the function `{path}.{}` is not materialized", export.name),
-                            span,
-                        ));
-                    };
-                    (Some(HirReflectionDef::Function(function)), Some(function))
-                }
-                lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
-                    let class = self.imports.iter().find_map(|import| {
-                        (import.module == path
-                            && import.name == export.name
-                            && import.kind == lm_bytecode::ImportKind::Class)
-                            .then_some(import.def)
-                    });
-                    let Some(HirImportDef::Class(class)) = class else {
-                        return Err(Diagnostic::new(
-                            "E1052",
-                            format!("the class `{path}.{}` is not materialized", export.name),
-                            span,
-                        ));
-                    };
-                    (Some(HirReflectionDef::Class(class)), None)
-                }
-                lm_bytecode::ExportKind::Interface => {
-                    let interface = self
-                        .interfaces
-                        .iter()
-                        .enumerate()
-                        .find_map(|(index, item)| {
-                            (item.origin.as_ref() == Some(&(path.to_string(), export.name.clone())))
-                                .then_some(index as u32)
-                        });
-                    let Some(interface) = interface else {
-                        return Err(Diagnostic::new(
-                            "E1052",
-                            format!("the interface `{path}.{}` is not materialized", export.name),
-                            span,
-                        ));
-                    };
-                    (Some(HirReflectionDef::Interface(interface)), None)
-                }
-                lm_bytecode::ExportKind::Constant => {
-                    let lm_bytecode::interface::IfaceItem::Const(value) = &export.item else {
-                        return Err(Diagnostic::new(
-                            "E1053",
-                            format!("the constant `{path}.{}` has invalid metadata", export.name),
-                            span,
-                        ));
-                    };
-                    let import_env = self.import_env.clone();
-                    constant = Some(crate::import::reflection_constant(
-                        self,
-                        &import_env,
-                        value,
-                        &export.name,
-                        span,
-                    )?);
-                    let key = (path.to_string(), export.name.clone(), export.iface_hash);
-                    if self.used_constant_pins.insert(key) {
-                        self.imports.push(HirImport {
-                            module: path.to_string(),
-                            name: export.name.clone(),
-                            kind: lm_bytecode::ImportKind::Constant,
-                            def: HirImportDef::Constant,
-                            hash: export.iface_hash,
-                        });
-                    }
-                    (None, None)
-                }
-                lm_bytecode::ExportKind::EnumCase => continue,
-            };
-            declarations.push(HirReflectionDeclaration {
-                kind: export.kind,
-                name: export.name,
-                def,
-                callable,
-                constant,
-            });
-        }
         let index = self.reflections.len() as u32;
         self.reflections.push(HirReflectionModule {
             name: path.to_string(),
-            declarations,
+            semantic_hash: interface.semantic_hash,
         });
         self.reflection_indices.insert(path.to_string(), index);
         Ok(index)
@@ -2949,11 +2854,6 @@ fn check_module_with_core_adjustment(
         let mut demand = CoreDemand::for_module(module, &options.bundle);
         demand.names.extend(options.core_roots.iter().cloned());
         crate::import::add_used_core_names(&options.imports, &module.uses, &mut demand.names);
-        crate::import::add_reflection_core_names(
-            &options.imports,
-            &options.reflection_modules,
-            &mut demand.names,
-        );
         core_materializer.reserve_unit(
             &mut ctx,
             unit,
@@ -2997,9 +2897,6 @@ fn check_module_with_core_adjustment(
     // type. Phase B fills the declarations after the core lands.
     let mut materializer = crate::import::Materializer::new(&options.imports);
     ctx.uses = resolve_uses(&mut ctx, &mut materializer, &options.imports, &module.uses)?;
-    for path in &options.reflection_modules {
-        materializer.reserve_reflection_module(&mut ctx, path, Span::new(0, 0))?;
-    }
     let import_span = module
         .uses
         .first()

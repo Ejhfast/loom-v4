@@ -67,29 +67,11 @@ pub enum HirImportDef {
     Constant,
 }
 
-/// One relocated definition in a reflected source module.
-#[derive(Debug, Clone, Copy)]
-pub enum HirReflectionDef {
-    Function(u32),
-    Class(u32),
-    Interface(u32),
-}
-
-/// One source declaration in a reflected module.
-#[derive(Clone)]
-pub struct HirReflectionDeclaration {
-    pub kind: lm_bytecode::ExportKind,
-    pub name: String,
-    pub def: Option<HirReflectionDef>,
-    pub callable: Option<u32>,
-    pub constant: Option<HirConst>,
-}
-
-/// One exact source module surface.
+/// One exact source module provider.
 #[derive(Clone)]
 pub struct HirReflectionModule {
     pub name: String,
-    pub declarations: Vec<HirReflectionDeclaration>,
+    pub semantic_hash: [u8; 32],
 }
 
 /// One import slot the module needs.

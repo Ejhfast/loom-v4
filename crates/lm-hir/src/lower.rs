@@ -12,8 +12,8 @@ use crate::hir::*;
 use lm_bytecode::{
     stack_effect, BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance,
     BcConformancePremise, BcInterface, BcInterfaceMethod, BcInterfaceUse, BcRow, BcType,
-    ExtendedInstr, Func, Instr, Module, ReflectionDeclaration, ReflectionModule, SlotContract,
-    SlotSpec, SlotTarget, StackEffectTables, TypeApp, NO_APP, NO_PARENT, NO_REFLECTION_DEF,
+    ExtendedInstr, Func, Instr, Module, ReflectionModule, SlotContract, SlotSpec, SlotTarget,
+    StackEffectTables, TypeApp, NO_APP, NO_PARENT,
 };
 use lm_source::ast::BinOp;
 use lm_types::{
@@ -636,47 +636,14 @@ pub fn lower_module_with_linkage(
             }),
         });
     }
-    let mut reflections = Vec::with_capacity(hir.reflections.len());
-    for module in &hir.reflections {
-        let mut declarations = Vec::with_capacity(module.declarations.len());
-        for declaration in &module.declarations {
-            let def = match declaration.def {
-                Some(HirReflectionDef::Function(function)) => function,
-                Some(HirReflectionDef::Class(class)) => class,
-                Some(HirReflectionDef::Interface(interface)) => interface,
-                None => NO_REFLECTION_DEF,
-            };
-            let callable = declaration.callable.unwrap_or_else(|| {
-                if declaration.kind == lm_bytecode::ExportKind::Class {
-                    match declaration.def {
-                        Some(HirReflectionDef::Class(class)) => new_base + class,
-                        _ => NO_REFLECTION_DEF,
-                    }
-                } else {
-                    NO_REFLECTION_DEF
-                }
-            });
-            let constant = if let Some(constant) = &declaration.constant {
-                Some(lm_bytecode::Constant {
-                    ty: m.bc_ty(constant.ty),
-                    value: lower_const_value(&constant.value)?,
-                })
-            } else {
-                None
-            };
-            declarations.push(ReflectionDeclaration {
-                kind: declaration.kind,
-                name: declaration.name.clone(),
-                def,
-                callable,
-                constant,
-            });
-        }
-        reflections.push(ReflectionModule {
+    let reflections = hir
+        .reflections
+        .iter()
+        .map(|module| ReflectionModule {
             name: module.name.clone(),
-            declarations,
-        });
-    }
+            semantic_hash: module.semantic_hash,
+        })
+        .collect();
     // The generated constructor of a class takes a binding derived
     // from the qualified key of that class. The class structural hash
     // covers no constructor, because the constructor is a function

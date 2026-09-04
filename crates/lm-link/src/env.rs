@@ -565,6 +565,30 @@ pub(crate) fn validate_untrusted_units(
     Ok(())
 }
 
+/// Validate each reflected provider against its compiled identity.
+pub(crate) fn validate_reflection_providers(env: &FrozenLinkEnv) -> Result<(), LinkError> {
+    for path in env.paths() {
+        let unit = env
+            .unit(path)
+            .ok_or_else(|| fail(format!("the module `{path}` is not bound")))?;
+        for reflection in &unit.module().reflections {
+            let provider = env.unit(&reflection.name).ok_or_else(|| {
+                fail(format!(
+                    "the reflected module `{}` is not bound for `{path}`",
+                    reflection.name
+                ))
+            })?;
+            if provider.identity().semantic_hash != reflection.semantic_hash {
+                return Err(fail(format!(
+                    "the reflected module `{}` has another semantic identity for `{path}`",
+                    reflection.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collected_interface(
     source: &LinkUnit,
     module: &Module,

@@ -265,6 +265,25 @@ fn link_untrusted_units(
     lm_testkit::publish_artifact(&artifact)
 }
 
+#[test]
+fn a_reflected_provider_must_keep_its_compiled_identity() {
+    let provider = compile_one("app.shapes", "def answer(): Int\n  42\nend\n", &[], false);
+    let mut main = compile_one(
+        "app.main",
+        "codeof(shapes)\n",
+        std::slice::from_ref(&provider.interface),
+        true,
+    );
+    assert_eq!(main.module.reflections.len(), 1);
+    main.module.reflections[0].semantic_hash = [0; 32];
+    let error = link_untrusted_units(&[provider, main])
+        .expect_err("a changed reflection identity must reject");
+    assert!(
+        error.to_string().contains("another semantic identity"),
+        "{error}"
+    );
+}
+
 fn link_selective_provider(unused_result: &str) -> lm_bytecode::artifact::Artifact {
     let provider = compile_one(
         "app.shapes",

@@ -4,7 +4,6 @@
 //! context, the error type, and the entry points.
 
 use super::*;
-use lm_bytecode::ExportKind;
 
 /// Validate the type, selector, application, class, and function
 /// tables.
@@ -342,7 +341,7 @@ pub(crate) fn verify_tables(
     Ok(ctx)
 }
 
-/// Validate exact source module surfaces used by reflection.
+/// Validate exact module providers used by reflection.
 fn verify_reflections(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
     let module = ctx.module;
     let mut module_names = HashSet::new();
@@ -352,60 +351,6 @@ fn verify_reflections(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 "reflection module {module_index} repeats module `{}`",
                 reflection.name
             )));
-        }
-        let mut declaration_names = HashSet::new();
-        for (declaration_index, declaration) in reflection.declarations.iter().enumerate() {
-            let subject =
-                || format!("reflection module {module_index}, declaration {declaration_index}");
-            if !declaration_names.insert(declaration.name.as_str()) {
-                return Err(terr(format!(
-                    "{} repeats declaration `{}`",
-                    subject(),
-                    declaration.name
-                )));
-            }
-            let no_def = declaration.def == lm_bytecode::NO_REFLECTION_DEF;
-            let no_callable = declaration.callable == lm_bytecode::NO_REFLECTION_DEF;
-            let valid = match declaration.kind {
-                ExportKind::Function => {
-                    module.funcs.get(declaration.def as usize).is_some()
-                        && declaration.callable == declaration.def
-                        && declaration.constant.is_none()
-                }
-                ExportKind::Class => {
-                    module.classes.get(declaration.def as usize).is_some()
-                        && module.funcs.get(declaration.callable as usize).is_some()
-                        && ctx.constructor_class(declaration.callable) == Some(declaration.def)
-                        && declaration.constant.is_none()
-                }
-                ExportKind::Enum => {
-                    module
-                        .classes
-                        .get(declaration.def as usize)
-                        .is_some_and(|class| class.kind == BcClassKind::Abstract)
-                        && no_callable
-                        && declaration.constant.is_none()
-                }
-                ExportKind::Interface => {
-                    module.interfaces.get(declaration.def as usize).is_some()
-                        && no_callable
-                        && declaration.constant.is_none()
-                }
-                ExportKind::Constant => {
-                    let valid_constant = declaration.constant.as_ref().is_some_and(|constant| {
-                        if constant.ty as usize >= module.types.len() {
-                            return false;
-                        }
-                        constant_value_type(ctx, &constant.value, 0)
-                            .is_ok_and(|actual| ctx.is_subtype(actual, constant.ty))
-                    });
-                    no_def && no_callable && valid_constant
-                }
-                ExportKind::EnumCase => false,
-            };
-            if !valid {
-                return Err(terr(format!("{} has invalid targets", subject())));
-            }
         }
     }
     Ok(())

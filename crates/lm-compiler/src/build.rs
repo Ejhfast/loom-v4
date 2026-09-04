@@ -226,17 +226,12 @@ fn build_package_for(
                     .bind_root(name, prefix)
                     .map_err(|error| format!("error: {error}\n"))?;
             }
-            let options = module_paths
-                .iter()
-                .fold(crate::module::CompileOptions::new(), |options, path| {
-                    options.reflect_module(path.clone())
-                });
             let compiled = crate::module::compile_module_with_options(
                 &runner_path,
                 &source,
                 &local.freeze(),
                 true,
-                &options,
+                &crate::module::CompileOptions::new(),
             )?;
             let unit = link_env
                 .prepare_unit(compiled.path, compiled.module, compiled.interface)

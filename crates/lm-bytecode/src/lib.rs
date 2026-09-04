@@ -1519,29 +1519,14 @@ pub struct Export {
     pub constant: Option<Constant>,
 }
 
-/// One source declaration in a reified module.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReflectionDeclaration {
-    pub kind: ExportKind,
-    pub name: String,
-    /// The function, class, or interface index. A constant uses
-    /// `NO_REFLECTION_DEF`.
-    pub def: u32,
-    /// The callable function. Classes use their constructor.
-    pub callable: u32,
-    /// The typed literal of a constant declaration.
-    pub constant: Option<Constant>,
-}
-
-/// One exact module surface available to runtime reflection.
+/// One exact module provider available to runtime reflection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReflectionModule {
+    /// The canonical path of the linked provider.
     pub name: String,
-    pub declarations: Vec<ReflectionDeclaration>,
+    /// The exact semantic identity of the provider.
+    pub semantic_hash: [u8; 32],
 }
-
-/// A reflection constant has no runtime definition.
-pub const NO_REFLECTION_DEF: u32 = u32::MAX;
 
 /// One decoded module.
 #[derive(Debug, Clone, PartialEq)]
@@ -1574,7 +1559,7 @@ pub struct Module {
     /// The verifier and the VM then read slots, never a source name
     /// and never a definition hash.
     pub core_roles: [u32; CORE_ROLE_COUNT],
-    /// Exact source module surfaces used by `codeof` expressions.
+    /// Exact module providers used by `codeof` expressions.
     pub reflections: Vec<ReflectionModule>,
     pub classes: Vec<BcClass>,
     pub funcs: Vec<Func>,
@@ -2108,7 +2093,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 75;
+pub const VERSION: u16 = 76;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2667,21 +2652,7 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
     write_u32(&mut out, module.reflections.len() as u32);
     for reflection in &module.reflections {
         write_bytes(&mut out, reflection.name.as_bytes());
-        write_u32(&mut out, reflection.declarations.len() as u32);
-        for declaration in &reflection.declarations {
-            out.push(declaration.kind.tag());
-            write_bytes(&mut out, declaration.name.as_bytes());
-            write_u32(&mut out, declaration.def);
-            write_u32(&mut out, declaration.callable);
-            match &declaration.constant {
-                None => out.push(0),
-                Some(constant) => {
-                    out.push(1);
-                    write_u32(&mut out, constant.ty);
-                    interface::encode_const_value(&mut out, &constant.value);
-                }
-            }
-        }
+        out.extend_from_slice(&reflection.semantic_hash);
     }
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
@@ -4386,37 +4357,14 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     let reflection_count = cur.len()?;
     let mut reflections = decode_vec(reflection_count)?;
-    let mut reflection_const_allocation = 0usize;
     for _ in 0..reflection_count {
         let name = cur.string()?;
-        let declaration_count = cur.len()?;
-        let mut declarations = decode_vec(declaration_count)?;
-        for _ in 0..declaration_count {
-            let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
-            let name = cur.string()?;
-            let def = cur.u32()?;
-            let callable = cur.u32()?;
-            let constant = match cur.u8()? {
-                0 => None,
-                1 => Some(Constant {
-                    ty: cur.u32()?,
-                    value: interface::decode_const_value(
-                        &mut cur,
-                        0,
-                        &mut reflection_const_allocation,
-                    )?,
-                }),
-                _ => return Err(DecodeError::BadExport),
-            };
-            declarations.push(ReflectionDeclaration {
-                kind,
-                name,
-                def,
-                callable,
-                constant,
-            });
-        }
-        reflections.push(ReflectionModule { name, declarations });
+        let mut semantic_hash = [0u8; 32];
+        semantic_hash.copy_from_slice(cur.take(32)?);
+        reflections.push(ReflectionModule {
+            name,
+            semantic_hash,
+        });
     }
     let func_count = cur.len()?;
     let mut funcs = decode_vec(func_count)?;
@@ -4482,33 +4430,6 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     if class_bounds.len() != classes.len() || func_bounds.len() != funcs.len() {
         return Err(DecodeError::BadLength);
-    }
-    for reflection in &reflections {
-        for declaration in &reflection.declarations {
-            let valid = match declaration.kind {
-                ExportKind::Function => {
-                    (declaration.def as usize) < funcs.len()
-                        && declaration.callable == declaration.def
-                }
-                ExportKind::Class | ExportKind::Enum => {
-                    (declaration.def as usize) < classes.len()
-                        && (declaration.callable == NO_REFLECTION_DEF
-                            || (declaration.callable as usize) < funcs.len())
-                }
-                ExportKind::Interface => {
-                    (declaration.def as usize) < interfaces.len()
-                        && declaration.callable == NO_REFLECTION_DEF
-                }
-                ExportKind::Constant => {
-                    declaration.def == NO_REFLECTION_DEF
-                        && declaration.callable == NO_REFLECTION_DEF
-                }
-                ExportKind::EnumCase => false,
-            };
-            if !valid {
-                return Err(DecodeError::BadExport);
-            }
-        }
     }
     let entry = cur.u32()?;
     if cur.pos != bytes.len() {
@@ -5098,32 +5019,7 @@ mod tests {
             func_bounds: vec![vec![], vec![]],
             reflections: vec![ReflectionModule {
                 name: "sample".to_string(),
-                declarations: vec![
-                    ReflectionDeclaration {
-                        kind: ExportKind::Function,
-                        name: "main".to_string(),
-                        def: 0,
-                        callable: 0,
-                        constant: None,
-                    },
-                    ReflectionDeclaration {
-                        kind: ExportKind::Class,
-                        name: "Counter".to_string(),
-                        def: 0,
-                        callable: NO_REFLECTION_DEF,
-                        constant: None,
-                    },
-                    ReflectionDeclaration {
-                        kind: ExportKind::Constant,
-                        name: "Answer".to_string(),
-                        def: NO_REFLECTION_DEF,
-                        callable: NO_REFLECTION_DEF,
-                        constant: Some(Constant {
-                            ty: 1,
-                            value: ConstValue::Int(42),
-                        }),
-                    },
-                ],
+                semantic_hash: [7; 32],
             }],
             classes: vec![
                 BcClass {
@@ -5876,19 +5772,22 @@ mod tests {
     }
 
     #[test]
-    fn only_reflected_names_live_in_the_semantic_region() {
+    fn only_reflected_provider_names_live_in_the_semantic_region() {
         let module = sample_module();
         let bytes = encode(&module);
         let at = SECTION_TABLE_AT;
         let sem_at = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
         let sem_len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         let semantic = &bytes[sem_at..sem_at + sem_len];
-        for name in ["sample", "Counter", "main"] {
+        let found = semantic.windows(6).any(|window| window == b"sample");
+        assert!(found, "the semantic region omits the provider name");
+        for name in ["Counter", "main", "Box"] {
             let found = semantic.windows(name.len()).any(|w| w == name.as_bytes());
-            assert!(found, "the semantic region omits the reflected name {name}");
+            assert!(
+                !found,
+                "the semantic region contains the declaration name {name}"
+            );
         }
-        let found = semantic.windows(3).any(|window| window == b"Box");
-        assert!(!found, "the semantic region contains an unreflected name");
     }
 
     #[test]

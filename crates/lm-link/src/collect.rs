@@ -12,7 +12,7 @@ use lm_bytecode::debug::{DebugCodeOrigin, DebugDefinition, DebugFunction, DebugI
 use lm_bytecode::{
     BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceUse, BcRow, BcType, Export,
     ExtendedInstr, Func, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget,
-    TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_REFLECTION_DEF, NO_ROLE,
+    TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_ROLE,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -527,33 +527,6 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
                 graph[offsets.func(constructor) as usize].push(offsets.slot(index as u32));
             }
             None => {}
-        }
-    }
-    for (index, reflection) in module.reflections.iter().enumerate() {
-        let edges = &mut graph[offsets.reflection(index as u32) as usize];
-        for declaration in &reflection.declarations {
-            match declaration.kind {
-                lm_bytecode::ExportKind::Function => {
-                    edges.push(offsets.func(declaration.def));
-                }
-                lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
-                    edges.push(offsets.class(declaration.def));
-                }
-                lm_bytecode::ExportKind::Interface => {
-                    edges.push(offsets.interface(declaration.def));
-                }
-                lm_bytecode::ExportKind::Constant => {
-                    let constant = declaration
-                        .constant
-                        .as_ref()
-                        .expect("the verifier checks reflected constants");
-                    edges.push(offsets.ty(constant.ty));
-                }
-                lm_bytecode::ExportKind::EnumCase => unreachable!("the verifier rejects cases"),
-            }
-            if declaration.callable != NO_REFLECTION_DEF {
-                edges.push(offsets.func(declaration.callable));
-            }
         }
     }
     for roles in lm_bytecode::corepin::ROLE_FAMILIES {
@@ -1535,7 +1508,7 @@ fn relocate_module(
         .collect();
     let slots = retain_table(&module.slots, &reloc.slots, |slot| reloc_slot(slot, reloc));
     let reflections = retain_table(&module.reflections, &reloc.reflections, |reflection| {
-        reloc_reflection(reflection, reloc)
+        reloc_reflection(reflection)
     });
     let imports = if keep_imports {
         module

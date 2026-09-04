@@ -56,8 +56,7 @@
 
 use crate::hash::hash256;
 use crate::{
-    BcClassKind, BcRow, BcType, ExportKind, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT,
-    NO_REFLECTION_DEF, VERSION,
+    BcClassKind, BcRow, BcType, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT, VERSION,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -765,38 +764,6 @@ fn preflight(module: &Module, bundle: &lm_abi::AbiBundle) -> Result<(), Identity
         for block in &func.blocks {
             for instr in block {
                 preflight_instr(module, &s, fidx, instr)?;
-            }
-        }
-    }
-    for (module_index, reflection) in module.reflections.iter().enumerate() {
-        for (declaration_index, declaration) in reflection.declarations.iter().enumerate() {
-            let valid = match declaration.kind {
-                ExportKind::Function => {
-                    (declaration.def as usize) < s.funcs && declaration.callable == declaration.def
-                }
-                ExportKind::Class | ExportKind::Enum => {
-                    (declaration.def as usize) < s.classes
-                        && (declaration.callable == NO_REFLECTION_DEF
-                            || (declaration.callable as usize) < s.funcs)
-                }
-                ExportKind::Interface => {
-                    (declaration.def as usize) < module.interfaces.len()
-                        && declaration.callable == NO_REFLECTION_DEF
-                }
-                ExportKind::Constant => {
-                    declaration.def == NO_REFLECTION_DEF
-                        && declaration.callable == NO_REFLECTION_DEF
-                        && declaration
-                            .constant
-                            .as_ref()
-                            .is_some_and(|constant| (constant.ty as usize) < s.types)
-                }
-                ExportKind::EnumCase => false,
-            };
-            if !valid {
-                return Err(fail(format!(
-                    "reflection module {module_index}: declaration {declaration_index} is invalid"
-                )));
             }
         }
     }
@@ -1529,36 +1496,6 @@ impl Graph {
                             ExtendedInstr::ReflectionEnd { pattern, .. } => {
                                 list.push(s.func_node(*pattern));
                             }
-                            ExtendedInstr::ModuleCode { module: reflection } => {
-                                for declaration in
-                                    &module.reflections[*reflection as usize].declarations
-                                {
-                                    match declaration.kind {
-                                        ExportKind::Function => {
-                                            list.push(s.func_node(declaration.def));
-                                            called[declaration.def as usize] = true;
-                                        }
-                                        ExportKind::Class | ExportKind::Enum => {
-                                            list.push(s.class_node(declaration.def));
-                                            if declaration.callable != NO_REFLECTION_DEF {
-                                                list.push(s.func_node(declaration.callable));
-                                                called[declaration.callable as usize] = true;
-                                            }
-                                        }
-                                        ExportKind::Constant => {
-                                            let constant = declaration
-                                                .constant
-                                                .as_ref()
-                                                .expect("preflight checks reflected constants");
-                                            list.push(s.type_node(constant.ty));
-                                        }
-                                        ExportKind::Interface => {}
-                                        ExportKind::EnumCase => {
-                                            unreachable!("preflight rejects reflected enum cases")
-                                        }
-                                    }
-                                }
-                            }
                             ExtendedInstr::OptionSome { ty }
                             | ExtendedInstr::OptionNone { ty }
                             | ExtendedInstr::OptionPayload { ty }
@@ -1792,15 +1729,6 @@ impl<'a> Resolver<'a> {
     /// so it never reads a class hash and never makes a cycle.
     fn class_key(&self, c: u32) -> &str {
         &self.module.classes[c as usize].key
-    }
-
-    fn class_ident(&self, c: u32) -> IdentRef {
-        let node = self.graph.space.class_node(c);
-        if self.in_comp(node) {
-            self.member_ref(node)
-        } else {
-            IdentRef::Hash(self.state.class_hash[c as usize].expect("class hash scheduled"))
-        }
     }
 
     fn interface_key(&self, interface: u32) -> &str {
@@ -2988,44 +2916,7 @@ impl<'a> Resolver<'a> {
     fn reflection_module_bytes(&self, out: &mut Vec<u8>, module: u32) {
         let reflection = &self.module.reflections[module as usize];
         write_str(out, &reflection.name);
-        out.extend_from_slice(&(reflection.declarations.len() as u32).to_le_bytes());
-        for declaration in &reflection.declarations {
-            out.push(declaration.kind.tag());
-            write_str(out, &declaration.name);
-            match declaration.kind {
-                ExportKind::Function => {
-                    write_ident(out, &self.func_ident(declaration.def));
-                }
-                ExportKind::Class | ExportKind::Enum => {
-                    write_str(out, self.class_key(declaration.def));
-                    write_ident(out, &self.class_ident(declaration.def));
-                    if declaration.callable == NO_REFLECTION_DEF {
-                        out.push(0);
-                    } else {
-                        out.push(1);
-                        write_ident(out, &self.func_ident(declaration.callable));
-                    }
-                }
-                ExportKind::Interface => {
-                    let digest = match self.interface_hashes {
-                        Some(hashes) => hashes[declaration.def as usize],
-                        None => self.interface_digest(declaration.def),
-                    };
-                    out.extend_from_slice(&digest);
-                }
-                ExportKind::Constant => {
-                    let constant = declaration
-                        .constant
-                        .as_ref()
-                        .expect("preflight checks reflected constants");
-                    out.extend_from_slice(&self.type_digest(constant.ty));
-                    crate::interface::encode_const_value(out, &constant.value);
-                }
-                ExportKind::EnumCase => {
-                    unreachable!("preflight rejects reflected enum cases")
-                }
-            }
-        }
+        out.extend_from_slice(&reflection.semantic_hash);
     }
 
     /// Write the stable key and immutable contract of one VM slot.

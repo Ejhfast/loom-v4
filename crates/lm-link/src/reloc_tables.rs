@@ -3,8 +3,8 @@
 use crate::env::{fail, LinkError};
 use lm_bytecode::{
     BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, CodeTables, ExtendedInstr, Func, Instr, ReflectionDeclaration,
-    ReflectionModule, SlotContract, SlotSpec, SlotTarget, NO_PARENT, NO_REFLECTION_DEF,
+    BcInterfaceUse, BcRow, BcType, CodeTables, ExtendedInstr, Func, Instr, ReflectionModule,
+    SlotContract, SlotSpec, SlotTarget, NO_PARENT,
 };
 
 /// One module's table relocation maps.
@@ -157,44 +157,10 @@ pub(crate) fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget
     }
 }
 
-pub(crate) fn reloc_reflection(source: &ReflectionModule, reloc: &Reloc) -> ReflectionModule {
+pub(crate) fn reloc_reflection(source: &ReflectionModule) -> ReflectionModule {
     ReflectionModule {
         name: source.name.clone(),
-        declarations: source
-            .declarations
-            .iter()
-            .map(|declaration| {
-                let def = match declaration.kind {
-                    lm_bytecode::ExportKind::Function => reloc.funcs[declaration.def as usize],
-                    lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
-                        reloc.classes[declaration.def as usize]
-                    }
-                    lm_bytecode::ExportKind::Interface => {
-                        reloc.interfaces[declaration.def as usize]
-                    }
-                    lm_bytecode::ExportKind::Constant => NO_REFLECTION_DEF,
-                    lm_bytecode::ExportKind::EnumCase => unreachable!("the verifier rejects cases"),
-                };
-                let callable = if declaration.callable == NO_REFLECTION_DEF {
-                    NO_REFLECTION_DEF
-                } else {
-                    reloc.funcs[declaration.callable as usize]
-                };
-                ReflectionDeclaration {
-                    kind: declaration.kind,
-                    name: declaration.name.clone(),
-                    def,
-                    callable,
-                    constant: declaration
-                        .constant
-                        .as_ref()
-                        .map(|constant| lm_bytecode::Constant {
-                            ty: reloc.types[constant.ty as usize],
-                            value: constant.value.clone(),
-                        }),
-                }
-            })
-            .collect(),
+        semantic_hash: source.semantic_hash,
     }
 }
 
