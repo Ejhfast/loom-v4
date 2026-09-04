@@ -4,7 +4,10 @@
 //! installation, typed lookup, activation, and slot replacement.
 
 use super::*;
-use lm_heap::{CodeHandleKind, LinkedCode, LinkedCodeKind, PortableCode, PortableCodeKind};
+use lm_heap::{
+    CodeArtifact, CodeHandleKind, LinkedCode, LinkedCodeKind, PortableCode, PortableCodeKind,
+    PortableCodeStorage,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy)]
@@ -373,7 +376,7 @@ impl World {
         };
         let object = Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::Artifact,
-            bytes,
+            storage: PortableCodeStorage::Bytes(bytes),
             slot: None,
             origin: None,
         }));
@@ -391,8 +394,17 @@ impl World {
                 return;
             }
         };
+        let Some(bytes) = code.bytes().cloned() else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the artifact has no bytes",
+            );
+            return;
+        };
         let verified = lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
+            bytes.as_slice(),
             self.code_of(vm).bundle(),
             lm_bytecode::artifact::ArtifactLimits::default(),
         )
@@ -407,14 +419,17 @@ impl World {
                         )
                     })?;
             }
-            Ok(())
+            Ok(artifact)
         });
         match verified {
-            Ok(()) => {
+            Ok(artifact) => {
                 let value =
                     self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
                         kind: PortableCodeKind::VerifiedModule,
-                        bytes: code.bytes,
+                        storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                            std::sync::Arc::new(artifact),
+                            bytes,
+                        )),
                         slot: None,
                         origin: None,
                     })));
@@ -436,20 +451,9 @@ impl World {
                 return;
             }
         };
-        let artifact = match lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(artifact) = code.artifact().cloned() else {
+            self.finish_code_error(vm, op, "the verified module has no decoded artifact");
+            return;
         };
         let Some(key) = self
             .machines
@@ -498,20 +502,10 @@ impl World {
                 }
             }
         }
-        let Some(module) = value.as_obj() else {
-            self.fault_caller(
-                vm,
-                op,
-                FaultCode::MalformedState,
-                "the verified module has no object reference",
-            );
-            return;
-        };
         let linked_value =
             self.machines[vm as usize].alloc(Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind: LinkedCodeKind::Module,
                 unit: root.into_bytes(),
-                module,
                 descriptor: None,
             })));
         let success = linked_value.and_then(|linked_value| self.code_ok(vm, linked_value));
@@ -553,20 +547,9 @@ impl World {
                 return;
             }
         };
-        let artifact = match lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(artifact) = code.artifact().cloned() else {
+            self.finish_code_error(vm, op, "the verified module has no decoded artifact");
+            return;
         };
         let entry = artifact.root().module().entry;
         self.finish_portable_function_lookup(vm, op, artifact, entry, None);
@@ -583,20 +566,9 @@ impl World {
         let Some(name) = self.code_name(vm, op, name, "function") else {
             return;
         };
-        let artifact = match lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(artifact) = code.artifact().cloned() else {
+            self.finish_code_error(vm, op, "the verified module has no decoded artifact");
+            return;
         };
         let module = artifact.root().module();
         let function = module.exports.iter().find_map(|export| {
@@ -630,20 +602,9 @@ impl World {
         let Some(name) = self.code_name(vm, op, name, "class") else {
             return;
         };
-        let artifact = match lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(artifact) => artifact,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the verified module did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(artifact) = code.artifact().cloned() else {
+            self.finish_code_error(vm, op, "the verified module has no decoded artifact");
+            return;
         };
         let module = artifact.root().module();
         let class = module.exports.iter().find_map(|export| {
@@ -671,12 +632,13 @@ impl World {
             lm_link::DefinitionSelection::Class(class),
             &bundle,
         );
-        let bytes = selected.and_then(|artifact| {
-            lm_bytecode::artifact::encode_with_bundle(&artifact, &bundle)
-                .map_err(|error| lm_link::LinkError(error.to_string()))
+        let selected = selected.and_then(|artifact| {
+            let bytes = lm_bytecode::artifact::encode_with_bundle(&artifact, &bundle)
+                .map_err(|error| lm_link::LinkError(error.to_string()))?;
+            Ok((artifact, bytes))
         });
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
+        let (artifact, bytes) = match selected {
+            Ok(selected) => selected,
             Err(error) => {
                 self.finish_code_error(vm, op, &error.to_string());
                 return;
@@ -684,7 +646,10 @@ impl World {
         };
         let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::Class,
-            bytes: bytes.into(),
+            storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                std::sync::Arc::new(artifact),
+                bytes.into(),
+            )),
             slot: None,
             origin,
         })));
@@ -748,20 +713,9 @@ impl World {
                 return;
             }
         };
-        let source_artifact = match lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(source) => source,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the portable code did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(source_artifact) = code.artifact().cloned() else {
+            self.finish_code_error(vm, op, "the portable code has no decoded artifact");
+            return;
         };
         let source = source_artifact.root().module();
         let source_index = portable_definition_index(source, code.kind);
@@ -1021,7 +975,10 @@ impl World {
             .map_err(|error| format!("the portable artifact did not encode: {error}"))?;
         Ok(PortableCode {
             kind: PortableCodeKind::Function,
-            bytes: bytes.into(),
+            storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                std::sync::Arc::new(artifact),
+                bytes.into(),
+            )),
             slot: None,
             origin,
         })
@@ -1042,7 +999,10 @@ impl World {
             .map_err(|error| format!("the portable artifact did not encode: {error}"))?;
         Ok(PortableCode {
             kind: PortableCodeKind::Class,
-            bytes: bytes.into(),
+            storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                std::sync::Arc::new(artifact),
+                bytes.into(),
+            )),
             slot: None,
             origin,
         })
@@ -1399,7 +1359,7 @@ impl World {
         };
         let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::SlotSpec,
-            bytes,
+            storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(artifact, bytes)),
             slot: Some(index),
             origin: None,
         })));
@@ -1555,11 +1515,12 @@ impl World {
                     &bundle,
                 )
                 .and_then(|artifact| {
-                    lm_bytecode::artifact::encode_with_bundle(&artifact, &bundle)
-                        .map_err(|error| lm_link::LinkError(error.to_string()))
+                    let bytes = lm_bytecode::artifact::encode_with_bundle(&artifact, &bundle)
+                        .map_err(|error| lm_link::LinkError(error.to_string()))?;
+                    Ok((artifact, bytes))
                 });
-                let bytes = match selected {
-                    Ok(bytes) => bytes,
+                let (artifact, bytes) = match selected {
+                    Ok(selected) => selected,
                     Err(error) => {
                         self.finish_code_error(vm, op, &error.to_string());
                         return;
@@ -1568,7 +1529,10 @@ impl World {
                 let value =
                     self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
                         kind: PortableCodeKind::Function,
-                        bytes: bytes.into(),
+                        storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                            std::sync::Arc::new(artifact),
+                            bytes.into(),
+                        )),
                         slot: None,
                         origin,
                     })));
@@ -1678,7 +1642,10 @@ impl World {
         };
         let value = self.machines[vm as usize].alloc(Object::NativeCode(Box::new(PortableCode {
             kind: PortableCodeKind::SlotSpec,
-            bytes: artifact_bytes,
+            storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                artifact,
+                artifact_bytes,
+            )),
             slot: Some(index),
             origin: None,
         })));
@@ -1701,20 +1668,9 @@ impl World {
                 return;
             }
         };
-        let source_artifact = match lm_bytecode::artifact::decode_with_bundle(
-            portable.bytes.as_slice(),
-            self.code_of(vm).bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        ) {
-            Ok(source) => source,
-            Err(error) => {
-                self.finish_code_error(
-                    vm,
-                    op,
-                    &format!("the slot specification did not decode: {error}"),
-                );
-                return;
-            }
+        let Some(source_artifact) = portable.artifact() else {
+            self.finish_code_error(vm, op, "the slot specification has no decoded artifact");
+            return;
         };
         let source_unit = source_artifact.root();
         let source = source_unit.module();

@@ -1,12 +1,13 @@
 //! Runtime operations for exact reflection descriptors.
 
 use super::*;
-use lm_bytecode::artifact::{Artifact, ArtifactId, ArtifactLimits};
+use lm_bytecode::artifact::{Artifact, ArtifactId};
 use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnv};
 use lm_bytecode::interface::{ExportEntry, IfaceItem};
 use lm_bytecode::{BcRow, BcType, ConstValue, Constant, Export, ExportKind, ReflectionKind};
 use lm_heap::{
-    CodeDescriptor, CodeDescriptorKind, LinkedCode, LinkedCodeKind, PortableCode, PortableCodeKind,
+    CodeArtifact, CodeDescriptor, CodeDescriptorKind, LinkedCode, LinkedCodeKind, PortableCode,
+    PortableCodeKind, PortableCodeStorage,
 };
 use std::collections::HashSet;
 
@@ -44,28 +45,11 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let source = reflection_source(module, reflection)?;
         let unit = source.unit.id();
-        let artifact = module
-            .code_namespace()
-            .unit_artifact(unit)
-            .map_err(|_| BAD_STATE)?;
-        let bytes = lm_bytecode::artifact::encode_with_bundle(&artifact, module.bundle())
-            .map_err(|_| BAD_STATE)?;
-        let portable = self.alloc(Object::NativeCode(Box::new(PortableCode {
-            kind: PortableCodeKind::VerifiedModule,
-            bytes: bytes.into(),
-            slot: None,
-            origin: None,
+        let value = self.alloc(Object::NativeLinkedCode(Box::new(LinkedCode {
+            kind: LinkedCodeKind::Module,
+            unit: unit.into_bytes(),
+            descriptor: None,
         })))?;
-        let portable_ref = portable.as_obj().ok_or(BAD_STATE)?;
-        let value = self.alloc_with_roots(
-            Object::NativeLinkedCode(Box::new(LinkedCode {
-                kind: LinkedCodeKind::Module,
-                unit: unit.into_bytes(),
-                module: portable_ref,
-                descriptor: None,
-            })),
-            &[portable],
-        )?;
         self.push(value)
     }
 
@@ -75,9 +59,9 @@ impl Machine {
         module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
         let module_value = self.pop()?;
-        let module_ref = self.description_module_ref(module_value)?;
-        let artifact = self.description_artifact(module, module_ref)?;
+        let artifact = self.description_artifact(module, module_value)?;
         let declarations: Vec<u32> = artifact
+            .artifact()
             .root()
             .interface()
             .exports
@@ -90,7 +74,7 @@ impl Machine {
         for declaration in declarations {
             let value = self.alloc(Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind: CodeDescriptorKind::Declaration,
-                module: Value::Obj(module_ref),
+                artifact: artifact.clone(),
                 declaration,
                 member: None,
             })))?;
@@ -123,7 +107,6 @@ impl Machine {
         let value = self.alloc(Object::NativeLinkedCode(Box::new(LinkedCode {
             kind: LinkedCodeKind::Open,
             unit: linked.unit,
-            module: linked.module,
             descriptor: Some(descriptor),
         })))?;
         self.push(value)
@@ -132,13 +115,12 @@ impl Machine {
     /// Replace one declaration descriptor with its effective methods.
     pub(super) fn exec_reflection_members(
         &mut self,
-        module: &NamespaceRuntime,
+        _module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
-        let artifact = self.description_artifact(module, module_ref)?;
-        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
+        let artifact = descriptor.artifact.artifact();
+        let declaration = portable_declaration_source(artifact, descriptor.declaration as usize)?;
         let base = self.vm.operands.len();
         if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
             return self.finish_reflection_list(base);
@@ -167,7 +149,7 @@ impl Machine {
         for member in methods {
             let value = self.alloc(Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind: CodeDescriptorKind::Member,
-                module: descriptor.module,
+                artifact: descriptor.artifact.clone(),
                 declaration: descriptor.declaration,
                 member: Some(member),
             })))?;
@@ -190,23 +172,25 @@ impl Machine {
             Object::NativeLinkedCode(linked)
                 if linked.kind == LinkedCodeKind::Module && linked.descriptor.is_none() =>
             {
-                let artifact = self.description_artifact(module, linked.module)?;
-                artifact.root().module_path().to_string()
+                let unit = ArtifactId::from_bytes(linked.unit);
+                linked_source(module, unit)
+                    .ok_or(BAD_STATE)?
+                    .unit
+                    .module_path()
+                    .to_string()
             }
             Object::NativeCode(code) if code.kind == PortableCodeKind::VerifiedModule => {
-                let artifact = self.description_artifact(module, reference)?;
+                let artifact = code.artifact().ok_or(BAD_STATE)?;
                 artifact.root().module_path().to_string()
             }
             Object::NativeCodeDescriptor(descriptor) => match descriptor.kind {
-                CodeDescriptorKind::Declaration => {
-                    let descriptor = (**descriptor).clone();
-                    let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
-                    let artifact = self.description_artifact(module, module_ref)?;
-                    portable_declaration_source(&artifact, descriptor.declaration as usize)?
-                        .entry
-                        .name
-                        .clone()
-                }
+                CodeDescriptorKind::Declaration => portable_declaration_source(
+                    descriptor.artifact.artifact(),
+                    descriptor.declaration as usize,
+                )?
+                .entry
+                .name
+                .clone(),
                 CodeDescriptorKind::Member => descriptor.member.clone().ok_or(BAD_STATE)?,
             },
             _ => return Err(BAD_TYPE),
@@ -222,12 +206,13 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
-        let artifact = self.description_artifact(module, module_ref)?;
         let role = declaration_kind_role(
-            portable_declaration_source(&artifact, descriptor.declaration as usize)?
-                .entry
-                .kind,
+            portable_declaration_source(
+                descriptor.artifact.artifact(),
+                descriptor.declaration as usize,
+            )?
+            .entry
+            .kind,
         );
         self.push_reflection_kind(module, role)
     }
@@ -245,13 +230,14 @@ impl Machine {
     /// Replace one declaration descriptor with its generic arity.
     pub(super) fn exec_reflection_type_parameter_count(
         &mut self,
-        module: &NamespaceRuntime,
+        _module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
-        let artifact = self.description_artifact(module, module_ref)?;
-        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
+        let declaration = portable_declaration_source(
+            descriptor.artifact.artifact(),
+            descriptor.declaration as usize,
+        )?;
         let count = match &declaration.entry.item {
             IfaceItem::Class(class) => class.type_params,
             IfaceItem::Func(_) | IfaceItem::Interface(_) | IfaceItem::Const(_) => 0,
@@ -262,13 +248,14 @@ impl Machine {
     /// Replace one declaration descriptor with direct interface names.
     pub(super) fn exec_reflection_interface_names(
         &mut self,
-        module: &NamespaceRuntime,
+        _module: &NamespaceRuntime,
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
-        let artifact = self.description_artifact(module, module_ref)?;
-        let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
+        let declaration = portable_declaration_source(
+            descriptor.artifact.artifact(),
+            descriptor.declaration as usize,
+        )?;
         let base = self.vm.operands.len();
         let IfaceItem::Class(class) = &declaration.entry.item else {
             return self.finish_reflection_list(base);
@@ -346,13 +333,12 @@ impl Machine {
         let Some(source) = linked_source(module, unit_id) else {
             return Ok(None);
         };
-        let module_ref = open.descriptor.module.as_obj().ok_or(BAD_STATE)?;
-        let artifact = self.description_artifact(module, module_ref)?;
+        let artifact = open.descriptor.artifact.artifact();
         if artifact.id() != unit_id {
             return Ok(None);
         }
         let declaration =
-            portable_declaration_source(&artifact, open.descriptor.declaration as usize)?;
+            portable_declaration_source(artifact, open.descriptor.declaration as usize)?;
         if !matches!(kind, ReflectionKind::Method | ReflectionKind::Code)
             && open.descriptor.kind != CodeDescriptorKind::Declaration
         {
@@ -625,7 +611,10 @@ impl Machine {
                     .map_err(|_| BAD_STATE)?;
                 self.alloc(Object::NativeCode(Box::new(PortableCode {
                     kind: PortableCodeKind::Function,
-                    bytes: bytes.into(),
+                    storage: PortableCodeStorage::Verified(CodeArtifact::with_bytes(
+                        std::sync::Arc::new(artifact),
+                        bytes.into(),
+                    )),
                     slot: None,
                     origin: None,
                 })))
@@ -679,38 +668,25 @@ impl Machine {
         }
     }
 
-    fn description_module_ref(&self, value: Value) -> Result<ObjRef, FaultCode> {
+    fn description_artifact(
+        &self,
+        module: &NamespaceRuntime,
+        value: Value,
+    ) -> Result<CodeArtifact, FaultCode> {
         let reference = value.as_obj().ok_or(BAD_TYPE)?;
         match self.vm.heap.get(reference) {
             Object::NativeCode(code) if code.kind == PortableCodeKind::VerifiedModule => {
-                Ok(reference)
+                code.artifact_store().ok_or(BAD_STATE)
             }
             Object::NativeLinkedCode(linked)
                 if linked.kind == LinkedCodeKind::Module && linked.descriptor.is_none() =>
             {
-                Ok(linked.module)
+                let unit = ArtifactId::from_bytes(linked.unit);
+                let artifact = module.description_artifact(unit)?;
+                Ok(CodeArtifact::new(artifact, 0))
             }
             _ => Err(BAD_TYPE),
         }
-    }
-
-    fn description_artifact(
-        &self,
-        module: &NamespaceRuntime,
-        reference: ObjRef,
-    ) -> Result<Artifact, FaultCode> {
-        let Object::NativeCode(code) = self.vm.heap.get(reference) else {
-            return Err(BAD_TYPE);
-        };
-        if code.kind != PortableCodeKind::VerifiedModule {
-            return Err(BAD_TYPE);
-        }
-        lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            module.bundle(),
-            ArtifactLimits::default(),
-        )
-        .map_err(|_| BAD_STATE)
     }
 
     fn code_descriptor(
@@ -740,15 +716,17 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let linked_artifact = self.description_artifact(module, linked.module)?;
-        if linked_artifact.id().into_bytes() != linked.unit {
-            return Err(BAD_STATE);
-        }
         let descriptor = linked.descriptor.ok_or(BAD_STATE)?;
         let descriptor = match self.vm.heap.get(descriptor) {
             Object::NativeCodeDescriptor(descriptor) => (**descriptor).clone(),
             _ => return Err(BAD_TYPE),
         };
+        if descriptor.artifact.artifact().id().into_bytes() != linked.unit {
+            return Err(BAD_STATE);
+        }
+        if linked_source(module, ArtifactId::from_bytes(linked.unit)).is_none() {
+            return Err(BAD_STATE);
+        }
         Ok(OpenDescriptor { linked, descriptor })
     }
 

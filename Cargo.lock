@@ -494,6 +494,7 @@ name = "lm-heap"
 version = "0.1.0"
 dependencies = [
  "lm-abi",
+ "lm-bytecode",
  "lm-regex",
  "lm-value",
 ]

@@ -38,9 +38,9 @@ use lm_bytecode::identity::{ModuleIdentity, COMPILER_ABI_VERSION};
 use lm_bytecode::{BcType, ExtendedInstr, Instr, SlotContract};
 use lm_heap::{
     CodeDescriptor, CodeDescriptorKind, CodeHandleKind, LinkedCode, LinkedCodeKind, Object,
-    PortableCodeKind,
+    PortableCode, PortableCodeKind, PortableCodeStorage,
 };
-use lm_value::{ObjRef, Value};
+use lm_value::Value;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
@@ -688,32 +688,23 @@ impl Admit<'_> {
     }
 
     /// Prove one portable code value before restore can expose it.
-    fn check_portable_code(
-        &self,
-        kind: PortableCodeKind,
-        bytes: &[u8],
-        slot: Option<u32>,
-        origin: Option<[u8; 32]>,
-    ) -> Result<(), ImageError> {
-        if kind == PortableCodeKind::Artifact {
-            if slot.is_some() || origin.is_some() {
+    fn check_portable_code(&self, code: &PortableCode) -> Result<(), ImageError> {
+        if code.kind == PortableCodeKind::Artifact {
+            if code.slot.is_some() || code.origin.is_some() {
                 return fail(
                     ImageReason::Code,
                     "an artifact value carries a selected code view",
                 );
             }
-            return Ok(());
+            return match &code.storage {
+                PortableCodeStorage::Bytes(_) => Ok(()),
+                PortableCodeStorage::Verified(_) => {
+                    fail(ImageReason::Code, "an artifact value has verified storage")
+                }
+            };
         }
-        let artifact = lm_bytecode::artifact::decode_with_bundle(
-            bytes,
-            self.bundle,
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        )
-        .map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("a portable code value did not decode: {error}"),
-            )
+        let artifact = code.artifact().ok_or_else(|| {
+            ImageError::admission(ImageReason::Code, "verified code has unverified storage")
         })?;
         for unit in artifact.units() {
             lm_verify::verify_module_with_bundle(unit.module(), self.bundle).map_err(|error| {
@@ -727,8 +718,8 @@ impl Admit<'_> {
             })?;
         }
         let module = artifact.root().module();
-        let selected = match kind {
-            PortableCodeKind::SlotSpec => match slot {
+        let selected = match code.kind {
+            PortableCodeKind::SlotSpec => match code.slot {
                 Some(index) if (index as usize) < module.slots.len() => Some(index),
                 _ => {
                     return fail(
@@ -741,21 +732,23 @@ impl Admit<'_> {
             PortableCodeKind::Class => sole_export(module, true),
             PortableCodeKind::Artifact | PortableCodeKind::VerifiedModule => None,
         };
-        if matches!(kind, PortableCodeKind::Function | PortableCodeKind::Class)
-            && selected.is_none()
+        if matches!(
+            code.kind,
+            PortableCodeKind::Function | PortableCodeKind::Class
+        ) && selected.is_none()
         {
             return fail(
                 ImageReason::Code,
                 "a portable definition artifact has no sole root export",
             );
         }
-        if kind != PortableCodeKind::SlotSpec && slot.is_some() {
+        if code.kind != PortableCodeKind::SlotSpec && code.slot.is_some() {
             return fail(
                 ImageReason::Code,
                 "a portable code value carries an unexpected slot selection",
             );
         }
-        if let Some(origin) = origin {
+        if let Some(origin) = code.origin {
             let debug = lm_bytecode::debug::decode(&module.debug).map_err(|error| {
                 ImageError::admission(
                     ImageReason::Code,
@@ -764,7 +757,7 @@ impl Admit<'_> {
             })?;
             let matches = debug.definitions.iter().any(|definition| {
                 definition.origin == origin
-                    && match kind {
+                    && match code.kind {
                         PortableCodeKind::Function => {
                             definition.kind == lm_bytecode::debug::DefinitionKind::Function
                                 && Some(definition.target) == selected
@@ -786,59 +779,24 @@ impl Admit<'_> {
         Ok(())
     }
 
-    /// Read one verified module from a portable heap object.
-    fn verified_module_artifact(
-        &self,
-        objects: &[super::ImageObject],
-        reference: ObjRef,
-        location: &str,
-    ) -> Result<lm_bytecode::artifact::Artifact, ImageError> {
-        let Some(entry) = objects.get(reference.slot as usize) else {
-            return fail(
-                ImageReason::Reference,
-                format!("{location} names no verified module object"),
-            );
-        };
-        let Object::NativeCode(code) = &entry.object else {
-            return fail(
-                ImageReason::Code,
-                format!("{location} does not name a verified module"),
-            );
-        };
-        if code.kind != PortableCodeKind::VerifiedModule {
-            return fail(
-                ImageReason::Code,
-                format!("{location} does not name a verified module"),
-            );
-        }
-        self.check_portable_code(code.kind, code.bytes.as_slice(), code.slot, code.origin)?;
-        lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.bundle,
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        )
-        .map_err(|error| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("{location} has invalid module code: {error}"),
-            )
-        })
-    }
-
     /// Prove one inert code descriptor.
     fn check_code_descriptor(
         &self,
-        objects: &[super::ImageObject],
         descriptor: &CodeDescriptor,
         location: &str,
     ) -> Result<(), ImageError> {
-        let module = descriptor.module.as_obj().ok_or_else(|| {
-            ImageError::admission(
-                ImageReason::Code,
-                format!("{location} has no verified module"),
-            )
-        })?;
-        let artifact = self.verified_module_artifact(objects, module, location)?;
+        let artifact = descriptor.artifact.artifact();
+        for unit in artifact.units() {
+            lm_verify::verify_module_with_bundle(unit.module(), self.bundle).map_err(|error| {
+                ImageError::admission(
+                    ImageReason::Code,
+                    format!(
+                        "{location} module `{}` did not verify: {error}",
+                        unit.module_path()
+                    ),
+                )
+            })?;
+        }
         let unit = artifact.root();
         let declaration = descriptor.declaration as usize;
         let Some(entry) = unit
@@ -918,14 +876,7 @@ impl Admit<'_> {
         linked: &LinkedCode,
         location: &str,
     ) -> Result<(), ImageError> {
-        let artifact = self.verified_module_artifact(objects, linked.module, location)?;
         let unit = lm_bytecode::artifact::ArtifactId::from_bytes(linked.unit);
-        if artifact.id() != unit {
-            return fail(
-                ImageReason::Code,
-                format!("{location} has a different linked unit"),
-            );
-        }
         let code = namespace.code_namespace();
         if code.unit(unit).is_none() || code.relocation(unit).is_none() {
             return fail(
@@ -936,18 +887,19 @@ impl Admit<'_> {
         match (linked.kind, linked.descriptor) {
             (LinkedCodeKind::Module, None) => Ok(()),
             (LinkedCodeKind::Open, Some(descriptor)) => {
-                if matches!(
-                    objects
-                        .get(descriptor.slot as usize)
-                        .map(|entry| &entry.object),
-                    Some(Object::NativeCodeDescriptor(_))
-                ) {
-                    Ok(())
-                } else {
-                    fail(
+                match objects
+                    .get(descriptor.slot as usize)
+                    .map(|entry| &entry.object)
+                {
+                    Some(Object::NativeCodeDescriptor(descriptor))
+                        if descriptor.artifact.artifact().id() == unit =>
+                    {
+                        Ok(())
+                    }
+                    _ => fail(
                         ImageReason::Code,
                         format!("{location} has an invalid opened descriptor"),
-                    )
+                    ),
                 }
             }
             (LinkedCodeKind::Module, Some(_)) => fail(
@@ -1225,19 +1177,10 @@ impl Admit<'_> {
                     self.env_of(env.env().0)?;
                 }
                 Object::NativeCode(code) => {
-                    self.check_portable_code(
-                        code.kind,
-                        code.bytes.as_slice(),
-                        code.slot,
-                        code.origin,
-                    )?;
+                    self.check_portable_code(code)?;
                 }
                 Object::NativeCodeDescriptor(descriptor) => {
-                    self.check_code_descriptor(
-                        &record.objects,
-                        descriptor,
-                        &at(&format!("object {ordinal}")),
-                    )?;
+                    self.check_code_descriptor(descriptor, &at(&format!("object {ordinal}")))?;
                 }
                 _ => {}
             }
@@ -1682,14 +1625,10 @@ impl Admit<'_> {
                 }
             }
             if let Object::NativeCode(code) = &entry.object {
-                self.check_portable_code(code.kind, code.bytes.as_slice(), code.slot, code.origin)?;
+                self.check_portable_code(code)?;
             }
             if let Object::NativeCodeDescriptor(descriptor) = &entry.object {
-                self.check_code_descriptor(
-                    &m.objects,
-                    descriptor,
-                    &at(&format!("object {ordinal}")),
-                )?;
+                self.check_code_descriptor(descriptor, &at(&format!("object {ordinal}")))?;
             }
             if let Object::NativeLinkedCode(linked) = &entry.object {
                 self.check_linked_code(

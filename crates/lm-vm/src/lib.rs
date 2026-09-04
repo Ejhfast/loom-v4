@@ -206,6 +206,14 @@ pub(crate) struct NamespaceRuntime {
     /// Functions that verified code can construct as closures.
     closure_bodies: std::sync::Arc<std::sync::OnceLock<Vec<bool>>>,
     regex_literals: std::sync::Arc<Vec<Option<lm_regex::Regex>>>,
+    description_artifacts: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<
+                lm_bytecode::artifact::ArtifactId,
+                std::sync::Arc<lm_bytecode::artifact::Artifact>,
+            >,
+        >,
+    >,
     core: lm_bytecode::corepin::CoreLayout,
     pub(crate) core_roles: [u32; lm_bytecode::CORE_ROLE_COUNT],
     pub(crate) entry: u32,
@@ -277,6 +285,7 @@ impl NamespaceRuntime {
             dispatch: tables.dispatch.clone(),
             closure_bodies: tables.closure_bodies.clone(),
             regex_literals: tables.regex_literals.clone(),
+            description_artifacts: self.description_artifacts.clone(),
             core: self.core,
             core_roles: self.core_roles,
             entry: self.entry,
@@ -292,6 +301,27 @@ impl NamespaceRuntime {
 
     pub(crate) fn table_store(&self) -> std::sync::Arc<CodeTables> {
         self.tables.clone()
+    }
+
+    /// Return one cached artifact for a linked reflection provider.
+    pub(crate) fn description_artifact(
+        &self,
+        unit: lm_bytecode::artifact::ArtifactId,
+    ) -> Result<std::sync::Arc<lm_bytecode::artifact::Artifact>, FaultCode> {
+        let mut artifacts = self
+            .description_artifacts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(artifact) = artifacts.get(&unit) {
+            return Ok(artifact.clone());
+        }
+        let artifact = std::sync::Arc::new(
+            self.code
+                .unit_artifact(unit)
+                .map_err(|_| FaultCode::MalformedState)?,
+        );
+        artifacts.insert(unit, artifact.clone());
+        Ok(artifact)
     }
 
     /// Return the immutable ABI bundle used to verify this module.
@@ -375,6 +405,9 @@ fn prepare_namespace(code: std::sync::Arc<lm_link::CodeNamespace>) -> NamespaceR
         dispatch,
         closure_bodies: code.closure_body_store(),
         regex_literals: std::sync::Arc::new(regex_literals),
+        description_artifacts: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::BTreeMap::new(),
+        )),
         core,
         core_roles,
         entry: code.entry(),

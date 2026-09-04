@@ -220,7 +220,7 @@ impl World {
                 self.machines[vm as usize].alloc(Object::NativeCode(Box::new(
                     lm_heap::PortableCode {
                         kind: lm_heap::PortableCodeKind::Artifact,
-                        bytes: artifact.clone(),
+                        storage: lm_heap::PortableCodeStorage::Bytes(artifact.clone()),
                         slot: None,
                         origin: None,
                     },

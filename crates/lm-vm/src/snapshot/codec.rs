@@ -35,12 +35,15 @@ use lm_abi::FaultCode;
 use lm_bytecode::closed::{ClosedRow, ClosedType, TypeEnv};
 use lm_bytecode::identity::COMPILER_ABI_VERSION;
 use lm_heap::{
-    CodeDescriptor, CodeDescriptorKind, CodeHandleKind, FaultSite, LinkedCode, LinkedCodeKind,
-    MapEntry, MapIndex, NativeByteBuffer, NativeRegexMatch, NativeStringBuilder, Object,
-    PortableCode, PortableCodeKind, RegexCaptureRange, SlotChangeKind, StructuralEpoch,
+    CodeArtifact, CodeDescriptor, CodeDescriptorKind, CodeHandleKind, FaultSite, LinkedCode,
+    LinkedCodeKind, MapEntry, MapIndex, NativeByteBuffer, NativeRegexMatch, NativeStringBuilder,
+    Object, PortableCode, PortableCodeKind, PortableCodeStorage, RegexCaptureRange, SlotChangeKind,
+    StructuralEpoch,
 };
 use lm_value::{CallbackRef, ObjRef, TypeEnvId, Value, Witness};
 use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// One aggregate allocation ledger for a decoded container.
 #[derive(Debug)]
@@ -525,6 +528,7 @@ fn section_heaps(
     limit: usize,
     bundle: &lm_abi::AbiBundle,
 ) -> Result<Vec<u8>, SnapshotFail> {
+    let artifact_ordinals = snapshot_artifact_ordinals(image, bundle)?;
     let mut out = Out {
         bytes: Vec::new(),
         limit,
@@ -540,7 +544,7 @@ fn section_heaps(
         out.leb(objects.len() as u64);
         for entry in objects {
             out.u8(u8::from(entry.frozen));
-            encode_object(&mut out, &entry.object);
+            encode_object(&mut out, &entry.object, &artifact_ordinals)?;
             if out.over_limit() {
                 return Err(SnapshotFail::LimitExceeded);
             }
@@ -549,7 +553,45 @@ fn section_heaps(
     out.into_bytes()
 }
 
-fn encode_object(out: &mut Out, object: &Object) {
+fn snapshot_artifact_ordinals(
+    image: &Image,
+    bundle: &lm_abi::AbiBundle,
+) -> Result<BTreeMap<lm_bytecode::artifact::ArtifactId, u32>, SnapshotFail> {
+    let ids: Result<Vec<lm_bytecode::artifact::ArtifactId>, SnapshotFail> =
+        match image.artifact_values() {
+            Some(artifacts) => artifacts.iter().map(|artifact| Ok(artifact.id())).collect(),
+            None => image
+                .artifacts
+                .iter()
+                .map(|bytes| {
+                    lm_bytecode::artifact::encoded_id_with_bundle(bytes, bundle).map_err(|error| {
+                        SnapshotFail::Fault(
+                            FaultCode::MalformedState,
+                            format!("an artifact identity did not decode: {error}"),
+                        )
+                    })
+                })
+                .collect(),
+        };
+    let ids = ids?;
+    let mut ordinals = BTreeMap::new();
+    for (ordinal, id) in ids.into_iter().enumerate() {
+        let ordinal = u32::try_from(ordinal).map_err(|_| SnapshotFail::LimitExceeded)?;
+        if ordinals.insert(id, ordinal).is_some() {
+            return Err(SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "the artifact table has a duplicate identity".to_string(),
+            ));
+        }
+    }
+    Ok(ordinals)
+}
+
+fn encode_object(
+    out: &mut Out,
+    object: &Object,
+    artifact_ordinals: &BTreeMap<lm_bytecode::artifact::ArtifactId, u32>,
+) -> Result<(), SnapshotFail> {
     out.u8(object.tag());
     match object {
         Object::Str(text) => out.str(text),
@@ -632,8 +674,36 @@ fn encode_object(out: &mut Out, object: &Object) {
                 }
                 None => out.u8(0),
             }
-            out.leb(code.bytes.len() as u64);
-            out.bytes.extend_from_slice(code.bytes.as_slice());
+            match (&code.kind, &code.storage) {
+                (PortableCodeKind::Artifact, PortableCodeStorage::Bytes(bytes)) => {
+                    out.leb(bytes.len() as u64);
+                    out.bytes.extend_from_slice(bytes.as_slice());
+                }
+                (PortableCodeKind::Artifact, PortableCodeStorage::Verified(_)) => {
+                    return Err(SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "an artifact value has verified storage".to_string(),
+                    ));
+                }
+                (_, PortableCodeStorage::Bytes(_)) => {
+                    return Err(SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "verified code has unverified storage".to_string(),
+                    ));
+                }
+                (_, PortableCodeStorage::Verified(artifact)) => {
+                    let ordinal = artifact_ordinals
+                        .get(&artifact.artifact().id())
+                        .copied()
+                        .ok_or_else(|| {
+                            SnapshotFail::Fault(
+                                FaultCode::MalformedState,
+                                "verified code is absent from the artifact table".to_string(),
+                            )
+                        })?;
+                    out.leb(u64::from(ordinal));
+                }
+            }
         }
         Object::NativeCodeHandle {
             image,
@@ -760,7 +830,16 @@ fn encode_object(out: &mut Out, object: &Object) {
                 CodeDescriptorKind::Declaration => 0,
                 CodeDescriptorKind::Member => 1,
             });
-            out.value(descriptor.module);
+            let ordinal = artifact_ordinals
+                .get(&descriptor.artifact.artifact().id())
+                .copied()
+                .ok_or_else(|| {
+                    SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "a code descriptor is absent from the artifact table".to_string(),
+                    )
+                })?;
+            out.leb(u64::from(ordinal));
             out.leb(u64::from(descriptor.declaration));
             match &descriptor.member {
                 Some(member) => {
@@ -776,7 +855,6 @@ fn encode_object(out: &mut Out, object: &Object) {
                 LinkedCodeKind::Open => 1,
             });
             out.hash(&linked.unit);
-            out.value(Value::Obj(linked.module));
             match linked.descriptor {
                 Some(descriptor) => {
                     out.u8(1);
@@ -786,6 +864,7 @@ fn encode_object(out: &mut Out, object: &Object) {
             }
         }
     }
+    Ok(())
 }
 
 fn section_machines(
@@ -1233,6 +1312,8 @@ struct Ctx {
     env_count: u32,
     /// The number of closed type entries the image carries.
     type_count: u32,
+    /// Decoded verified artifacts used by heap code values.
+    artifacts: Arc<[CodeArtifact]>,
 }
 
 /// Load one external snapshot container.
@@ -1621,6 +1702,7 @@ fn decode_inner(
     let mut code = section(1);
     let artifact_count = code.count(limits.max_code_slots as u64, "artifact")?;
     let mut artifacts = code.vector(artifact_count, "artifact table")?;
+    let mut code_artifacts = code.vector(artifact_count, "code artifact table")?;
     for _ in 0..artifact_count {
         let length = code.count(limits.max_bytes as u64, "artifact byte")?;
         let source = code.take(length)?;
@@ -1628,6 +1710,19 @@ fn decode_inner(
         if artifacts.last().is_some_and(|last| last >= &artifact) {
             return err(ImageReason::Code, "the artifact table is not canonical");
         }
+        let decoded = lm_bytecode::artifact::decode_with_bundle(
+            &artifact,
+            bundle,
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        )
+        .map_err(|error| {
+            ImageError::new(
+                ImageReason::Code,
+                format!("an artifact did not decode: {error}"),
+            )
+        })?;
+        let decoded = Arc::new(decoded);
+        code_artifacts.push(CodeArtifact::new(decoded, artifact.len()));
         artifacts.push(artifact);
     }
     let namespace_count = code.count(limits.max_code_slots as u64, "namespace")?;
@@ -1676,6 +1771,7 @@ fn decode_inner(
         namespace_count: namespace_count as u32,
         env_count: envs.len() as u32,
         type_count: types.len() as u32,
+        artifacts: code_artifacts.into(),
     };
     // Section 4: image heaps first, then machine heaps.
     let mut heaps = section(3);
@@ -2408,11 +2504,27 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                     )
                 }
             };
-            let count = cur.count(limits.max_bytes as u64, "artifact byte")?;
-            let source = cur.take(count)?;
+            let storage = if kind == PortableCodeKind::Artifact {
+                let count = cur.count(limits.max_bytes as u64, "artifact byte")?;
+                let source = cur.take(count)?;
+                PortableCodeStorage::Bytes(cur.copy_bytes(source, "artifact bytes")?.into())
+            } else {
+                let ordinal = cur.leb()?;
+                let artifact = ctx
+                    .artifacts
+                    .get(ordinal as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        ImageError::new(
+                            ImageReason::Reference,
+                            "a portable code value names no artifact",
+                        )
+                    })?;
+                PortableCodeStorage::Verified(artifact)
+            };
             Object::NativeCode(Box::new(PortableCode {
                 kind,
-                bytes: cur.copy_bytes(source, "artifact bytes")?.into(),
+                storage,
                 slot,
                 origin,
             }))
@@ -2596,13 +2708,16 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 1 => CodeDescriptorKind::Member,
                 _ => return err(ImageReason::Layout, "a code descriptor kind is invalid"),
             };
-            let module = decode_value(cur, objects, 0)?;
-            module.as_obj().ok_or_else(|| {
-                ImageError::new(
-                    ImageReason::Layout,
-                    "a code descriptor module is not an object",
-                )
-            })?;
+            let artifact = ctx
+                .artifacts
+                .get(cur.leb()? as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    ImageError::new(
+                        ImageReason::Reference,
+                        "a code descriptor names no artifact",
+                    )
+                })?;
             let declaration = u32::try_from(cur.leb()?).map_err(|_| {
                 ImageError::new(ImageReason::Reference, "a declaration index is too large")
             })?;
@@ -2613,7 +2728,7 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             };
             Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind,
-                module,
+                artifact,
                 declaration,
                 member,
             }))
@@ -2625,12 +2740,6 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 _ => return err(ImageReason::Layout, "a linked code kind is invalid"),
             };
             let unit = cur.hash()?;
-            let module = decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
-                ImageError::new(
-                    ImageReason::Layout,
-                    "a linked module source is not an object",
-                )
-            })?;
             let descriptor = match cur.u8()? {
                 0 => None,
                 1 => Some(decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
@@ -2641,7 +2750,6 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
             Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind,
                 unit,
-                module,
                 descriptor,
             }))
         }

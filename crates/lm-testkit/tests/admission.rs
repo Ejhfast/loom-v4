@@ -127,13 +127,13 @@ fn repeated_namespace_admission_rechecks_mutable_image_state() {
 }
 
 #[test]
-fn repeated_portable_code_admission_rechecks_changed_bytes() {
+fn verified_portable_code_cannot_diverge_from_its_artifact_table() {
     let loaded = program(
         "def add(value: Int): Int\n  value + 1\nend\n\
          def keep(): Int\n  code = codeof(add)\n  code.definition().slots.len()\nend\nkeep()\n",
     );
     let images = boundaries(&loaded, &[], 100);
-    let mut image = pick(&images, "one portable function", |image| {
+    let image = pick(&images, "one portable function", |image| {
         image.machines.iter().any(|machine| {
             machine.objects.iter().any(|entry| {
                 matches!(
@@ -148,30 +148,14 @@ fn repeated_portable_code_admission_rechecks_changed_bytes() {
     load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the first image admits");
     load_snapshot_for_artifact(&loaded, &bytes, limits).expect("the repeated image admits");
 
-    let mut changed = false;
-    for machine in &mut image.machines {
-        for entry in &mut machine.objects {
-            let Object::NativeCode(code) = &mut entry.object else {
-                continue;
-            };
-            if code.kind != lm_heap::PortableCodeKind::Function {
-                continue;
-            }
-            let mut damaged = code.bytes.as_slice().to_vec();
-            damaged[0] ^= 1;
-            code.bytes = lm_heap::SharedBytes::from(damaged.as_slice());
-            changed = true;
-            break;
-        }
-        if changed {
-            break;
-        }
-    }
-    assert!(changed, "the capture holds no portable function");
-    let bytes = codec::encode(&image, usize::MAX).expect("the changed image encodes");
-    let error = load_snapshot_for_artifact(&loaded, &bytes, limits)
-        .expect_err("the changed portable code must reject");
-    assert_eq!(error.reason, ImageReason::Code);
+    let mut changed = codec::decode(&bytes, limits).expect("the container decodes");
+    let artifact = changed
+        .artifacts
+        .first_mut()
+        .expect("the container carries an artifact");
+    artifact[0] ^= 1;
+    codec::encode(&changed, usize::MAX)
+        .expect_err("verified code cannot diverge from its artifact table");
 }
 
 #[test]

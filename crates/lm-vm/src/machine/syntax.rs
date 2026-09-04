@@ -78,12 +78,7 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let artifact = lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.table.bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        )
-        .map_err(|_| BAD_STATE)?;
+        let artifact = code.artifact().ok_or(BAD_STATE)?;
         let decoded = artifact.root().module();
         let selected = portable_definition_index(&code, decoded)?;
         let debug = lm_bytecode::debug::decode(&decoded.debug).map_err(|_| BAD_STATE)?;
@@ -168,12 +163,7 @@ impl Machine {
             }
             _ => return Err(BAD_TYPE),
         };
-        let artifact = lm_bytecode::artifact::decode_with_bundle(
-            code.bytes.as_slice(),
-            self.table.bundle(),
-            lm_bytecode::artifact::ArtifactLimits::default(),
-        )
-        .map_err(|_| BAD_STATE)?;
+        let artifact = code.artifact().ok_or(BAD_STATE)?;
         let decoded = artifact.root().module();
         let identity = artifact.root().identity();
         let value = self.alloc_definition_spec(module, &code, decoded, identity)?;

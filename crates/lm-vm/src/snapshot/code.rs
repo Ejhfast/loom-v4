@@ -72,6 +72,15 @@ impl SnapshotCode {
         &self.0.artifacts
     }
 
+    /// Return this code layout with one expanded artifact table.
+    pub(crate) fn with_artifacts(&self, artifacts: Arc<[Arc<Artifact>]>) -> SnapshotCode {
+        SnapshotCode(Arc::new(SnapshotCodeInner {
+            artifacts,
+            namespaces: self.0.namespaces.clone(),
+            namespace_ids: self.0.namespace_ids.clone(),
+        }))
+    }
+
     pub(crate) fn artifact(&self, ordinal: u32) -> Option<&Artifact> {
         self.0.artifacts.get(ordinal as usize).map(Arc::as_ref)
     }

@@ -68,6 +68,85 @@ impl SnapshotLayout {
             )
         })
     }
+
+    /// Add verified artifacts held by captured heap values.
+    fn include_code_artifacts(
+        &mut self,
+        images: &mut [ImageVm],
+        machines: &[ImageMachine],
+    ) -> Result<(), SnapshotFail> {
+        let old_artifacts = self.artifacts.clone();
+        let mut artifacts = BTreeMap::new();
+        for artifact in old_artifacts.iter() {
+            artifacts.insert(artifact.id(), artifact.clone());
+        }
+        for object in images
+            .iter()
+            .flat_map(|image| image.objects.iter())
+            .chain(machines.iter().flat_map(|machine| machine.objects.iter()))
+        {
+            let artifact = match &object.object {
+                Object::NativeCode(code) => code
+                    .artifact_store()
+                    .map(|artifact| artifact.artifact_store()),
+                Object::NativeCodeDescriptor(descriptor) => {
+                    Some(descriptor.artifact.artifact_store())
+                }
+                _ => None,
+            };
+            if let Some(artifact) = artifact {
+                artifacts.entry(artifact.id()).or_insert(artifact);
+            }
+        }
+        if artifacts.len() == old_artifacts.len() {
+            return Ok(());
+        }
+        let artifact_ordinals: BTreeMap<ArtifactId, u32> = artifacts
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(ordinal, id)| {
+                u32::try_from(ordinal)
+                    .map(|ordinal| (id, ordinal))
+                    .map_err(|_| SnapshotFail::LimitExceeded)
+            })
+            .collect::<Result<_, _>>()?;
+        let remap = |ordinal: &mut u32| -> Result<(), SnapshotFail> {
+            let id = old_artifacts
+                .get(*ordinal as usize)
+                .map(|artifact| artifact.id())
+                .ok_or_else(|| {
+                    SnapshotFail::Fault(
+                        FaultCode::MalformedState,
+                        "a snapshot artifact ordinal is invalid".to_string(),
+                    )
+                })?;
+            *ordinal = artifact_ordinals.get(&id).copied().ok_or_else(|| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    "a snapshot artifact is absent after table expansion".to_string(),
+                )
+            })?;
+            Ok(())
+        };
+        for namespace in &mut self.namespaces {
+            for ordinal in &mut namespace.artifacts {
+                remap(ordinal)?;
+            }
+        }
+        for image in images {
+            for instance in &mut image.instances {
+                remap(&mut instance.artifact)?;
+            }
+        }
+        let artifacts: std::sync::Arc<[std::sync::Arc<Artifact>]> =
+            artifacts.into_values().collect::<Vec<_>>().into();
+        self.artifacts = artifacts.clone();
+        self.single_artifact = (artifacts.len() == 1).then(|| artifacts[0].id());
+        self.artifact_ordinals = artifact_ordinals;
+        self.code = self.code.with_artifacts(artifacts);
+        Ok(())
+    }
 }
 
 /// Convert one runtime resource ceiling to its portable form.
@@ -543,7 +622,7 @@ impl World {
                 namespace_ids.push(namespace);
             }
         }
-        let layout = self.build_snapshot_layout(&namespace_ids)?;
+        let mut layout = self.build_snapshot_layout(&namespace_ids)?;
         let mut vm_images: Vec<ImageVm> = Vec::with_capacity(image_order.len());
         for key in &image_order {
             vm_images.push(self.build_vm_image(*key, &ordinal_of, &layout)?);
@@ -560,6 +639,7 @@ impl World {
             )?;
             machines.push(machine);
         }
+        layout.include_code_artifacts(&mut vm_images, &machines)?;
         let (mut types, envs) = self.build_type_tables(&mut vm_images, &mut machines);
         // The header names the selected run result type. A full VM
         // snapshot has no selected run and records zeros.

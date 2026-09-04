@@ -750,7 +750,7 @@ impl World {
                             "<{:?} slot {:?} bytes {}>",
                             code.kind,
                             code.slot,
-                            code.bytes.len()
+                            code.encoded().map_or(0, lm_heap::SharedBytes::len)
                         )
                     }
                     Object::NativeCodeHandle {

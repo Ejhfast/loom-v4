@@ -850,7 +850,7 @@ impl Machine {
             let index = u32::try_from(index).map_err(|_| BAD_STATE)?;
             let value = self.alloc(Object::NativeCode(Box::new(lm_heap::PortableCode {
                 kind: lm_heap::PortableCodeKind::SlotSpec,
-                bytes: code.bytes.clone(),
+                storage: code.storage.clone(),
                 slot: Some(index),
                 origin: None,
             })))?;

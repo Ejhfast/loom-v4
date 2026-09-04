@@ -422,11 +422,85 @@ pub enum SlotChangeKind {
     Process,
 }
 
+/// One shared decoded artifact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeArtifact {
+    artifact: std::sync::Arc<lm_bytecode::artifact::Artifact>,
+    encoded: Option<SharedBytes>,
+    retained_bytes: usize,
+}
+
+impl CodeArtifact {
+    /// Create one shared decoded artifact with its logical byte charge.
+    pub fn new(
+        artifact: std::sync::Arc<lm_bytecode::artifact::Artifact>,
+        retained_bytes: usize,
+    ) -> CodeArtifact {
+        CodeArtifact {
+            artifact,
+            encoded: None,
+            retained_bytes,
+        }
+    }
+
+    /// Create one decoded artifact with shared canonical bytes.
+    pub fn with_bytes(
+        artifact: std::sync::Arc<lm_bytecode::artifact::Artifact>,
+        encoded: SharedBytes,
+    ) -> CodeArtifact {
+        let retained_bytes = encoded.retained_capacity();
+        CodeArtifact {
+            artifact,
+            encoded: Some(encoded),
+            retained_bytes,
+        }
+    }
+
+    /// Return the decoded artifact.
+    pub fn artifact(&self) -> &lm_bytecode::artifact::Artifact {
+        &self.artifact
+    }
+
+    /// Return a shared reference to the decoded artifact.
+    pub fn artifact_store(&self) -> std::sync::Arc<lm_bytecode::artifact::Artifact> {
+        self.artifact.clone()
+    }
+
+    /// Return cached canonical bytes when this value retains them.
+    pub fn encoded(&self) -> Option<&SharedBytes> {
+        self.encoded.as_ref()
+    }
+
+    /// Return the stable identity of the shared allocation.
+    pub(crate) fn allocation_key(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.artifact) as usize
+    }
+
+    /// Return the logical byte charge of the decoded artifact.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    /// Test whether this value owns the only shared artifact reference.
+    pub(crate) fn allocation_is_unique(&self) -> bool {
+        std::sync::Arc::strong_count(&self.artifact) == 1
+    }
+}
+
+/// One immutable portable code storage form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PortableCodeStorage {
+    /// Unverified artifact bytes.
+    Bytes(SharedBytes),
+    /// A verified decoded artifact.
+    Verified(CodeArtifact),
+}
+
 /// One immutable portable code payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortableCode {
     pub kind: PortableCodeKind,
-    pub bytes: SharedBytes,
+    pub storage: PortableCodeStorage,
     /// The selected slot for a `SlotSpec` view.
     ///
     /// A function or class artifact selects its definition through
@@ -434,6 +508,40 @@ pub struct PortableCode {
     pub slot: Option<u32>,
     /// The selected debug definition origin, when source data exists.
     pub origin: Option<[u8; 32]>,
+}
+
+impl PortableCode {
+    /// Return unverified artifact bytes.
+    pub fn bytes(&self) -> Option<&SharedBytes> {
+        match &self.storage {
+            PortableCodeStorage::Bytes(bytes) => Some(bytes),
+            PortableCodeStorage::Verified(_) => None,
+        }
+    }
+
+    /// Return canonical bytes when this value retains them.
+    pub fn encoded(&self) -> Option<&SharedBytes> {
+        match &self.storage {
+            PortableCodeStorage::Bytes(bytes) => Some(bytes),
+            PortableCodeStorage::Verified(artifact) => artifact.encoded(),
+        }
+    }
+
+    /// Return the verified decoded artifact.
+    pub fn artifact(&self) -> Option<&lm_bytecode::artifact::Artifact> {
+        match &self.storage {
+            PortableCodeStorage::Bytes(_) => None,
+            PortableCodeStorage::Verified(artifact) => Some(artifact.artifact()),
+        }
+    }
+
+    /// Return the shared verified artifact storage.
+    pub fn artifact_store(&self) -> Option<CodeArtifact> {
+        match &self.storage {
+            PortableCodeStorage::Bytes(_) => None,
+            PortableCodeStorage::Verified(artifact) => Some(artifact.clone()),
+        }
+    }
 }
 
 /// One portable reflection descriptor kind.
@@ -447,8 +555,8 @@ pub enum CodeDescriptorKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeDescriptor {
     pub kind: CodeDescriptorKind,
-    /// A `VerifiedModule` value in this heap.
-    pub module: Value,
+    /// The verified artifact that supplies this description.
+    pub artifact: CodeArtifact,
     /// The source export index in the root module interface.
     pub declaration: u32,
     /// The method name for a member descriptor.
@@ -468,8 +576,6 @@ pub struct LinkedCode {
     pub kind: LinkedCodeKind,
     /// The exact linked unit identity.
     pub unit: [u8; 32],
-    /// A `VerifiedModule` object for portable description.
-    pub module: ObjRef,
     /// A `CodeDescriptor` object for an open value.
     pub descriptor: Option<ObjRef>,
 }
@@ -1359,10 +1465,7 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: match descriptor.module {
-                        Value::Obj(reference) => Value::Obj(map(reference)),
-                        other => other,
-                    },
+                    artifact: descriptor.artifact.clone(),
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -1370,7 +1473,6 @@ impl Object {
             Object::NativeLinkedCode(linked) => Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind: linked.kind,
                 unit: linked.unit,
-                module: map(linked.module),
                 descriptor: linked.descriptor.map(&mut map),
             })),
         })
@@ -1516,9 +1618,18 @@ impl Object {
                 Some((text.allocation_key(), text.retained_capacity()))
             }
             Object::Bytes(bytes) => Some((bytes.allocation_key(), bytes.retained_capacity())),
-            Object::NativeCode(code) => {
-                Some((code.bytes.allocation_key(), code.bytes.retained_capacity()))
-            }
+            Object::NativeCode(code) => match &code.storage {
+                PortableCodeStorage::Bytes(bytes) => {
+                    Some((bytes.allocation_key(), bytes.retained_capacity()))
+                }
+                PortableCodeStorage::Verified(artifact) => {
+                    Some((artifact.allocation_key(), artifact.retained_bytes()))
+                }
+            },
+            Object::NativeCodeDescriptor(descriptor) => Some((
+                descriptor.artifact.allocation_key(),
+                descriptor.artifact.retained_bytes(),
+            )),
             _ => None,
         }
     }
@@ -1528,7 +1639,11 @@ impl Object {
         match self {
             Object::Str(text) | Object::Substring(text) => text.allocation_is_unique(),
             Object::Bytes(bytes) => bytes.allocation_is_unique(),
-            Object::NativeCode(code) => code.bytes.allocation_is_unique(),
+            Object::NativeCode(code) => match &code.storage {
+                PortableCodeStorage::Bytes(bytes) => bytes.allocation_is_unique(),
+                PortableCodeStorage::Verified(artifact) => artifact.allocation_is_unique(),
+            },
+            Object::NativeCodeDescriptor(descriptor) => descriptor.artifact.allocation_is_unique(),
             _ => false,
         }
     }
@@ -1579,9 +1694,8 @@ impl Object {
             | Object::NativeHostResource { .. } => {}
             Object::NativeRegex(_) | Object::NativeRegexMatch(_) => {}
             Object::Substring(_) => {}
-            Object::NativeCodeDescriptor(descriptor) => visit(&descriptor.module),
+            Object::NativeCodeDescriptor(_) => {}
             Object::NativeLinkedCode(linked) => {
-                out.push(linked.module);
                 if let Some(descriptor) = linked.descriptor {
                     out.push(descriptor);
                 }
@@ -1648,7 +1762,7 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: Value::Unit,
+                    artifact: descriptor.artifact.clone(),
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -1752,7 +1866,7 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: value(descriptor.module),
+                    artifact: descriptor.artifact.clone(),
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -1760,7 +1874,6 @@ impl Object {
             Object::NativeLinkedCode(linked) => Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind: linked.kind,
                 unit: linked.unit,
-                module: map(linked.module),
                 descriptor: linked.descriptor.map(&mut map),
             })),
             Object::NativeCode(_) => return None,
@@ -1863,6 +1976,50 @@ pub fn dump_shapes() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_code_artifact() -> CodeArtifact {
+        let module = lm_bytecode::Module {
+            strings: Vec::new(),
+            bytes: Vec::new(),
+            types: vec![lm_bytecode::BcType::Int],
+            selectors: Vec::new(),
+            apps: Vec::new(),
+            interfaces: Vec::new(),
+            conformances: Vec::new(),
+            class_bounds: Vec::new(),
+            func_bounds: vec![Vec::new()],
+            imports: Vec::new(),
+            slots: Vec::new(),
+            core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: Vec::new(),
+            classes: Vec::new(),
+            funcs: vec![lm_bytecode::Func {
+                name: "entry".to_string(),
+                param_names: Vec::new(),
+                type_params: 0,
+                effect_params: 0,
+                params: Vec::new(),
+                param_muts: Vec::new(),
+                ret: 0,
+                row: Vec::new(),
+                captures: Vec::new(),
+                local_types: Vec::new(),
+                blocks: vec![vec![
+                    lm_bytecode::Instr::ConstInt(0),
+                    lm_bytecode::Instr::Return,
+                ]],
+            }],
+            entry: 0,
+            exports: Vec::new(),
+            bindings: Vec::new(),
+            debug: Vec::new(),
+        };
+        let unit = lm_bytecode::artifact::LinkUnit::from_module("", module, Vec::new())
+            .expect("the test unit is valid");
+        let artifact = lm_bytecode::artifact::Artifact::new(unit, Vec::new())
+            .expect("the test artifact is valid");
+        CodeArtifact::new(std::sync::Arc::new(artifact), 0)
+    }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
@@ -1975,7 +2132,7 @@ mod tests {
             Object::NativeRun { vm: 2 },
             Object::NativeCode(Box::new(PortableCode {
                 kind: PortableCodeKind::Artifact,
-                bytes: vec![1, 2].into(),
+                storage: PortableCodeStorage::Bytes(vec![1, 2].into()),
                 slot: None,
                 origin: None,
             })),
@@ -2024,14 +2181,13 @@ mod tests {
             })),
             Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind: CodeDescriptorKind::Declaration,
-                module: Value::Obj(a),
+                artifact: test_code_artifact(),
                 declaration: 3,
                 member: None,
             })),
             Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind: LinkedCodeKind::Module,
                 unit: [4; 32],
-                module: a,
                 descriptor: None,
             })),
         ]
@@ -2208,7 +2364,7 @@ mod tests {
             Object::NativeRun { vm: 0 },
             Object::NativeCode(Box::new(PortableCode {
                 kind: PortableCodeKind::Artifact,
-                bytes: SharedBytes::new(),
+                storage: PortableCodeStorage::Bytes(SharedBytes::new()),
                 slot: None,
                 origin: None,
             })),
@@ -2257,20 +2413,13 @@ mod tests {
             })),
             Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind: CodeDescriptorKind::Declaration,
-                module: Value::Obj(ObjRef {
-                    slot: 0,
-                    generation: 0,
-                }),
+                artifact: test_code_artifact(),
                 declaration: 0,
                 member: None,
             })),
             Object::NativeLinkedCode(Box::new(LinkedCode {
                 kind: LinkedCodeKind::Module,
                 unit: [0; 32],
-                module: ObjRef {
-                    slot: 0,
-                    generation: 0,
-                },
                 descriptor: None,
             })),
         ];

@@ -317,7 +317,7 @@ fn payload(object: &Object) -> String {
                 "portable {:?} slot {:?} bytes {}",
                 code.kind,
                 code.slot,
-                code.bytes.len()
+                code.encoded().map_or(0, lm_heap::SharedBytes::len)
             )
         }
         Object::NativeCodeHandle {
@@ -367,14 +367,16 @@ fn payload(object: &Object) -> String {
             )
         }
         Object::NativeCodeDescriptor(descriptor) => format!(
-            "code {:?} declaration {} member {:?} module {:?}",
-            descriptor.kind, descriptor.declaration, descriptor.member, descriptor.module
+            "code {:?} declaration {} member {:?} artifact {}",
+            descriptor.kind,
+            descriptor.declaration,
+            descriptor.member,
+            hex(descriptor.artifact.artifact().id().as_bytes())
         ),
         Object::NativeLinkedCode(linked) => format!(
-            "linked {:?} unit {} module #{} descriptor {:?}",
+            "linked {:?} unit {} descriptor {:?}",
             linked.kind,
             hex(&linked.unit),
-            linked.module.slot,
             linked.descriptor.map(|descriptor| descriptor.slot)
         ),
         Object::NativeSlotChange {

@@ -1371,7 +1371,7 @@ impl World {
                 return Err(FaultCode::TypeMismatch);
             }
             host_modules.push(HostCompileModule {
-                artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                artifact: self.host_code_artifact(vm, code)?,
             });
         }
 
@@ -1482,7 +1482,7 @@ impl World {
                     return Err(FaultCode::MalformedState);
                 };
                 host_slots.push(HostCompileSlot {
-                    artifact: code.bytes.try_bounded().map_err(|_| FaultCode::HeapLimit)?,
+                    artifact: self.host_code_artifact(vm, code)?,
                     index,
                 });
             }
@@ -1501,6 +1501,20 @@ impl World {
             roots: host_roots,
             definitions: host_definitions,
         }))
+    }
+
+    fn host_code_artifact(
+        &self,
+        vm: VmId,
+        code: &lm_heap::PortableCode,
+    ) -> Result<lm_heap::SharedBytes, FaultCode> {
+        if let Some(bytes) = code.encoded() {
+            return bytes.try_bounded().map_err(|_| FaultCode::HeapLimit);
+        }
+        let artifact = code.artifact().ok_or(FaultCode::MalformedState)?;
+        let bytes = lm_bytecode::artifact::encode_with_bundle(artifact, self.code_of(vm).bundle())
+            .map_err(|_| FaultCode::MalformedState)?;
+        lm_heap::SharedBytes::try_from_slice(&bytes).map_err(|_| FaultCode::HeapLimit)
     }
 
     fn host_compile_options(&self, vm: VmId, fields: &[Value]) -> Result<HostArg, FaultCode> {
