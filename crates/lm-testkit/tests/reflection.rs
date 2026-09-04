@@ -183,6 +183,45 @@ end
 }
 
 #[test]
+fn a_scoped_effect_row_cannot_enter_an_inferred_closure() {
+    let tree = TempTree::new("scoped-closure-effect");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "def effectful(): Int with Io.Write\n  1\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.cases
+
+for declaration in codeof(cases).declarations()
+  case declaration
+  in Def[effect e, () -> Int with e](call)
+    action = do || call() end
+    action()
+  in _ then 0
+  end
+end
+0
+"#,
+    );
+    let error = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect_err("the scoped effect row cannot enter an inferred closure");
+    assert!(error.contains("E1046"), "{error}");
+    assert!(error.contains("scoped effect row `e`"), "{error}");
+    assert!(!error.contains("e0"), "{error}");
+}
+
+#[test]
 fn descriptor_fields_are_not_source_visible() {
     let source = "def read(value: ModuleCode): Int\n  value._module\nend\n1\n";
     let error = lm_testkit::compile_text("opaque-descriptor.lm", source)

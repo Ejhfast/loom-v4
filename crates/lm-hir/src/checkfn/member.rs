@@ -1433,6 +1433,7 @@ impl<'o> FnChecker<'o> {
         };
         let type_param_count = env.type_names.len() as u32;
         let effect_param_count = env.effect_names.len() as u32;
+        let owned_effect_arity = self.effect_arity;
         let mut child = FnChecker {
             outer: Some(self as &mut dyn OuterScope),
             locals: ptys
@@ -1455,7 +1456,7 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env: env.clone(),
             declared_row: declared_row.clone(),
-            effect_arity: effect_param_count,
+            effect_arity: owned_effect_arity,
             collect_row: infer_row,
         };
         let (body_h, body_ty) = match declared_ret {
