@@ -360,6 +360,28 @@ def reflected_answer(module_code: ModuleCode): Int
   0
 end
 
+def activate_reflected(module_code: ModuleCode): Int with Vm
+  for declaration in module_code.declarations()
+    case declaration
+    in Class[type C: Marker, () -> C](make)
+      instance = make()
+      for member in declaration.members()
+        case member
+        in Method[(mut C) -> Int](read)
+          child = sys.vm.Vm().activate_or_fault(read, args: (instance,))
+          case child.run()
+          in Ok(value) then return value
+          in Err(_) then return -1
+          end
+        in _ then ()
+        end
+      end
+    in _ then ()
+    end
+  end
+  0
+end
+
 total = 0
 for declaration in codeof(cases).declarations()
   case declaration
@@ -388,7 +410,7 @@ for declaration in codeof(cases).declarations()
   in _ then ()
   end
 end
-(total, first, reflected_answer(codeof(cases)))
+(total, first, reflected_answer(codeof(cases)), activate_reflected(codeof(cases)))
 "#,
     );
     let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
@@ -397,7 +419,13 @@ end
         .expect("the artifact reads");
     let (arena, namespace) =
         lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
-    let mut vm = Vm::new(arena, namespace, VmConfig::default());
-    let outcome = vm.run();
-    assert_eq!(vm.show_outcome(&outcome), "Done((91, 42, 42))");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done((91, 42, 42, 7))");
 }

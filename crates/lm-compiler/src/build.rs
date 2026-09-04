@@ -31,7 +31,7 @@ pub struct ModuleReport {
 pub struct BuildReport {
     pub root: String,
     pub modules: Vec<ModuleReport>,
-    /// The root artifact, when the package has `src/main.lm`.
+    /// The selected program artifact.
     pub artifact: Option<PathBuf>,
     pub artifact_id: Option<lm_bytecode::artifact::ArtifactId>,
     pub container_hash: Option<[u8; 32]>,
@@ -51,18 +51,40 @@ impl BuildReport {
 /// `start` is any path inside the package. `build_root` is the build
 /// directory, normally `build` beside the current directory.
 pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, String> {
+    build_package_for(start, build_root, BuildTarget::Program)
+}
+
+/// Build one package with a generated test entry.
+pub fn build_test_package(start: &Path, build_root: &Path) -> Result<BuildReport, String> {
+    build_package_for(start, build_root, BuildTarget::Tests)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildTarget {
+    Program,
+    Tests,
+}
+
+fn build_package_for(
+    start: &Path,
+    build_root: &Path,
+    target: BuildTarget,
+) -> Result<BuildReport, String> {
     let workspace = load_workspace(start)?;
     let dir = BuildDir::new(build_root);
     let mut env = CompileEnv::new();
     let mut interfaces: BTreeMap<String, [u8; 32]> = BTreeMap::new();
     let mut link_env = crate::core_link_env()?;
     let mut modules: Vec<ModuleReport> = Vec::new();
-    let standard_uses: Vec<Vec<String>> = workspace
+    let mut standard_uses: Vec<Vec<String>> = workspace
         .order
         .iter()
         .flat_map(|name| workspace.package(name).modules.iter())
         .flat_map(|module| module.uses.iter().cloned())
         .collect();
+    if target == BuildTarget::Tests {
+        standard_uses.push(vec!["std".to_string(), "test".to_string()]);
+    }
     let standard = crate::standard::modules_for_uses(&standard_uses);
     for module in &standard {
         let interface_id = interface_identity(&module.interface);
@@ -181,10 +203,50 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
         container_hash: None,
         artifact_cached: false,
     };
-    if !root_package.has_main() {
+    if target == BuildTarget::Program && !root_package.has_main() {
         return Ok(report);
     }
-    let main_path = format!("{}.main", workspace.root);
+    let (main_path, artifact_name) = match target {
+        BuildTarget::Program => (format!("{}.main", workspace.root), workspace.root.clone()),
+        BuildTarget::Tests => {
+            let module_paths: Vec<String> = root_package
+                .modules
+                .iter()
+                .map(|module| module.path.clone())
+                .collect();
+            let runner_path = format!("{}.__loom_test_runner", workspace.root);
+            let source = SourceFile::new("<test runner>", test_entry_source(&module_paths));
+            let mut local = env.clone();
+            local.bind_standard_root();
+            local
+                .bind_root(&workspace.root, &workspace.root)
+                .map_err(|error| format!("error: {error}\n"))?;
+            for (name, prefix) in &root_package.deps {
+                local
+                    .bind_root(name, prefix)
+                    .map_err(|error| format!("error: {error}\n"))?;
+            }
+            let options = module_paths
+                .iter()
+                .fold(crate::module::CompileOptions::new(), |options, path| {
+                    options.reflect_module(path.clone())
+                });
+            let compiled = crate::module::compile_module_with_options(
+                &runner_path,
+                &source,
+                &local.freeze(),
+                true,
+                &options,
+            )?;
+            let unit = link_env
+                .prepare_unit(compiled.path, compiled.module, compiled.interface)
+                .map_err(|error| format!("error: {error}\n"))?;
+            link_env
+                .bind_unit(unit)
+                .map_err(|error| format!("error: {error}\n"))?;
+            (runner_path, format!("{}-tests", workspace.root))
+        }
+    };
     let artifact = link_env
         .freeze()
         .artifact(&main_path)
@@ -206,12 +268,26 @@ pub fn build_package(start: &Path, build_root: &Path) -> Result<BuildReport, Str
     let debug = dir.debug();
     std::fs::create_dir_all(&debug)
         .map_err(|e| format!("error: cannot create `{}`: {e}\n", debug.display()))?;
-    let path = debug.join(format!("{}.lma", workspace.root));
+    let path = debug.join(format!("{artifact_name}.lma"));
     write_atomic(&path, &bytes)?;
     report.artifact = Some(path);
     report.artifact_id = Some(artifact_id);
     report.container_hash = Some(container_hash);
     Ok(report)
+}
+
+fn test_entry_source(modules: &[String]) -> String {
+    let descriptors = modules
+        .iter()
+        .map(|module| format!("codeof({module})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "use std.test.run_matching\n\
+         report = run_matching([{descriptors}], sys.args())\n\
+         println(report)\n\
+         report.failed()\n"
+    )
 }
 
 /// The path a diagnostic names: the file path as the user wrote it.

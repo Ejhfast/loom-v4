@@ -24,6 +24,7 @@ const PATH_PATH: &str = "std.path";
 const URL_PATH: &str = "std.url";
 const DIGEST_PATH: &str = "std.digest";
 const UUID_PATH: &str = "std.uuid";
+const TEST_PATH: &str = "std.test";
 
 const IO_SOURCE: &str = include_str!("../../../std/io.lm");
 const FS_SOURCE: &str = include_str!("../../../std/fs.lm");
@@ -38,6 +39,7 @@ const PATH_SOURCE: &str = include_str!("../../../std/path.lm");
 const URL_SOURCE: &str = include_str!("../../../std/url.lm");
 const DIGEST_SOURCE: &str = include_str!("../../../std/digest.lm");
 const UUID_SOURCE: &str = include_str!("../../../std/uuid.lm");
+const TEST_SOURCE: &str = include_str!("../../../std/test.lm");
 
 static IO: OnceLock<CompiledModule> = OnceLock::new();
 static FS: OnceLock<CompiledModule> = OnceLock::new();
@@ -52,6 +54,7 @@ static PATH: OnceLock<CompiledModule> = OnceLock::new();
 static URL: OnceLock<CompiledModule> = OnceLock::new();
 static DIGEST: OnceLock<CompiledModule> = OnceLock::new();
 static UUID: OnceLock<CompiledModule> = OnceLock::new();
+static TEST: OnceLock<CompiledModule> = OnceLock::new();
 
 /// One source compilation and its exact artifact graph.
 #[derive(Debug, Clone)]
@@ -89,6 +92,7 @@ impl StandardCatalog {
             URL_PATH,
             DIGEST_PATH,
             UUID_PATH,
+            TEST_PATH,
         ]
     }
 
@@ -110,6 +114,7 @@ impl StandardCatalog {
             URL_PATH => Some(url_module()),
             DIGEST_PATH => Some(digest()),
             UUID_PATH => Some(uuid()),
+            TEST_PATH => Some(test_module()),
             _ => None,
         }
     }
@@ -139,6 +144,7 @@ impl StandardCatalog {
                     needs.time = true;
                     needs.uuid = true;
                 }
+                TEST_PATH => needs.test = true,
                 _ => return Err(format!("`{path}` is not a bundled standard module")),
             }
         }
@@ -250,6 +256,10 @@ fn uuid() -> &'static CompiledModule {
     UUID.get_or_init(|| compile_bundled(UUID_PATH, "std/uuid.lm", UUID_SOURCE, &[time()]))
 }
 
+fn test_module() -> &'static CompiledModule {
+    TEST.get_or_init(|| compile_bundled(TEST_PATH, "std/test.lm", TEST_SOURCE, &[]))
+}
+
 fn module_for_use(path: &[String]) -> Option<&'static str> {
     let text = path.join(".");
     [
@@ -266,6 +276,7 @@ fn module_for_use(path: &[String]) -> Option<&'static str> {
         URL_PATH,
         DIGEST_PATH,
         UUID_PATH,
+        TEST_PATH,
     ]
     .into_iter()
     .find(|module| text == *module || text.starts_with(&format!("{module}.")))
@@ -286,6 +297,7 @@ struct StandardNeeds {
     url: bool,
     digest: bool,
     uuid: bool,
+    test: bool,
 }
 
 fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
@@ -329,6 +341,9 @@ fn selected_modules(needs: StandardNeeds) -> Vec<&'static CompiledModule> {
     if needs.uuid {
         modules.push(uuid());
     }
+    if needs.test {
+        modules.push(test_module());
+    }
     modules
 }
 
@@ -357,6 +372,7 @@ pub(crate) fn modules_for_uses(uses: &[Vec<String>]) -> Vec<&'static CompiledMod
                 needs.time = true;
                 needs.uuid = true;
             }
+            Some(TEST_PATH) => needs.test = true,
             _ => {}
         }
     }
@@ -436,6 +452,7 @@ mod tests {
                 URL_PATH,
                 DIGEST_PATH,
                 UUID_PATH,
+                TEST_PATH,
             ]
         );
         assert!(modules_for_uses(&[]).is_empty());
@@ -515,6 +532,12 @@ mod tests {
     fn random_source_selects_only_random() {
         let compiled = compile("use std.random.seeded\nseeded(1).next_bits()\n");
         assert_eq!(compiled.standard_modules, &[RANDOM_PATH]);
+    }
+
+    #[test]
+    fn test_source_selects_only_test_support() {
+        let compiled = compile("use std.test.pass\npass()\n");
+        assert_eq!(compiled.standard_modules, &[TEST_PATH]);
     }
 
     #[test]

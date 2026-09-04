@@ -34,7 +34,7 @@ use lm_bytecode::ImportKind;
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{ClassId, ClassKind, Row, RowElem, Type, TypeId};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 /// The interfaces one module may import, and the root names its `use`
@@ -120,6 +120,36 @@ pub(crate) fn add_used_core_names(
         }
     }
 
+    let mut seen = HashSet::new();
+    while let Some((module, name)) = work.pop() {
+        if !seen.insert((module.clone(), name.clone())) {
+            continue;
+        }
+        let Some(entry) = env.module(&module).and_then(|item| item.find(&name)) else {
+            continue;
+        };
+        add_item_core_names(&module, &name, &entry.item, names, &mut work);
+    }
+}
+
+/// Add core names used by complete reflected module surfaces.
+pub(crate) fn add_reflection_core_names(
+    env: &ImportEnv,
+    modules: &BTreeSet<String>,
+    names: &mut HashSet<String>,
+) {
+    let mut work = Vec::new();
+    for module in modules {
+        let Some(interface) = env.module(module) else {
+            continue;
+        };
+        work.extend(
+            interface
+                .exports
+                .iter()
+                .map(|export| (module.clone(), export.name.clone())),
+        );
+    }
     let mut seen = HashSet::new();
     while let Some((module, name)) = work.pop() {
         if !seen.insert((module.clone(), name.clone())) {
@@ -391,6 +421,39 @@ impl<'a> Materializer<'a> {
             core: true,
             ..Materializer::new(env)
         }
+    }
+
+    /// Reserve every source declaration needed by one reflected module.
+    pub(crate) fn reserve_reflection_module(
+        &mut self,
+        ctx: &mut Ctx,
+        module: &str,
+        span: Span,
+    ) -> Result<(), Diagnostic> {
+        let interface = self
+            .env
+            .module(module)
+            .cloned()
+            .ok_or_else(|| error(span, format!("the module `{module}` is not visible here")))?;
+        for export in interface.exports.into_iter().filter(|item| item.source) {
+            let bound = format!("$reflection.{module}.{}", export.name);
+            match export.item {
+                IfaceItem::Class(class) if class.kind != IfaceClassKind::EnumCase => {
+                    self.reserve_class(ctx, module, &export.name, span)?;
+                }
+                IfaceItem::Class(_) => {}
+                IfaceItem::Interface(_) => {
+                    self.reserve_interface(ctx, module, &export.name, span)?;
+                }
+                IfaceItem::Func(_) => {
+                    self.reserve_func(ctx, &bound, module, &export.name, span)?;
+                }
+                IfaceItem::Const(_) => {
+                    self.reserve_const(ctx, &bound, module, &export.name, span)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Find one export of one module.

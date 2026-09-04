@@ -355,6 +355,24 @@ impl<'o> FnChecker<'o> {
                 });
             }
         }
+        let module_path = ctx.import_env.roots.get(root).and_then(|prefix| {
+            let suffix = name.strip_prefix(root)?;
+            if !suffix.is_empty() && !suffix.starts_with('.') {
+                return None;
+            }
+            let path = format!("{prefix}{suffix}");
+            ctx.import_env.module(&path).map(|_| path)
+        });
+        if let Some(path) = module_path {
+            let module = ctx.reflection_module(&path, args[0].span)?;
+            let ty = Self::core_class(ctx, "ModuleCode");
+            return Ok(HExpr {
+                flow: Flow::Normal,
+                ty,
+                mutable: false,
+                kind: HExprKind::ModuleCode { module },
+            });
+        }
         if let Some(func) = self.module_func(ctx, &name) {
             let sig = &ctx.sigs[func as usize];
             if !sig.type_params.is_empty() || !sig.effect_params.is_empty() {

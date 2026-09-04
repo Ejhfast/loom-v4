@@ -8,6 +8,7 @@
 //!   directory.
 //! - `lm run [--show-result] [--allow LIST] <file.lm | file.lma>`:
 //!   compile or load, verify, and run with an explicit root policy.
+//! - `lm test [--allow LIST] [package]`: discover and run package tests.
 //! - `lm disasm <file.lm | file.lma>`: print the bytecode listing.
 //! - `lm inspect <file.lmi | file.lma>`: dump an interface or an
 //!   artifact summary; `--live` runs a program and dumps the machine.
@@ -58,7 +59,9 @@ const USAGE: &str = "usage:
          [--scheduler deterministic|parallel] [--threads N]
          [--engine interpreter|auto|native]
          [file.lm | file.lma | package directory] [-- arguments...]
-  (`lm build` and `lm run` default to the current directory)
+  lm test [--allow Op1,Group2,...] [--engine interpreter|auto|native]
+          [package directory] [-- filters...]
+  (`lm build`, `lm run`, and `lm test` default to the current directory)
   lm disasm <file.lm | file.lma>
   lm inspect --shapes
   lm inspect <file.lmi | file.lma>
@@ -150,6 +153,21 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 return run_program(options);
             }
             run_program(options)
+        }
+        "test" => {
+            let mut options = parse_run_options(rest, Some("."))?;
+            for grant in ["Vm", "Io.Write", "Args"] {
+                if !options.allow.iter().any(|item| item == grant) {
+                    options.allow.push(grant.to_string());
+                }
+            }
+            let report = build_test_package(&options.file, true)?;
+            options.file = report
+                .artifact
+                .expect("a test package produces an artifact")
+                .display()
+                .to_string();
+            run_test_program(options)
         }
         "disasm" => {
             let options = parse_options(rest)?;
@@ -463,6 +481,22 @@ fn build_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport
     Ok(report)
 }
 
+/// Build one package test entry and print the module report.
+fn build_test_package(path: &str, to_stderr: bool) -> Result<lm_compiler::BuildReport, String> {
+    let root = lm_compiler::graph::find_package_dir(Path::new(path))?;
+    let report = lm_compiler::build_test_package(Path::new(path), &root.join("build"))?;
+    for module in &report.modules {
+        let verb = if module.cached { "cached" } else { "built " };
+        let line = format!("{verb} {}  {}", module.path, short(&module.semantic_hash));
+        if to_stderr {
+            errln!("{line}");
+        } else {
+            outln!("{line}");
+        }
+    }
+    Ok(report)
+}
+
 /// Load and run one program with the given policy grants.
 fn run_program(options: Options) -> Result<ExitCode, String> {
     let (arena, namespace) = load_artifact(&options.file)?;
@@ -503,6 +537,45 @@ fn run_program(options: Options) -> Result<ExitCode, String> {
     } else {
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// Run one generated test entry and return its failure status.
+fn run_test_program(options: Options) -> Result<ExitCode, String> {
+    let (arena, namespace) = load_artifact(&options.file)?;
+    let seed = options.rand_seed;
+    let grants: Vec<&str> = options.allow.iter().map(|grant| grant.as_str()).collect();
+    let arguments = options.command_args;
+    let engine = std::sync::Arc::new(Engine::new(options.engine));
+    let result = lm_proc::run_on_worker_with_engine_and_activation_policy(
+        arena,
+        namespace,
+        options.config,
+        options.limits,
+        options.scheduler,
+        &grants,
+        Box::new(move || Box::new(lm_host::CliHost::with_args(seed, arguments))),
+        engine,
+        lm_vm::ActivationPolicy::PassDeclared,
+    )
+    .map_err(|error| format!("error: {error}\n"))?;
+    if result.faulted {
+        errln!("{}", result.text);
+        for line in result.fault_context {
+            errln!("{line}");
+        }
+        return Ok(ExitCode::from(1));
+    }
+    let failures = result.done_int.ok_or_else(|| {
+        "error: the generated test entry did not return a failure count\n".to_string()
+    })?;
+    if failures < 0 {
+        return Err("error: the generated test entry returned a negative count\n".to_string());
+    }
+    Ok(if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn extension(path: &str) -> &str {

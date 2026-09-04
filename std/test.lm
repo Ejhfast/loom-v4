@@ -1,0 +1,137 @@
+# Standard test discovery and reporting.
+
+final class TestFailure implements Error
+  message: String
+
+  def init(mut self, message: String)
+    self.message = message
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append(self.message)
+  end
+end
+
+final class TestReport implements Display
+  total: Int = 0
+  passed: Int = 0
+  failures: List[String] = List[String]()
+
+  def record_pass(mut self)
+    self.total = self.total + 1
+    self.passed = self.passed + 1
+  end
+
+  def record_failure(mut self, name: String, message: String)
+    self.total = self.total + 1
+    self.failures.push("#{name}: #{message}")
+  end
+
+  def failed(self): Int
+    self.failures.len()
+  end
+
+  def append_to(self, mut builder: StringBuilder)
+    builder.append_int(self.total)
+    builder.append(if self.total == 1 then " test, " else " tests, " end)
+    builder.append_int(self.failed())
+    builder.append(if self.failed() == 1 then " failure" else " failures" end)
+    for failure in self.failures
+      builder.append("\nFAIL ")
+      builder.append(failure)
+    end
+  end
+end
+
+def pass(): Result[(), TestFailure]
+  Ok(())
+end
+
+def fail(message: Text): Result[(), TestFailure]
+  Err(TestFailure(message.to_string()))
+end
+
+def expect(condition: Bool, message: Text): Result[(), TestFailure]
+  if condition then pass() else fail(message) end
+end
+
+def equal[T: PartialEq + Display](
+  expected: T,
+  actual: T
+): Result[(), TestFailure]
+  if expected == actual
+    pass()
+  else
+    fail("expected #{display(expected)}, found #{display(actual)}")
+  end
+end
+
+def _selected(name: Text, filters: List[String]): Bool
+  if filters.is_empty() then return true end
+  for filter in filters
+    if name.contains(filter) then return true end
+  end
+  false
+end
+
+def _run_one[C, E: Error, effect e](
+  mut report: TestReport,
+  name: String,
+  escaping test: (mut C) -> Result[(), E] with e,
+  mut instance: C
+) with Vm
+  child = sys.vm.Vm().activate_or_fault(test, args: (instance,))
+  loop do
+    case child.drive()
+    in Asked(request)
+      child.dispatch(request)
+    in Done(result)
+      case result
+      in Ok(_) then report.record_pass()
+      in Err(problem) then report.record_failure(name, display(problem))
+      end
+      return
+    in Fault(problem)
+      report.record_failure(name, "fault #{problem.code()}")
+      return
+    end
+  end
+end
+
+def run_matching(
+  modules: List[ModuleCode],
+  filters: List[String]
+): TestReport with Vm
+  report = TestReport()
+  for module in modules
+    for declaration in module.declarations()
+      case declaration
+      in Class[type C: Test, () -> C](make)
+        runnable = 0
+        for member in declaration.members()
+          case member
+          in Method[type E: Error, effect e, (mut C) -> Result[(), E] with e](test)
+            runnable = runnable + 1
+            name = "#{module.name()}.#{declaration.name()}.#{member.name()}"
+            if _selected(name, filters)
+              _run_one(report, name, test, make())
+            end
+          in _ then ()
+          end
+        end
+        if runnable == 0
+          report.record_failure(
+            "#{module.name()}.#{declaration.name()}",
+            "the test class has no test methods"
+          )
+        end
+      in _ then ()
+      end
+    end
+  end
+  report
+end
+
+def run(modules: List[ModuleCode]): TestReport with Vm
+  run_matching(modules, List[String]())
+end

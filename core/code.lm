@@ -12,6 +12,10 @@ end
 final class ClassCode
 end
 
+# A class implements this marker to join test discovery.
+interface Test
+end
+
 # Opaque descriptors for exact source definitions.
 frozen class ModuleCode
   _module: Int = 0

@@ -25,6 +25,8 @@ pub struct CompileOptions {
     pub late_functions: BTreeSet<String>,
     /// Qualified or module-local class binding names.
     pub late_classes: BTreeSet<String>,
+    /// Exact visible modules available to qualified `codeof` paths.
+    pub reflection_modules: BTreeSet<String>,
 }
 
 impl CompileOptions {
@@ -49,6 +51,11 @@ impl CompileOptions {
 
     pub fn late_class(mut self, name: impl Into<String>) -> CompileOptions {
         self.late_classes.insert(name.into());
+        self
+    }
+
+    pub fn reflect_module(mut self, path: impl Into<String>) -> CompileOptions {
+        self.reflection_modules.insert(path.into());
         self
     }
 }
@@ -182,6 +189,7 @@ pub fn compile_module_with_options_and_bundle(
                 .then(|| "DynValue".to_string())
                 .into_iter()
                 .collect(),
+            reflection_modules: options.reflection_modules.clone(),
         },
     )
     .map_err(|d| d.render(source))?;

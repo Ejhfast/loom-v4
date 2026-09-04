@@ -25,7 +25,7 @@ pub mod module;
 pub mod scaffold;
 pub mod standard;
 
-pub use build::{build_package, BuildReport, ModuleReport};
+pub use build::{build_package, build_test_package, BuildReport, ModuleReport};
 pub use cache::{compile_key_with_bundle, write_atomic};
 pub use core::{
     core_link_env, core_link_env_with_bundle, core_link_unit, core_link_unit_with_bundle,

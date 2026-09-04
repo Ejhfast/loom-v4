@@ -806,6 +806,8 @@ pub struct World {
     /// restore never grows shared module state.
     pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
+    /// The host rule for policy tables created by `Vm.activate`.
+    activation_policy: ActivationPolicy,
     /// Open external resources, keyed by unforgeable world identifiers.
     bound_resources: std::collections::BTreeMap<u64, BoundResource>,
     /// The next resource identifier. Zero marks a closed handle.
@@ -892,6 +894,16 @@ pub struct World {
     metrics: WorldMetrics,
     /// True after one worker failed or returned an invalid report.
     poisoned: bool,
+}
+
+/// The host rule for policy tables created by `Vm.activate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivationPolicy {
+    /// Keep the new table empty.
+    #[default]
+    DefaultDeny,
+    /// Pass each concrete operation in the program's declared row.
+    PassDeclared,
 }
 
 /// One recorded scheduler event. A trace record names machines by

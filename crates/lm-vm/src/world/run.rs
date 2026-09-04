@@ -132,6 +132,7 @@ impl World {
                 loaded.bundle().clone(),
             ),
             host,
+            activation_policy: ActivationPolicy::DefaultDeny,
             bound_resources: std::collections::BTreeMap::new(),
             next_resource: 1,
             config,
@@ -159,6 +160,11 @@ impl World {
             world.machines[0].image = Some(image);
         }
         world
+    }
+
+    /// Select the host rule for new activation policy tables.
+    pub fn set_activation_policy(&mut self, policy: ActivationPolicy) {
+        self.activation_policy = policy;
     }
 
     pub(crate) fn register_namespace(

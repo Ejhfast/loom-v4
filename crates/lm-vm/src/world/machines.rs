@@ -1421,6 +1421,16 @@ impl World {
                     );
                     return;
                 }
+                if self.activation_policy == ActivationPolicy::PassDeclared {
+                    let (operations, groups) = self.declared_grants(target, func);
+                    let table = &mut self.machines[target as usize].table;
+                    for operation in operations {
+                        table.set_exact(operation, Some(Action::Pass));
+                    }
+                    for group in groups {
+                        table.set_group(group, Some(Action::Pass));
+                    }
+                }
                 let code = self.code_of(target).clone();
                 self.machines[target as usize].load_frame(
                     code.as_ref(),

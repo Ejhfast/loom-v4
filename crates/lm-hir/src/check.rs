@@ -393,6 +393,8 @@ pub struct CheckOptions {
     pub core_intrinsics: std::sync::Arc<[Option<lm_abi::IntrinsicSlot>]>,
     /// Extra core definitions required by a lowering option.
     pub core_roots: BTreeSet<String>,
+    /// Exact visible modules available to qualified `codeof` paths.
+    pub reflection_modules: BTreeSet<String>,
 }
 
 impl Default for CheckOptions {
@@ -406,6 +408,7 @@ impl Default for CheckOptions {
             core: None,
             core_intrinsics: std::sync::Arc::from([]),
             core_roots: BTreeSet::new(),
+            reflection_modules: BTreeSet::new(),
         }
     }
 }
@@ -2930,6 +2933,11 @@ fn check_module_with_core_adjustment(
         let mut demand = CoreDemand::for_module(module, &options.bundle);
         demand.names.extend(options.core_roots.iter().cloned());
         crate::import::add_used_core_names(&options.imports, &module.uses, &mut demand.names);
+        crate::import::add_reflection_core_names(
+            &options.imports,
+            &options.reflection_modules,
+            &mut demand.names,
+        );
         core_materializer.reserve_unit(
             &mut ctx,
             unit,
@@ -2973,6 +2981,9 @@ fn check_module_with_core_adjustment(
     // type. Phase B fills the declarations after the core lands.
     let mut materializer = crate::import::Materializer::new(&options.imports);
     ctx.uses = resolve_uses(&mut ctx, &mut materializer, &options.imports, &module.uses)?;
+    for path in &options.reflection_modules {
+        materializer.reserve_reflection_module(&mut ctx, path, Span::new(0, 0))?;
+    }
     let import_span = module
         .uses
         .first()

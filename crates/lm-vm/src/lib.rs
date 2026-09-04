@@ -47,9 +47,9 @@ pub use schedule::{
     WakeKey,
 };
 pub use world::{
-    MailboxMetrics, ParallelContinuation, ParallelDispatch, ParallelDrive, ParallelError,
-    ParallelJob, ParallelParked, ParallelRequirement, ParallelReturned, ParallelStep, ParallelWait,
-    RootEvent, StopMode, TraceBlock, TraceEvent, World, WorldMetrics,
+    ActivationPolicy, MailboxMetrics, ParallelContinuation, ParallelDispatch, ParallelDrive,
+    ParallelError, ParallelJob, ParallelParked, ParallelRequirement, ParallelReturned,
+    ParallelStep, ParallelWait, RootEvent, StopMode, TraceBlock, TraceEvent, World, WorldMetrics,
 };
 
 /// The fault codes are manifest content, and the heap and the graph
@@ -74,6 +74,16 @@ pub use lm_verify::VerifyError;
 pub enum Outcome {
     Done(Value),
     Fault(FaultCode),
+}
+
+impl Outcome {
+    /// Return the terminal integer when the result contains one.
+    pub fn done_int(self) -> Option<i64> {
+        match self {
+            Outcome::Done(Value::Int(value)) => Some(value),
+            Outcome::Done(_) | Outcome::Fault(_) => None,
+        }
+    }
 }
 
 /// Resource limits and the fuel budget for one machine.

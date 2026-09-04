@@ -35,6 +35,41 @@ fn probe(name: &str, source: &str) -> std::path::PathBuf {
     path
 }
 
+struct PackageProbe {
+    root: std::path::PathBuf,
+}
+
+impl PackageProbe {
+    fn new(name: &str) -> PackageProbe {
+        let root = repo_root()
+            .join("target")
+            .join(format!("cli-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).expect("the package directory exists");
+        std::fs::write(
+            root.join("lm.package"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+        )
+        .expect("the package manifest writes");
+        PackageProbe { root }
+    }
+
+    fn write(&self, name: &str, source: &str) {
+        std::fs::write(self.root.join("src").join(name), source)
+            .expect("the package source writes");
+    }
+
+    fn path(&self) -> &str {
+        self.root.to_str().expect("the package path is valid UTF-8")
+    }
+}
+
+impl Drop for PackageProbe {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 #[test]
 fn run_factorial_prints_done_3628800() {
     let out = lm(&["run", "--show-result", "examples/01-basics/factorial.lm"]);
@@ -223,6 +258,97 @@ fn help_and_version_succeed() {
         stdout(&version),
         format!("lm {}\n", env!("CARGO_PKG_VERSION"))
     );
+}
+
+#[test]
+fn test_runs_discovered_methods_instead_of_main() {
+    let package = PackageProbe::new("clipass");
+    package.write("main.lm", "print(\"MAIN\\n\")\n0\n");
+    package.write(
+        "suite.lm",
+        r#"
+use std.test
+
+class ArithmeticTest implements Test
+  def adds(self): Result[(), test.TestFailure]
+    test.equal(4, 2 + 2)
+  end
+end
+"#,
+    );
+    let output = lm(&["test", package.path()]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "1 test, 0 failures\n");
+    assert!(!stdout(&output).contains("MAIN"));
+}
+
+#[test]
+fn test_returns_failure_status_and_accepts_a_filter() {
+    let package = PackageProbe::new("clifilter");
+    package.write(
+        "suite.lm",
+        r#"
+use std.test
+
+class FilterTest implements Test
+  def passes(self): Result[(), test.TestFailure]
+    test.pass()
+  end
+
+  def fails(self): Result[(), test.TestFailure]
+    test.fail("selected failure")
+  end
+end
+"#,
+    );
+    let all = lm(&["test", package.path()]);
+    assert_eq!(all.status.code(), Some(1));
+    assert_eq!(
+        stdout(&all),
+        "2 tests, 1 failure\nFAIL clifilter.suite.FilterTest.fails: selected failure\n"
+    );
+
+    let selected = lm(&["test", package.path(), "--", "passes"]);
+    assert!(selected.status.success(), "{}", stderr(&selected));
+    assert_eq!(stdout(&selected), "1 test, 0 failures\n");
+}
+
+#[test]
+fn test_accepts_effectful_methods_with_an_explicit_grant() {
+    let package = PackageProbe::new("clieffect");
+    package.write(
+        "suite.lm",
+        r#"
+use std.test
+
+class RandomTest implements Test
+  def samples(self): Result[(), test.TestFailure] with Rand.Int
+    sys.rand.int(0, 2)
+    test.pass()
+  end
+end
+"#,
+    );
+    let denied = lm(&["test", package.path()]);
+    assert_eq!(denied.status.code(), Some(1));
+    assert_eq!(
+        stdout(&denied),
+        "1 test, 1 failure\nFAIL clieffect.suite.RandomTest.samples: fault PolicyDenied\n"
+    );
+
+    let output = lm(&["test", "--allow", "Rand.Int", package.path()]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "1 test, 0 failures\n");
 }
 
 #[test]

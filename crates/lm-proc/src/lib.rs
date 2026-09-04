@@ -1037,6 +1037,32 @@ pub fn run_on_worker_with_engine(
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
     engine: std::sync::Arc<lm_vm::Engine>,
 ) -> Result<WorkerOutcome, String> {
+    run_on_worker_with_engine_and_activation_policy(
+        arena,
+        namespace,
+        config,
+        limits,
+        scheduler_config,
+        grants,
+        host,
+        engine,
+        lm_vm::ActivationPolicy::DefaultDeny,
+    )
+}
+
+/// Run one program with an explicit activation policy.
+#[allow(clippy::too_many_arguments)]
+pub fn run_on_worker_with_engine_and_activation_policy(
+    arena: lm_vm::CodeArena,
+    namespace: lm_vm::NamespaceId,
+    config: lm_vm::VmConfig,
+    limits: lm_vm::WorldLimits,
+    scheduler_config: SchedulerConfig,
+    grants: &[&str],
+    host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
+    engine: std::sync::Arc<lm_vm::Engine>,
+    activation_policy: lm_vm::ActivationPolicy,
+) -> Result<WorkerOutcome, String> {
     std::thread::scope(|scope| {
         let worker = std::thread::Builder::new()
             .stack_size(WORKER_STACK)
@@ -1049,6 +1075,7 @@ pub fn run_on_worker_with_engine(
                     host(),
                     engine,
                 );
+                world.set_activation_policy(activation_policy);
                 for grant in grants {
                     world
                         .allow(grant)
@@ -1063,6 +1090,7 @@ pub fn run_on_worker_with_engine(
                     .unwrap_or_default();
                 Ok(WorkerOutcome {
                     faulted: matches!(outcome, Outcome::Fault(_)),
+                    done_int: outcome.done_int(),
                     text: world.show_outcome(&outcome),
                     fault_context,
                 })
@@ -1083,6 +1111,8 @@ pub fn run_on_worker_with_engine(
 pub struct WorkerOutcome {
     /// True when the root machine faulted.
     pub faulted: bool,
+    /// The terminal integer when the root returned one.
+    pub done_int: Option<i64>,
     /// The stable outcome text, for example `Done(42)`.
     pub text: String,
     /// The retained guest locations of the root fault.
