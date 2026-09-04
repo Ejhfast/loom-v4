@@ -7,6 +7,7 @@ use super::*;
 
 impl<'o> FnChecker<'o> {
     pub(crate) fn top_level(ret: RetKind, env: TyEnv, declared_row: Row) -> FnChecker<'static> {
+        let effect_arity = env.effect_names.len() as u32;
         FnChecker {
             outer: None,
             locals: Vec::new(),
@@ -21,6 +22,7 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env,
             declared_row,
+            effect_arity,
             collect_row: false,
         }
     }
@@ -132,6 +134,19 @@ impl<'o> FnChecker<'o> {
         row: &Row,
         span: Span,
     ) -> Result<(), Diagnostic> {
+        if row
+            .iter()
+            .any(|item| matches!(item, RowElem::Var(index) if *index >= self.effect_arity))
+        {
+            return Err(Diagnostic::new(
+                "E1046",
+                format!(
+                    "this call needs scoped effect row `{}`, which cannot escape its reflection arm",
+                    ctx.display_row(&self.env, row)
+                ),
+                span,
+            ));
+        }
         if ctx.store.row_included(row, &self.declared_row) {
             return Ok(());
         }

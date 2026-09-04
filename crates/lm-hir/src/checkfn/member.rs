@@ -1455,6 +1455,7 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env: env.clone(),
             declared_row: declared_row.clone(),
+            effect_arity: effect_param_count,
             collect_row: infer_row,
         };
         let (body_h, body_ty) = match declared_ret {

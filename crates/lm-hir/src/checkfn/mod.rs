@@ -33,7 +33,7 @@ use lm_source::ast::{self, BinOp, ExprKind, PatternKind};
 use lm_source::diag::Diagnostic;
 use lm_source::span::Span;
 use lm_types::{
-    ClassId, ClassKind, Row, Type, TypeId, BOOL, DIGEST, FAULT, INT, NEVER, STRING, UNIT,
+    ClassId, ClassKind, Row, RowElem, Type, TypeId, BOOL, DIGEST, FAULT, INT, NEVER, STRING, UNIT,
 };
 use std::collections::HashSet;
 
@@ -298,6 +298,8 @@ pub(crate) struct FnChecker<'o> {
     pub(crate) ctor: Option<CtorCtx>,
     pub(crate) env: TyEnv,
     declared_row: Row,
+    /// The effect parameters owned by this callable.
+    effect_arity: u32,
     /// True for the module entry: charged rows accumulate into
     /// `declared_row` instead of raising `E1046`.
     collect_row: bool,
