@@ -24,6 +24,7 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
             | lm_abi::OP_VM_RESOURCE_KIND
             | lm_abi::OP_VM_ARTIFACT
             | lm_abi::OP_COMPILER_VERIFY
+            | lm_abi::OP_VM_LINK
             | lm_abi::OP_VM_INSTANCE_ENTRY
             | lm_abi::OP_VM_STACK => 1,
             lm_abi::OP_VM_DISPATCH => 2,

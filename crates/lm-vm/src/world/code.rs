@@ -4,7 +4,7 @@
 //! installation, typed lookup, activation, and slot replacement.
 
 use super::*;
-use lm_heap::{CodeHandleKind, PortableCode, PortableCodeKind};
+use lm_heap::{CodeHandleKind, LinkedCode, LinkedCodeKind, PortableCode, PortableCodeKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy)]
@@ -307,6 +307,7 @@ impl World {
         match op {
             lm_abi::OP_VM_ARTIFACT => self.code_artifact(vm, op, args[0]),
             lm_abi::OP_COMPILER_VERIFY => self.code_verify(vm, op, args[0]),
+            lm_abi::OP_VM_LINK => self.code_link(vm, op, args[0]),
             lm_abi::OP_VM_INSTALL => self.code_install(vm, op, args[0], args[1], None),
             lm_abi::OP_VM_INSTALL_WITH => {
                 self.code_install(vm, op, args[0], args[1], Some(args[2]))
@@ -424,6 +425,123 @@ impl World {
                 let value = self.code_error(vm, &message);
                 self.finish_code_result(vm, op, value);
             }
+        }
+    }
+
+    fn code_link(&mut self, vm: VmId, op: u32, value: Value) {
+        let code = match self.portable_code(vm, value, PortableCodeKind::VerifiedModule) {
+            Ok(code) => code,
+            Err(code) => {
+                self.fault_caller(vm, op, code, "the link input is not a VerifiedModule");
+                return;
+            }
+        };
+        let artifact = match lm_bytecode::artifact::decode_with_bundle(
+            code.bytes.as_slice(),
+            self.code_of(vm).bundle(),
+            lm_bytecode::artifact::ArtifactLimits::default(),
+        ) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                self.finish_code_error(
+                    vm,
+                    op,
+                    &format!("the verified module did not decode: {error}"),
+                );
+                return;
+            }
+        };
+        let Some(key) = self
+            .machines
+            .get(vm as usize)
+            .and_then(|machine| machine.image)
+        else {
+            self.finish_code_error(vm, op, "the current machine has no code image");
+            return;
+        };
+        let Some(image) = self
+            .vm_images
+            .get(key.image as usize)
+            .filter(|image| image.live && image.generation == key.generation)
+        else {
+            self.finish_code_error(vm, op, "the current code image is not live");
+            return;
+        };
+        if self
+            .machines
+            .iter()
+            .any(|machine| machine.image() == Some(key) && !machine.is_resident())
+        {
+            self.finish_code_error(vm, op, "the current code image is busy");
+            return;
+        }
+        let namespace = image.namespace;
+        let root = artifact.id();
+        let linked = self
+            .code_for_namespace(namespace)
+            .code_namespace()
+            .relocation(root)
+            .is_some();
+        if !linked {
+            let current = self.code_for_namespace(namespace).code_namespace();
+            for unit in artifact.units() {
+                if current
+                    .active_unit(unit.module_path())
+                    .is_some_and(|active| active.id() != unit.id())
+                {
+                    self.finish_code_error(
+                        vm,
+                        op,
+                        &format!("the module path `{}` is already linked", unit.module_path()),
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(module) = value.as_obj() else {
+            self.fault_caller(
+                vm,
+                op,
+                FaultCode::MalformedState,
+                "the verified module has no object reference",
+            );
+            return;
+        };
+        let linked_value =
+            self.machines[vm as usize].alloc(Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: LinkedCodeKind::Module,
+                unit: root.into_bytes(),
+                module,
+                descriptor: None,
+            })));
+        let success = linked_value.and_then(|linked_value| self.code_ok(vm, linked_value));
+        let success = match success {
+            Ok(success) => success,
+            Err(code) => {
+                self.machines[vm as usize].set_fault(code, "", Some(op));
+                return;
+            }
+        };
+        if linked {
+            self.install_value_reply(vm, success);
+            return;
+        }
+        for machine in 0..self.machines.len() {
+            if self.machines[machine].image() == Some(key)
+                && self.machines[machine].has_native_continuation()
+                && self.materialize_native_machine(machine as VmId).is_err()
+            {
+                self.machines[vm as usize].set_fault(
+                    FaultCode::MalformedState,
+                    "the native state did not materialize",
+                    Some(op),
+                );
+                return;
+            }
+        }
+        match self.install_resolved_artifact(key, artifact) {
+            Ok(_) => self.install_value_reply(vm, success),
+            Err(message) => self.finish_code_error(vm, op, &message),
         }
     }
 

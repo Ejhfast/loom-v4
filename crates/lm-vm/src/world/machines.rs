@@ -407,7 +407,7 @@ impl World {
         self.vm_image_free.push(key.image);
     }
 
-    /// Install one artifact into one stopped image.
+    /// Link one artifact into one resident image.
     #[cfg(test)]
     pub(super) fn install_artifact(
         &mut self,
@@ -1262,6 +1262,7 @@ impl World {
             }
             lm_abi::OP_VM_ARTIFACT
             | lm_abi::OP_COMPILER_VERIFY
+            | lm_abi::OP_VM_LINK
             | lm_abi::OP_VM_INSTALL
             | lm_abi::OP_VM_INSTALL_WITH
             | lm_abi::OP_VM_INSTANCE_ENTRY

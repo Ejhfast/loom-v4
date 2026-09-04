@@ -2,8 +2,9 @@
 
 use lm_compiler::build_package;
 use lm_vm::snapshot::LoadLimits;
-use lm_vm::{RecordingHost, RootEvent, TaskKey, Vm, VmConfig, World};
+use lm_vm::{Engine, EngineMode, RecordingHost, RootEvent, TaskKey, Vm, VmConfig, World};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// One temporary package tree.
 struct TempTree {
@@ -87,7 +88,7 @@ const Answer: Int = 42
     );
     tree.write(
         "app/src/main.lm",
-        r#"
+        r##"
 use lib.cases
 use lib.cases.Marker
 
@@ -118,7 +119,7 @@ for declaration in module_code.declarations()
   end
 end
 out
-"#,
+"##,
     );
     let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
         .expect("the reflective package builds");
@@ -417,6 +418,205 @@ execute()
     world.allow("Vm").expect("the VM grant exists");
     let outcome = lm_proc::run_world(&mut world);
     assert_eq!(world.show_outcome(&outcome), "Done((42, 42, 63, 63))");
+}
+
+#[test]
+fn a_runtime_module_links_and_opens_in_the_current_image() {
+    let tree = TempTree::new("runtime-link");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+def options(): CompileOptions
+  CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+def find_live(module: ModuleCode): Int
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Def[(Int) -> Int](call) then return call(21)
+    in _ then ()
+    end
+  end
+  -1
+end
+
+def run_exact(module: ModuleCode): Int with Vm
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Code[(Int) -> Int](portable)
+      image = sys.vm.Vm()
+      binding = image.install(portable).expect("the exact code installs")
+      run = image.activate(binding, args: (21,)).expect("the exact code activates")
+      return run.run().expect("the exact code runs")
+    in _ then ()
+    end
+  end
+  -1
+end
+
+def run_live_in(module: ModuleCode, image: Vm): Int with Vm
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Def[(Int) -> Int](call)
+      case image.activate(call, args: (21,))
+      in Ok(run)
+        case run.run()
+        in Ok(value) then return value
+        in Err(_) then return -2
+        end
+      in Err(_) then return -2
+      end
+    in _ then ()
+    end
+  end
+  -1
+end
+
+def module_is_local(module: ModuleCode): Bool with Vm
+  image = sys.vm.Vm()
+  program = do || module.name() end
+  image.activate(program, args: ()).is_err()
+end
+
+def execute(): (String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
+  old_image = sys.vm.Vm()
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  artifact = sys.compiler.compile(
+    "plugin",
+    "plugin.lm",
+    "def twice(value: Int): Int\n  value * 2\nend\n",
+    env,
+    options()
+  ).expect("the plugin compiles")
+  verified = artifact.verify().expect("the plugin verifies")
+  first = sys.vm.link(verified).expect("the plugin links")
+  second = sys.vm.link(verified).expect("the plugin links once")
+  new_image = sys.vm.Vm()
+  (
+    first.name(),
+    find_live(first),
+    run_exact(first),
+    find_live(second),
+    run_live_in(first, new_image),
+    run_live_in(first, old_image),
+    module_is_local(first)
+  )
+end
+
+execute()
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the runtime link package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    for mode in [
+        EngineMode::Interpreter,
+        EngineMode::Auto,
+        EngineMode::Native,
+    ] {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+        let mut world = World::new_with_engine(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(lm_host::CliHost::new(1)),
+            Arc::new(Engine::new(mode)),
+        );
+        world.allow("Compiler").expect("the compiler grant exists");
+        world.allow("Vm").expect("the VM grant exists");
+        let outcome = lm_proc::run_world(&mut world);
+        let shown = world.show_outcome(&outcome);
+        let dump = world.dump_live(&outcome);
+        assert_eq!(
+            shown, "Done((\"plugin\", 42, 42, 42, 42, -2, true))",
+            "mode {mode:?}\n{dump}"
+        );
+        let gate = world.next_gate();
+        let snapshot = world
+            .capture_snapshot(gate, 0, false)
+            .expect("the linked image captures");
+        assert_eq!(snapshot.world().vm_images[0].instances.len(), 1);
+        let encoded = snapshot.bytes().expect("the linked snapshot encodes");
+        lm_testkit::load_snapshot_for_artifact_bytes(&bytes, encoded, LoadLimits::default())
+            .expect("the linked snapshot admits");
+    }
+}
+
+#[test]
+fn a_runtime_link_rejects_an_existing_module_path() {
+    let tree = TempTree::new("link-conflict");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    let source = r#"
+def options(): CompileOptions
+  CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+def execute(): Bool with Compiler, Vm
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  artifact = sys.compiler.compile(
+    "app.main",
+    "replacement.lm",
+    "def replacement(): Int\n  42\nend\n",
+    env,
+    options()
+  ).expect("the conflicting module compiles")
+  verified = artifact.verify().expect("the conflicting module verifies")
+  sys.vm.link(verified).is_err()
+end
+
+execute()
+"#;
+    tree.write("app/src/main.lm", source);
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the conflict test package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_host::CliHost::new(1)),
+    );
+    world.allow("Compiler").expect("the compiler grant exists");
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(true)");
+    let gate = world.next_gate();
+    let snapshot = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the unchanged image captures");
+    assert!(snapshot.world().vm_images[0].instances.is_empty());
 }
 
 #[test]
@@ -758,6 +958,91 @@ descriptor.name()
         panic!("the restored program does not finish");
     };
     assert_eq!(restored.show_value_of(vm, value), "\"lib.data\"");
+}
+
+#[test]
+fn a_runtime_linked_descriptor_survives_an_external_snapshot() {
+    let tree = TempTree::new("linked-snapshot");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+def options(): CompileOptions
+  CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+def execute(): ModuleCode with Compiler, Vm
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  artifact = sys.compiler.compile(
+    "plugin",
+    "plugin.lm",
+    "def answer(): Int\n  42\nend\n",
+    env,
+    options()
+  ).expect("the plugin compiles")
+  verified = artifact.verify().expect("the plugin verifies")
+  sys.vm.link(verified).expect("the plugin links")
+end
+
+execute()
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the linked snapshot package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_host::CliHost::new(1)),
+        Arc::new(Engine::new(EngineMode::Native)),
+    );
+    world.allow("Compiler").expect("the compiler grant exists");
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(<linked module>)");
+    let gate = world.next_gate();
+    let snapshot = world
+        .capture_snapshot(gate, 0, false)
+        .expect("the linked result captures");
+    assert_eq!(snapshot.world().vm_images[0].instances.len(), 1);
+    let encoded = snapshot.bytes().expect("the snapshot encodes");
+    let admitted =
+        lm_testkit::load_snapshot_for_artifact_bytes(&bytes, encoded, LoadLimits::default())
+            .expect("the external snapshot admits");
+
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact republishes");
+    let mut restored = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    let target = restored.new_child(0).expect("the restore target exists");
+    let vm = restored
+        .restore_image(0, target, &admitted)
+        .expect("the snapshot restores");
+    let RootEvent::Done(value) = restored.run_machine(vm) else {
+        panic!("the restored program does not finish");
+    };
+    assert_eq!(restored.show_value_of(vm, value), "<linked module>");
 }
 
 #[test]

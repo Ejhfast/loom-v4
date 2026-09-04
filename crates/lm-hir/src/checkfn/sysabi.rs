@@ -347,6 +347,30 @@ impl<'o> FnChecker<'o> {
                 },
             });
         }
+        if group == "Vm" && member == "link" {
+            if args.len() != 1 {
+                return Err(Diagnostic::new(
+                    "E1006",
+                    format!("`sys.vm.link` expects 1 argument(s), found {}", args.len()),
+                    span,
+                ));
+            }
+            let verified_ty = Self::core_class(ctx, "VerifiedModule");
+            let verified = self.check_expr(ctx, &args[0], verified_ty)?;
+            self.charge_op(ctx, lm_abi::OP_VM_LINK, span)?;
+            let module = Self::core_class(ctx, "ModuleCode");
+            let error = Self::core_class(ctx, "CodeError");
+            let ty = Self::core_inst(ctx, "Result", vec![module, error]);
+            return Ok(HExpr {
+                flow: Flow::Normal,
+                ty,
+                mutable: true,
+                kind: HExprKind::Perform {
+                    op: lm_abi::OP_VM_LINK,
+                    args: vec![verified],
+                },
+            });
+        }
         // `sys.vm.snapshot_self()` performs `Vm.SnapshotSelf`. The
         // calling function cannot name the enclosing machine result
         // type, so the reply is an untyped `VmSnapshot`.

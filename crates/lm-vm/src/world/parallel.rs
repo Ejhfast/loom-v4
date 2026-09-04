@@ -887,6 +887,16 @@ impl World {
                     Err(_) => return Some(ParallelRequirement::Ready),
                 }
             }
+            lm_abi::OP_VM_LINK => {
+                let Some(key) = self
+                    .machines
+                    .get(source as usize)
+                    .and_then(|slot| slot.image())
+                else {
+                    return Some(ParallelRequirement::Ready);
+                };
+                return Some(self.image_residency_requirement(source, key));
+            }
             lm_abi::OP_VM_REPLACE_FUNCTION
             | lm_abi::OP_VM_REPLACE_CLASS
             | lm_abi::OP_VM_REPLACE_VALUE
@@ -930,6 +940,20 @@ impl World {
                 Err(_) => return ParallelRequirement::Ready,
             };
             queue.extend(references);
+        }
+        ParallelRequirement::Ready
+    }
+
+    fn image_residency_requirement(&self, source: VmId, key: VmImageKey) -> ParallelRequirement {
+        for (vm, slot) in self.machines.iter().enumerate() {
+            let vm = vm as VmId;
+            if vm == source || slot.image() != Some(key) {
+                continue;
+            }
+            let requirement = self.machine_requirement(vm, slot.generation());
+            if requirement != ParallelRequirement::Ready {
+                return requirement;
+            }
         }
         ParallelRequirement::Ready
     }

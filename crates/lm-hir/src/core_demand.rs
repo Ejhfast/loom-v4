@@ -525,6 +525,9 @@ impl CoreDemand {
         match (group, member) {
             ("Vm", "Vm") => self.add_vm_surface(),
             ("Vm", "artifact") => self.name("Artifact"),
+            ("Vm", "link") => {
+                self.add_names(&["VerifiedModule", "ModuleCode", "CodeError", "Result"])
+            }
             ("Vm", "snapshot_self" | "load_snapshot") => {
                 self.name("Result");
                 self.name("SnapshotError");

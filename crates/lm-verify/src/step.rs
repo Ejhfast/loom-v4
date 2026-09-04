@@ -2567,6 +2567,20 @@ pub(crate) fn step(
                             let result = ctx.result_inst(verified, error).map_err(&fail)?;
                             push(state, result)?;
                         }
+                        lm_abi::OP_VM_LINK => {
+                            let verified = ctx
+                                .plain_inst(ctx.core.verified_module, "VerifiedModule")
+                                .map_err(&fail)?;
+                            pop_expect(state, verified)?;
+                            let module = ctx
+                                .plain_inst(ctx.core.module_code, "ModuleCode")
+                                .map_err(&fail)?;
+                            let error = ctx
+                                .plain_inst(ctx.core.code_error, "CodeError")
+                                .map_err(&fail)?;
+                            let result = ctx.result_inst(module, error).map_err(&fail)?;
+                            push(state, result)?;
+                        }
                         lm_abi::OP_VM_INSTALL | lm_abi::OP_VM_INSTALL_WITH => {
                             if op == lm_abi::OP_VM_INSTALL_WITH {
                                 let links = ctx

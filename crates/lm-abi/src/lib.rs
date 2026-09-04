@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 45;
+pub const ABI_VERSION: u32 = 46;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -2728,13 +2728,14 @@ pub const OP_WAIT_ANY: OpSlot = 144;
 pub const OP_VM_BRANCH_ANSWER: OpSlot = 145;
 pub const OP_VM_RESTORE_DYNAMIC: OpSlot = 146;
 pub const OP_VM_STACK: OpSlot = 147;
+pub const OP_VM_LINK: OpSlot = 148;
 
 /// The exact operations, in canonical slot order.
 ///
 /// `OP_COUNT` reads the length in a constant context, so the table
 /// stays a constant.
 #[allow(clippy::large_const_arrays)]
-pub const OPS: [OpDef; 148] = [
+pub const OPS: [OpDef; 149] = [
     OpDef {
         group: "Io",
         member: "ReadBytes",
@@ -4115,6 +4116,15 @@ pub const OPS: [OpDef; 148] = [
         params: &[],
         reply: AbiType::UNIT,
         schema: "[T](Run[T]) -> List[CodeLocation]",
+        snapshot: SnapshotClass::MachineState,
+    },
+    OpDef {
+        group: "Vm",
+        member: "Link",
+        kind: OpKind::VmControl,
+        params: &[],
+        reply: AbiType::UNIT,
+        schema: "(VerifiedModule) -> Result[ModuleCode, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
 ];

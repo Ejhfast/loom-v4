@@ -814,6 +814,85 @@ sender = Sender.spawn(target)
 }
 
 #[test]
+fn a_runtime_link_recalls_a_machine_that_shares_its_image() {
+    let source = r#"
+class Worker < Proc
+  def on_spawn(self): Int
+    i = 0
+    while i < 100000000
+      i = i + 1
+    end
+    i
+  end
+end
+
+def options(): CompileOptions
+  CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+end
+
+def find(module: ModuleCode): Int
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Def[() -> Int](call) then return call()
+    in _ then ()
+    end
+  end
+  -1
+end
+
+def execute(): (Int, Int) with Compiler, Proc, Vm
+  worker = Worker.spawn()
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  artifact = sys.compiler.compile(
+    "plugin",
+    "plugin.lm",
+    "def answer(): Int\n  42\nend\n",
+    env,
+    options()
+  ).expect("the plugin compiles")
+  verified = artifact.verify().expect("the plugin verifies")
+  linked = sys.vm.link(verified).expect("the plugin links")
+  (find(linked), worker.done().value())
+end
+
+execute()
+"#;
+    let bytes =
+        compile_to_bytes("parallel-link.lm", source).expect("the parallel link program compiles");
+    let (arena, namespace) =
+        publish_artifact_bytes(&bytes).expect("the parallel link program publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Native));
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_host::CliHost::new(1)),
+        Arc::clone(&engine),
+    );
+    world.allow("Compiler").expect("the compiler grant exists");
+    world.allow("Proc").expect("the proc grant exists");
+    world.allow("Vm").expect("the VM grant exists");
+    let mut scheduler = Scheduler::default();
+    let outcome = scheduler
+        .run_parallel(&mut world, 2)
+        .expect("the parallel link world runs");
+    assert_eq!(world.show_outcome(&outcome), "Done((42, 100000000))");
+    assert!(scheduler.stats().max_active_leases > 1);
+    assert!(scheduler.stats().worker_recalls > 0);
+    assert!(engine.metrics().native_continuation_materializations > 0);
+}
+
+#[test]
 fn allocating_workers_stay_inside_the_worker_pool() {
     let source = r#"
 class Builder < Proc
