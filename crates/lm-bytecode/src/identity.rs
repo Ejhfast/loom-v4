@@ -68,7 +68,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// semantics, the canonical identity encoding, the hash domains, or
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
-pub const COMPILER_ABI_VERSION: u32 = 57;
+pub const COMPILER_ABI_VERSION: u32 = 58;
 
 /// The refinement work budget of one component.
 ///

@@ -579,6 +579,7 @@ pub enum ReflectKind {
     Function,
     Method,
     Constant,
+    Code,
 }
 
 /// One checked reflection arm with scoped generic parameters.

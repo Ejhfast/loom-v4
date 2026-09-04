@@ -5507,12 +5507,10 @@ fn resolve_class(
     let valid_native_arity = match native_repr {
         Some(NativeRepr::List) => type_names.len() == 1,
         Some(NativeRepr::Tuple(arity)) => type_names.len() == arity as usize,
-        Some(
-            NativeRepr::Map
-            | NativeRepr::FunctionCode
-            | NativeRepr::FunctionDef
-            | NativeRepr::FunctionBinding,
-        ) => type_names.len() == 2,
+        Some(NativeRepr::Map | NativeRepr::FunctionDef | NativeRepr::FunctionBinding) => {
+            type_names.len() == 2
+        }
+        Some(NativeRepr::FunctionCode) => type_names.len() == 1,
         Some(_) => type_names.is_empty(),
         None => true,
     };

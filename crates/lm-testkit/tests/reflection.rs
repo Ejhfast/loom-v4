@@ -47,7 +47,7 @@ fn an_exact_module_lists_only_source_declarations() {
     );
     tree.write(
         "lib/src/cases.lm",
-        r##"
+        r#"
 interface Marker
   def marked(self): Bool
 end
@@ -78,7 +78,7 @@ def twice(value: Int): Int
 end
 
 const Answer: Int = 42
-"##,
+"#,
     );
     tree.write(
         "app/lm.package",
@@ -87,7 +87,7 @@ const Answer: Int = 42
     );
     tree.write(
         "app/src/main.lm",
-        r##"
+        r#"
 use lib.cases
 use lib.cases.Marker
 
@@ -118,7 +118,7 @@ for declaration in module_code.declarations()
   end
 end
 out
-"##,
+"#,
     );
     let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
         .expect("the reflective package builds");
@@ -177,6 +177,246 @@ out
     let mut vm = Vm::new(arena, namespace, VmConfig::default());
     let outcome = vm.run();
     assert_eq!(vm.show_outcome(&outcome), "Done([\"1:core.Test\"])");
+}
+
+#[test]
+fn an_exact_open_returns_portable_function_code() {
+    let tree = TempTree::new("exact-open");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "def twice(value: Int): Int\n  value * 2\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r##"
+use lib.cases
+
+def run(module: ModuleCode): Int with Vm
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Code[(Int) -> Int](portable)
+      child = sys.vm.Vm()
+      binding = child.install(portable).expect("the code installs")
+      active = child.activate(binding, args: (21,)).expect("the code activates")
+      return active.run().expect("the code runs")
+    in _ then ()
+    end
+  end
+  0
+end
+
+run(codeof(cases))
+"##,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the exact open package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(42)");
+}
+
+#[test]
+fn an_exact_member_open_preserves_a_mutable_receiver() {
+    let tree = TempTree::new("exact-mutable-member");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        r#"
+class Counter
+  value: Int = 41
+
+  def bump(mut self): Int
+    self.value = self.value + 1
+    self.value
+  end
+end
+"#,
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r##"
+use lib.cases
+
+def run(module: ModuleCode): Int with Vm
+  for declaration in module.declarations()
+    case module.open(declaration)
+    in Class[type C, () -> C](make)
+      instance = make()
+      for member in declaration.members()
+        if member.name() == "bump"
+          case module.open(member)
+          in Code[(mut C) -> Int](portable)
+            child = sys.vm.Vm()
+            binding = child.install(portable).expect("the method installs")
+            active = child.activate(binding, args: (instance,)).expect("the method activates")
+            return active.run().expect("the method runs")
+          in _ then return -1
+          end
+        end
+      end
+    in _ then ()
+    end
+  end
+  0
+end
+
+run(codeof(cases))
+"##,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the exact member package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(42)");
+}
+
+#[test]
+fn a_live_open_reads_the_current_image_binding() {
+    let tree = TempTree::new("live-binding");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "def twice(value: Int): Int\n  value * 2\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.cases
+use lib.cases.twice
+
+def direct(value: Int): Int
+  twice(value)
+end
+
+def reflected(value: Int): Int
+  module = codeof(cases)
+  for declaration in module.declarations()
+    if declaration.name() == "twice"
+      case module.open(declaration)
+      in Def[(Int) -> Int](call) then return call(value)
+      in _ then return -1
+      end
+    end
+  end
+  -2
+end
+
+def run(
+  image: Vm,
+  function: FunctionBinding[(Int,), Int],
+  value: Int
+): Int with Vm
+  active = image.activate(function, args: (value,)).expect("the call activates")
+  active.run().expect("the call runs")
+end
+
+def execute(): (Int, Int, Int, Int) with Compiler, Vm
+  image = sys.vm.Vm()
+  original = image.install(codeof(twice)).expect("the original installs")
+  direct_call = image.install(direct).expect("the direct call installs")
+  reflected_call = image.install(reflected).expect("the reflected call installs")
+  first_direct = run(image, direct_call, 21)
+  first_reflected = run(image, reflected_call, 21)
+
+  spec = codeof(twice).definition()
+  definitions = List[(String, DefinitionSpec)]()
+  definitions.push(("twice", spec))
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    definitions
+  )
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = sys.compiler.compile(
+    spec.identity.module_name,
+    "twice-revision.lm",
+    "def twice(value: Int): Int\n  value * 3\nend\n",
+    env,
+    options
+  ).expect("the revision compiles")
+  verified = artifact.verify().expect("the revision verifies")
+  code = verified.function_code[(Int) -> Int]("twice").expect("the function exists")
+  replacement = image.install(code).expect("the revision installs")
+  image.replace(original, replacement).expect("the binding changes")
+
+  (
+    first_direct,
+    first_reflected,
+    run(image, direct_call, 21),
+    run(image, reflected_call, 21)
+  )
+end
+
+execute()
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the live binding package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(lm_host::CliHost::new(1)),
+    );
+    world.allow("Compiler").expect("the compiler grant exists");
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done((42, 42, 63, 63))");
 }
 
 #[test]

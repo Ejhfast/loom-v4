@@ -3594,7 +3594,7 @@ pub const OPS: [OpDef; 148] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](VerifiedModule) -> Result[FunctionCode[A,T], CodeError]",
+        schema: "[F](VerifiedModule) -> Result[FunctionCode[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3603,7 +3603,7 @@ pub const OPS: [OpDef; 148] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](VerifiedModule, String) -> Result[FunctionCode[A,T], CodeError]",
+        schema: "[F](VerifiedModule, String) -> Result[FunctionCode[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {

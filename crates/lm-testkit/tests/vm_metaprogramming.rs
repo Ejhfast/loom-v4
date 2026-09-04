@@ -257,7 +257,7 @@ def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
     options
   ).map_error() { |error: CompileErrors| error.message }?
   module = artifact.verify().map_error() { |error: CodeError| error.message }?
-  code = module.function_code[(Int,), Int]("add").map_error() {
+  code = module.function_code[(Int) -> Int]("add").map_error() {
     |error: CodeError| error.message
   }?
   image = sys.vm.Vm()
@@ -492,7 +492,7 @@ def execute(): Result[(Int, Int), String] with Compiler.CompileSyntax, Compiler.
     options
   ).map_error() { |error: CompileErrors| error.message }?
   module = artifact.verify().map_error() { |error: CodeError| error.message }?
-  code = module.function_code[(Int,), Int]("add").map_error() {
+  code = module.function_code[(Int) -> Int]("add").map_error() {
     |error: CodeError| error.message
   }?
   replacement_definition = code.definition()
@@ -2016,7 +2016,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
   in Ok(module) then module
   in Err(_) then return false
   end
-  first_source = case first_module.function_code[(Int,), Int]("step")
+  first_source = case first_module.function_code[(Int) -> Int]("step")
   in Err(_) then return false
   in Ok(code)
     case code.source()
@@ -2024,7 +2024,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
     in Some(source) then source
     end
   end
-  second_source = case second_module.function_code[(Int,), Int]("step")
+  second_source = case second_module.function_code[(Int) -> Int]("step")
   in Err(_) then return false
   in Ok(code)
     case code.source()
@@ -3672,7 +3672,7 @@ def execute(): Result[Int, String] with Compiler.Compile, Compiler.Verify, Vm
     options
   ).map_error() { |error: CompileErrors| error.message }?
   module = artifact.verify().map_error() { |error: CodeError| error.message }?
-  code = module.function_code[(Int,), Int]("slow").map_error() {
+  code = module.function_code[(Int) -> Int]("slow").map_error() {
     |error: CodeError| error.message
   }?
   image = sys.vm.Vm()

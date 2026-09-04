@@ -3007,6 +3007,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 ReflectKind::Function => lm_bytecode::ReflectionKind::Function,
                 ReflectKind::Method => lm_bytecode::ReflectionKind::Method,
                 ReflectKind::Constant => lm_bytecode::ReflectionKind::Constant,
+                ReflectKind::Code => lm_bytecode::ReflectionKind::Code,
             };
             self.emit(extended(ExtendedInstr::ReflectionRefine {
                 pattern: lm_bytecode::ReflectionPattern::new(kind, arm.pattern)

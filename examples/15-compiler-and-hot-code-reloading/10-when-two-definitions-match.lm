@@ -57,7 +57,7 @@ def revise(label: String, source: String): String with Compiler, Vm
   in Ok(value) then value
   in Err(problem) then return "#{label}: #{problem.message}"
   end
-  code = case module.function_code[(Int,), Int]("rate")
+  code = case module.function_code[(Int) -> Int]("rate")
   in Ok(value) then value
   in Err(problem) then return "#{label}: #{problem.message}"
   end
@@ -85,7 +85,7 @@ def two_modules(): String with Compiler, Vm
   end
   a = case left.verify()
   in Ok(m)
-    case m.function_code[(Int,), Int]("rate")
+    case m.function_code[(Int) -> Int]("rate")
     in Ok(code) then code.definition()
     in Err(problem) then return problem.message
     end
@@ -93,7 +93,7 @@ def two_modules(): String with Compiler, Vm
   end
   b = case right.verify()
   in Ok(m)
-    case m.function_code[(Int,), Int]("rate")
+    case m.function_code[(Int) -> Int]("rate")
     in Ok(code) then code.definition()
     in Err(problem) then return problem.message
     end

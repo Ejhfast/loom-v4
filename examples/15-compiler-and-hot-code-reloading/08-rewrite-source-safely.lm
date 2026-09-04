@@ -101,7 +101,7 @@ def go(): Result[(Bool, Int, Int), String] with Compiler, Vm
     options
   ).map_error() { |e: CompileErrors| e.message }?
   module = artifact.verify().map_error() { |e: CodeError| e.message }?
-  code = module.function_code[(), Int]("limit").map_error() {
+  code = module.function_code[() -> Int]("limit").map_error() {
     |e: CodeError| e.message
   }?
 

@@ -966,6 +966,7 @@ pub enum ReflectionKind {
     Method = 2,
     Constant = 3,
     ClassDescriptor = 4,
+    Code = 5,
 }
 
 impl ReflectionKind {
@@ -976,6 +977,7 @@ impl ReflectionKind {
             2 => Some(ReflectionKind::Method),
             3 => Some(ReflectionKind::Constant),
             4 => Some(ReflectionKind::ClassDescriptor),
+            5 => Some(ReflectionKind::Code),
             _ => None,
         }
     }
@@ -1007,7 +1009,8 @@ impl ReflectionPattern {
             1 => ReflectionKind::Function,
             2 => ReflectionKind::Method,
             3 => ReflectionKind::Constant,
-            _ => ReflectionKind::ClassDescriptor,
+            4 => ReflectionKind::ClassDescriptor,
+            _ => ReflectionKind::Code,
         }
     }
 
@@ -2105,7 +2108,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 74;
+pub const VERSION: u16 = 75;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -5606,6 +5609,10 @@ mod tests {
             }),
             Instr::Extended(ExtendedInstr::ReflectionRefine {
                 pattern: ReflectionPattern::new(ReflectionKind::ClassDescriptor, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::Code, 1).unwrap(),
                 fail: 0,
             }),
             Instr::Extended(ExtendedInstr::ReflectionEnd {

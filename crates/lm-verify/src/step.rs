@@ -1064,17 +1064,18 @@ pub(crate) fn step(
         }
         Instr::Extended(ExtendedInstr::FunctionCode { func: target }) => {
             let target = &module.funcs[*target as usize];
-            let input = if target.params.is_empty() {
-                TY_UNIT
-            } else {
-                ctx.intern(BcType::Tuple(target.params.clone()))
-            };
+            let callable = ctx.intern(BcType::Fn(
+                target.params.clone(),
+                target.param_muts.clone(),
+                target.ret,
+                target.row.clone(),
+            ));
             let function_code = ctx.core.function_code.ok_or_else(|| {
                 fail(
                     "the module does not carry the pinned core FunctionCode definition".to_string(),
                 )
             })?;
-            let result = ctx.intern(BcType::Inst(function_code, vec![input, target.ret]));
+            let result = ctx.intern(BcType::Inst(function_code, vec![callable]));
             push(state, result)?;
         }
         Instr::Extended(ExtendedInstr::ClassCode { .. }) => {
@@ -1239,6 +1240,17 @@ pub(crate) fn step(
                     .plain_inst(ctx.core.declaration_code, "DeclarationCode")
                     .map_err(&fail)?;
                 push(state, declaration)?;
+            } else if kind == lm_bytecode::ReflectionKind::Code {
+                let function_code = ctx.core.function_code.ok_or_else(|| {
+                    fail(
+                        "the module does not carry the pinned core FunctionCode definition"
+                            .to_string(),
+                    )
+                })?;
+                push(
+                    state,
+                    ctx.intern(BcType::Inst(function_code, vec![metadata.params[0]])),
+                )?;
             } else {
                 push(state, metadata.params[0])?;
             }
@@ -2576,11 +2588,21 @@ pub(crate) fn step(
                                 ctx.plain_inst(ctx.core.instance, "Instance")
                                     .map_err(&fail)?
                             } else if let BcType::Inst(class, args) = code_ty.clone() {
-                                if ctx.core.function_code != Some(class) || args.len() != 2 {
+                                if ctx.core.function_code != Some(class) || args.len() != 1 {
                                     return Err(fail(
                                         "`Vm.Install` has invalid code input".to_string(),
                                     ));
                                 }
+                                let BcType::Fn(params, _, ret, _) = ctx.ty(args[0]) else {
+                                    return Err(fail(
+                                        "`Vm.Install` has invalid function code".to_string(),
+                                    ));
+                                };
+                                let input = if params.is_empty() {
+                                    TY_UNIT
+                                } else {
+                                    ctx.intern(BcType::Tuple(params))
+                                };
                                 let function_binding =
                                     ctx.core.function_binding.ok_or_else(|| {
                                     fail(
@@ -2588,17 +2610,11 @@ pub(crate) fn step(
                                             .to_string(),
                                     )
                                 })?;
-                                ctx.intern(BcType::Inst(function_binding, args))
+                                ctx.intern(BcType::Inst(function_binding, vec![input, ret]))
                             } else if class_code == Some(code) {
                                 ctx.plain_inst(ctx.core.class_binding, "ClassBinding")
                                     .map_err(&fail)?
-                            } else if let BcType::Fn(params, muts, ret, _) = code_ty {
-                                if muts.iter().any(|marker| *marker) {
-                                    return Err(fail(
-                                        "`Vm.Install` cannot install a function with a mut parameter"
-                                            .to_string(),
-                                    ));
-                                }
+                            } else if let BcType::Fn(params, _, ret, _) = code_ty {
                                 let input = if params.is_empty() {
                                     TY_UNIT
                                 } else {
@@ -2673,17 +2689,15 @@ pub(crate) fn step(
                                         .to_string(),
                                 ));
                             };
-                            if found_function != function_code || function_args.len() != 2 {
+                            if found_function != function_code || function_args.len() != 1 {
                                 return Err(fail(
                                     "a module function lookup has the wrong function type"
                                         .to_string(),
                                 ));
                             }
-                            if !matches!(ctx.ty(function_args[0]), BcType::Unit | BcType::Tuple(_))
-                            {
+                            if !matches!(ctx.ty(function_args[0]), BcType::Fn(..)) {
                                 return Err(fail(
-                                    "a FunctionCode argument view must be unit or a tuple"
-                                        .to_string(),
+                                    "a FunctionCode view must hold a function type".to_string(),
                                 ));
                             }
                             push(state, reply_ty)?;

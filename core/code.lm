@@ -6,7 +6,7 @@ end
 final class VerifiedModule
 end
 
-final class FunctionCode[A, T]
+final class FunctionCode[F]
 end
 
 final class ClassCode

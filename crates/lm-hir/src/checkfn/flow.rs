@@ -549,7 +549,7 @@ impl<'o> FnChecker<'o> {
         span: Span,
     ) -> Result<(HReflectArm, bool), Diagnostic> {
         let descriptor_name = match kind_name {
-            "Class" | "Def" | "Const" | "Method" => "OpenCode",
+            "Class" | "Def" | "Const" | "Method" | "Code" => "OpenCode",
             _ => {
                 return Err(Diagnostic::new(
                     "E1041",
@@ -601,6 +601,7 @@ impl<'o> FnChecker<'o> {
                     "Def" => ReflectKind::Function,
                     "Method" => ReflectKind::Method,
                     "Const" => ReflectKind::Constant,
+                    "Code" => ReflectKind::Code,
                     _ => unreachable!("the reflection kind was checked"),
                 };
                 let refined_ty = resolve_type(ctx, &env, signature)?;
@@ -613,7 +614,12 @@ impl<'o> FnChecker<'o> {
                         signature.span,
                     ));
                 }
-                (kind, refined_ty, refined_ty)
+                let binding_ty = if kind == ReflectKind::Code {
+                    Self::core_inst(ctx, "FunctionCode", vec![refined_ty])
+                } else {
+                    refined_ty
+                };
+                (kind, refined_ty, binding_ty)
             }
             None => {
                 if kind_name != "Class" {

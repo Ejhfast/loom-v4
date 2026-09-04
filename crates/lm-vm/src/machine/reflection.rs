@@ -24,6 +24,7 @@ struct DeclarationSource<'a> {
 
 enum ReflectedValue {
     Callable(u32),
+    ExactCallable(u32),
     Constant(Constant),
     ClassDescriptor { descriptor: Value, class: u32 },
 }
@@ -300,7 +301,7 @@ impl Machine {
         else {
             return self.finish_reflection_miss(fail);
         };
-        let value = self.alloc_reflected_value(candidate)?;
+        let value = self.alloc_reflected_value(module, candidate)?;
         self.push(value)?;
         self.vm.frames.last_mut().ok_or(BAD_STATE)?.env = environment;
         Ok(())
@@ -346,25 +347,53 @@ impl Machine {
         }
         let declaration =
             portable_declaration_source(&artifact, open.descriptor.declaration as usize)?;
-        if kind != ReflectionKind::Method && open.descriptor.kind != CodeDescriptorKind::Declaration
+        if !matches!(kind, ReflectionKind::Method | ReflectionKind::Code)
+            && open.descriptor.kind != CodeDescriptorKind::Declaration
         {
             return Ok(None);
         }
         match kind {
+            ReflectionKind::Code => {
+                let function = match open.descriptor.kind {
+                    CodeDescriptorKind::Declaration => match declaration.entry.kind {
+                        ExportKind::Function => source
+                            .relocation
+                            .functions()
+                            .get(declaration.export.def as usize)
+                            .copied(),
+                        ExportKind::Class if declaration.export.ctor != lm_bytecode::NO_CTOR => {
+                            source
+                                .relocation
+                                .functions()
+                                .get(declaration.export.ctor as usize)
+                                .copied()
+                        }
+                        _ => None,
+                    },
+                    CodeDescriptorKind::Member => {
+                        let member = open.descriptor.member.as_deref().ok_or(BAD_STATE)?;
+                        if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
+                            return Ok(None);
+                        }
+                        exact_method_target(source, declaration.export.def, member)
+                    }
+                };
+                Ok(function
+                    .filter(|function| module.funcs.get(*function as usize).is_some())
+                    .map(ReflectedValue::ExactCallable))
+            }
             ReflectionKind::ClassDescriptor => {
                 if declaration.entry.kind != ExportKind::Class {
                     return Ok(None);
                 }
-                let Some(source_class) = source
-                    .relocation
-                    .classes()
-                    .get(declaration.export.def as usize)
-                    .copied()
-                else {
+                let Some(class) = current_class_target(
+                    module,
+                    slots,
+                    source,
+                    class_binding(source, declaration.export.def)?,
+                ) else {
                     return Ok(None);
                 };
-                let class = current_class_target(module, slots, source, declaration.export.def)
-                    .unwrap_or(source_class);
                 let descriptor = open.linked.descriptor.ok_or(BAD_STATE)?;
                 Ok(module
                     .classes
@@ -391,19 +420,26 @@ impl Machine {
                 if local == lm_bytecode::NO_CTOR {
                     return Ok(None);
                 }
-                let Some(callable) = source.relocation.functions().get(local as usize).copied()
-                else {
-                    return Ok(None);
-                };
                 let callable = match kind {
-                    ReflectionKind::Class => {
-                        current_constructor_target(module, slots, source, declaration.export.def)
-                            .unwrap_or(callable)
-                    }
-                    ReflectionKind::Function => {
-                        current_function_target(module, slots, source, local).unwrap_or(callable)
-                    }
+                    ReflectionKind::Class => current_constructor_target(
+                        module,
+                        slots,
+                        source,
+                        class_binding(source, declaration.export.def)?,
+                    ),
+                    ReflectionKind::Function => current_function_target(
+                        module,
+                        slots,
+                        source,
+                        &lm_bytecode::qualified_key(
+                            source.unit.module_path(),
+                            &declaration.entry.name,
+                        ),
+                    ),
                     _ => unreachable!("the reflection kind was selected above"),
+                };
+                let Some(callable) = callable else {
+                    return Ok(None);
                 };
                 Ok(module
                     .funcs
@@ -418,16 +454,14 @@ impl Machine {
                 if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
                     return Ok(None);
                 }
-                let Some(source_class) = source
-                    .relocation
-                    .classes()
-                    .get(declaration.export.def as usize)
-                    .copied()
-                else {
+                let Some(owner) = current_class_target(
+                    module,
+                    slots,
+                    source,
+                    class_binding(source, declaration.export.def)?,
+                ) else {
                     return Ok(None);
                 };
-                let owner = current_class_target(module, slots, source, declaration.export.def)
-                    .unwrap_or(source_class);
                 let Some(selector) = module
                     .selectors
                     .iter()
@@ -439,8 +473,11 @@ impl Machine {
                 let Ok(candidate) = method_of(&module.dispatch, owner, selector) else {
                     return Ok(None);
                 };
-                let candidate =
-                    current_method_target(module, slots, candidate).unwrap_or(candidate);
+                let Some(candidate) =
+                    current_method_target(module, slots, owner, selector, candidate)
+                else {
+                    return Ok(None);
+                };
                 Ok(module
                     .funcs
                     .get(candidate as usize)
@@ -488,7 +525,7 @@ impl Machine {
             *slot = Some(value);
         }
         let matches = match candidate {
-            ReflectedValue::Callable(candidate) => {
+            ReflectedValue::Callable(candidate) | ReflectedValue::ExactCallable(candidate) => {
                 let candidate = module.funcs.get(*candidate as usize).ok_or(BAD_STATE)?;
                 if candidate.type_params != 0
                     || candidate.effect_params != 0
@@ -562,13 +599,31 @@ impl Machine {
         Ok(Some(environment))
     }
 
-    fn alloc_reflected_value(&mut self, candidate: ReflectedValue) -> Result<Value, FaultCode> {
+    fn alloc_reflected_value(
+        &mut self,
+        module: &NamespaceRuntime,
+        candidate: ReflectedValue,
+    ) -> Result<Value, FaultCode> {
         match candidate {
             ReflectedValue::Callable(candidate) => self.alloc(Object::Closure {
                 func: candidate,
                 captures: Vec::new().into(),
                 env: Witness::EMPTY,
             }),
+            ReflectedValue::ExactCallable(candidate) => {
+                let artifact = module
+                    .code_namespace()
+                    .function_artifact(candidate)
+                    .map_err(|_| BAD_STATE)?;
+                let bytes = lm_bytecode::artifact::encode_with_bundle(&artifact, module.bundle())
+                    .map_err(|_| BAD_STATE)?;
+                self.alloc(Object::NativeCode(Box::new(PortableCode {
+                    kind: PortableCodeKind::Function,
+                    bytes: bytes.into(),
+                    slot: None,
+                    origin: None,
+                })))
+            }
             ReflectedValue::Constant(constant) => {
                 self.alloc_reflection_constant(&constant.value, &mut Vec::new(), 0)
             }
@@ -792,27 +847,57 @@ fn current_slot_target(
     }
 }
 
-fn source_slot(source: ReflectionSource<'_>, target: u32, class: bool) -> Option<u32> {
+fn source_slot(source: ReflectionSource<'_>, binding: &str) -> Option<u32> {
     let local = source
         .unit
         .module()
         .slots
         .iter()
-        .position(|slot| match slot.initial {
-            Some(lm_bytecode::SlotTarget::Function(function)) => !class && function == target,
-            Some(lm_bytecode::SlotTarget::Class { class: found, .. }) => class && found == target,
-            None => false,
-        })?;
+        .position(|slot| slot.binding == binding)?;
     source.relocation.slots().get(local).copied()
+}
+
+fn class_binding(source: ReflectionSource<'_>, class: u32) -> Result<&str, FaultCode> {
+    source
+        .unit
+        .module()
+        .classes
+        .get(class as usize)
+        .map(|definition| definition.key.as_str())
+        .ok_or(BAD_STATE)
+}
+
+fn exact_method_target(source: ReflectionSource<'_>, mut class: u32, member: &str) -> Option<u32> {
+    let provider = source.unit.module();
+    let selector = provider
+        .selectors
+        .iter()
+        .position(|selector| selector == member)
+        .and_then(|selector| u32::try_from(selector).ok())?;
+    loop {
+        let definition = provider.classes.get(class as usize)?;
+        if let Some((_, function)) = definition
+            .methods
+            .iter()
+            .find(|(candidate, _)| *candidate == selector)
+        {
+            return source
+                .relocation
+                .functions()
+                .get(*function as usize)
+                .copied();
+        }
+        class = definition.parent()?;
+    }
 }
 
 fn current_function_target(
     module: &NamespaceRuntime,
     slots: Option<&[ImageSlotTarget]>,
     source: ReflectionSource<'_>,
-    function: u32,
+    binding: &str,
 ) -> Option<u32> {
-    let slot = source_slot(source, function, false)?;
+    let slot = source_slot(source, binding)?;
     match current_slot_target(module, slots, slot)? {
         ImageSlotTarget::Function(function) => Some(function),
         _ => None,
@@ -823,9 +908,9 @@ fn current_class_target(
     module: &NamespaceRuntime,
     slots: Option<&[ImageSlotTarget]>,
     source: ReflectionSource<'_>,
-    class: u32,
+    binding: &str,
 ) -> Option<u32> {
-    let slot = source_slot(source, class, true)?;
+    let slot = source_slot(source, binding)?;
     match current_slot_target(module, slots, slot)? {
         ImageSlotTarget::Class { class, .. } => Some(class),
         _ => None,
@@ -836,9 +921,9 @@ fn current_constructor_target(
     module: &NamespaceRuntime,
     slots: Option<&[ImageSlotTarget]>,
     source: ReflectionSource<'_>,
-    class: u32,
+    binding: &str,
 ) -> Option<u32> {
-    let slot = source_slot(source, class, true)?;
+    let slot = source_slot(source, binding)?;
     match current_slot_target(module, slots, slot)? {
         ImageSlotTarget::Class { constructor, .. } => Some(constructor),
         _ => None,
@@ -848,12 +933,28 @@ fn current_constructor_target(
 fn current_method_target(
     module: &NamespaceRuntime,
     slots: Option<&[ImageSlotTarget]>,
-    function: u32,
+    owner: u32,
+    selector: u32,
+    initial: u32,
 ) -> Option<u32> {
-    let slot = module.slots.iter().position(|slot| {
-        matches!(slot.contract, lm_bytecode::SlotContract::Method(_))
-            && slot.initial == Some(lm_bytecode::SlotTarget::Function(function))
-    })?;
+    let selector_name = module.selectors.get(selector as usize)?;
+    let mut class = owner;
+    let binding = loop {
+        let definition = module.classes.get(class as usize)?;
+        if definition
+            .methods
+            .iter()
+            .any(|(candidate, _)| *candidate == selector)
+        {
+            break format!("{}.{}", definition.key, selector_name);
+        }
+        class = definition.parent()?;
+    };
+    let Some(slot) = module.slots.iter().position(|slot| {
+        matches!(slot.contract, lm_bytecode::SlotContract::Method(_)) && slot.binding == binding
+    }) else {
+        return Some(initial);
+    };
     let slot = u32::try_from(slot).ok()?;
     match current_slot_target(module, slots, slot)? {
         ImageSlotTarget::Function(function) => Some(function),

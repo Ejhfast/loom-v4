@@ -383,20 +383,14 @@ impl<'o> FnChecker<'o> {
                     args[0].span,
                 ));
             }
-            if sig.param_muts.iter().any(|marker| *marker) {
-                return Err(Diagnostic::new(
-                    "E1026",
-                    "`codeof` cannot reify a function with a mut parameter",
-                    args[0].span,
-                ));
-            }
-            let input = if sig.params.is_empty() {
-                UNIT
-            } else {
-                ctx.store.intern(Type::Tuple(sig.params.clone()))
-            };
+            let callable = ctx.store.intern(Type::Fn(
+                sig.params.clone(),
+                sig.param_muts.clone(),
+                sig.ret,
+                sig.row.clone(),
+            ));
             ctx.reified_functions.insert(func);
-            let ty = Self::core_inst(ctx, "FunctionCode", vec![input, sig.ret]);
+            let ty = Self::core_inst(ctx, "FunctionCode", vec![callable]);
             return Ok(HExpr {
                 flow: Flow::Normal,
                 ty,

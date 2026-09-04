@@ -885,9 +885,6 @@ impl World {
         if !body.captures.is_empty() {
             return Err("a function with captures is not portable code".to_string());
         }
-        if body.param_muts.iter().any(|marker| *marker) {
-            return Err("a function with a mut parameter is not portable code".to_string());
-        }
         Ok(function)
     }
 
@@ -1416,11 +1413,11 @@ impl World {
             self.machines[vm as usize].set_fault(FaultCode::MalformedState, "", Some(op));
             return;
         };
-        let contract = self.requested_function_contract(vm, function_class);
+        let contract = self.requested_function_code_contract(vm, function_class);
         let source = artifact.root().module().clone();
         let matches = match contract {
-            Ok((input, output)) => {
-                self.portable_function_matches_contract(vm, &source, function, input, output)
+            Ok(callable) => {
+                self.portable_function_matches_callable(vm, &source, function, callable)
             }
             Err(code) => Err(code),
         };
@@ -2396,6 +2393,35 @@ impl World {
         }
     }
 
+    fn requested_function_code_contract(
+        &mut self,
+        vm: VmId,
+        function_class: u32,
+    ) -> Result<ClosedTypeId, FaultCode> {
+        let result_class = self.core_of(vm).result.ok_or(FaultCode::MalformedState)?;
+        let (reply, env) = self.reply_type(vm)?;
+        let code = self.code_of(vm).clone();
+        let closed = self
+            .envs
+            .close(code.as_ref(), reply, env)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let function = match self.envs.ty(closed).cloned() {
+            Some(ClosedType::Inst(class, args)) if class == result_class && args.len() == 2 => {
+                args[0]
+            }
+            _ => return Err(FaultCode::MalformedState),
+        };
+        match self.envs.ty(function).cloned() {
+            Some(ClosedType::Inst(class, args)) if class == function_class && args.len() == 1 => {
+                let callable = args[0];
+                matches!(self.envs.ty(callable), Some(ClosedType::Fn(..)))
+                    .then_some(callable)
+                    .ok_or(FaultCode::MalformedState)
+            }
+            _ => Err(FaultCode::MalformedState),
+        }
+    }
+
     fn function_matches_contract(
         &mut self,
         vm: VmId,
@@ -2411,11 +2437,7 @@ impl World {
             .get(function as usize)
             .cloned()
             .ok_or(FaultCode::MalformedState)?;
-        if code.type_params != 0
-            || code.effect_params != 0
-            || !code.captures.is_empty()
-            || code.param_muts.iter().any(|marker| *marker)
-        {
+        if code.type_params != 0 || code.effect_params != 0 || !code.captures.is_empty() {
             return Ok(false);
         }
         let mut params = Vec::with_capacity(code.params.len());
@@ -2478,11 +2500,7 @@ impl World {
             .funcs
             .get(function as usize)
             .ok_or(FaultCode::MalformedState)?;
-        if code.type_params != 0
-            || code.effect_params != 0
-            || !code.captures.is_empty()
-            || code.param_muts.iter().any(|marker| *marker)
-        {
+        if code.type_params != 0 || code.effect_params != 0 || !code.captures.is_empty() {
             return Ok(false);
         }
         let target = self.code_of(vm).clone();
@@ -2529,6 +2547,69 @@ impl World {
             closed_types_match(&bundle, source_space, source_input, target_space, input)
                 && closed_types_match(&bundle, source_space, source_output, target_space, output),
         )
+    }
+
+    fn portable_function_matches_callable(
+        &mut self,
+        vm: VmId,
+        module: &lm_bytecode::Module,
+        function: u32,
+        callable: ClosedTypeId,
+    ) -> Result<bool, FaultCode> {
+        let code = module
+            .funcs
+            .get(function as usize)
+            .ok_or(FaultCode::MalformedState)?;
+        if code.type_params != 0 || code.effect_params != 0 || !code.captures.is_empty() {
+            return Ok(false);
+        }
+        let target = self.code_of(vm).clone();
+        let bundle = target.bundle().clone();
+        let mut source_types = lm_bytecode::closed::TypeEnvs::new_with_bundle(
+            lm_bytecode::closed::DEFAULT_MAX_CLOSED_TYPES,
+            lm_bytecode::closed::DEFAULT_MAX_TYPE_ENVS,
+            bundle.clone(),
+        );
+        let mut parameters = Vec::with_capacity(code.params.len());
+        for parameter in &code.params {
+            parameters.push(
+                source_types
+                    .close(module, *parameter, TypeEnvId::EMPTY)
+                    .map_err(|_| FaultCode::BoundaryLimit)?,
+            );
+        }
+        let result = source_types
+            .close(module, code.ret, TypeEnvId::EMPTY)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let row = source_types.close_row(module, &code.row, TypeEnvId::EMPTY);
+        let source_callable = source_types
+            .intern(ClosedType::Fn(
+                parameters,
+                code.param_muts.clone(),
+                result,
+                row,
+            ))
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let source_identity = lm_bytecode::identity::module_identity_with_bundle(module, &bundle)
+            .map_err(|_| FaultCode::MalformedState)?;
+        let target_identity = target.identity()?.clone();
+        let source_space = ClosedTypeSpace {
+            module,
+            types: &source_types,
+            class_hashes: &source_identity.class_hashes,
+        };
+        let target_space = ClosedTypeSpace {
+            module: target.as_ref(),
+            types: &self.envs,
+            class_hashes: &target_identity.class_hashes,
+        };
+        Ok(closed_types_match(
+            &bundle,
+            source_space,
+            source_callable,
+            target_space,
+            callable,
+        ))
     }
 
     pub(super) fn code_ok(&mut self, vm: VmId, value: Value) -> Result<Value, FaultCode> {

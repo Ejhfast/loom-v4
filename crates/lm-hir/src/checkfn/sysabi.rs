@@ -1048,24 +1048,23 @@ impl<'o> FnChecker<'o> {
                 })
             }
             ("VerifiedModule", "entry_code") | ("VerifiedModule", "function_code") => {
-                if type_args.len() != 2 {
+                if type_args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1024",
-                        format!("`{name}` needs argument and result type arguments"),
+                        format!("`{name}` needs one function type argument"),
                         name_span,
                     ));
                 }
                 let env = self.env.clone();
-                let input = resolve_type(ctx, &env, &type_args[0])?;
-                let output = resolve_type(ctx, &env, &type_args[1])?;
-                if !matches!(ctx.store.get(input), Type::Unit | Type::Tuple(_)) {
+                let callable = resolve_type(ctx, &env, &type_args[0])?;
+                if !matches!(ctx.store.get(callable), Type::Fn(..)) {
                     return Err(Diagnostic::new(
                         "E1004",
-                        "a function code argument view must be () or a tuple",
+                        "a function code view needs a function type",
                         type_args[0].span,
                     ));
                 }
-                let function = Self::core_inst(ctx, "FunctionCode", vec![input, output]);
+                let function = Self::core_inst(ctx, "FunctionCode", vec![callable]);
                 let (op, values) = if name == "entry_code" {
                     Self::expect_no_args(name, args, span)?;
                     (lm_abi::OP_VM_MODULE_ENTRY_CODE, vec![recv_h])
@@ -1472,14 +1471,15 @@ impl<'o> FnChecker<'o> {
                     }
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionCode") == Some(&class.0)
-                            && values.len() == 2 =>
+                            && values.len() == 1 =>
                     {
-                        Self::core_inst(ctx, "FunctionBinding", values)
-                    }
-                    Type::Class(class) if ctx.core_types.get("ClassCode") == Some(&class.0) => {
-                        Self::core_class(ctx, "ClassBinding")
-                    }
-                    Type::Fn(params, muts, ret, _) if !muts.iter().any(|marker| *marker) => {
+                        let Type::Fn(params, _, ret, _) = ctx.store.get(values[0]).clone() else {
+                            return Err(Diagnostic::new(
+                                "E1004",
+                                "`install` needs valid function code",
+                                args[0].span,
+                            ));
+                        };
                         let input = if params.is_empty() {
                             UNIT
                         } else {
@@ -1487,12 +1487,16 @@ impl<'o> FnChecker<'o> {
                         };
                         Self::core_inst(ctx, "FunctionBinding", vec![input, ret])
                     }
-                    Type::Fn(_, _, _, _) => {
-                        return Err(Diagnostic::new(
-                            "E1004",
-                            "`install` cannot install a function with a mut parameter",
-                            args[0].span,
-                        ));
+                    Type::Class(class) if ctx.core_types.get("ClassCode") == Some(&class.0) => {
+                        Self::core_class(ctx, "ClassBinding")
+                    }
+                    Type::Fn(params, _, ret, _) => {
+                        let input = if params.is_empty() {
+                            UNIT
+                        } else {
+                            ctx.store.intern(Type::Tuple(params))
+                        };
+                        Self::core_inst(ctx, "FunctionBinding", vec![input, ret])
                     }
                     _ => {
                         return Err(Diagnostic::new(

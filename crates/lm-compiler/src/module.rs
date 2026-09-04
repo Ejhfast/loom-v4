@@ -1161,7 +1161,8 @@ pub(crate) fn select_linkage(
                 && hir.classes[export.def as usize].native_repr.is_none()
                 && hir.classes[export.def as usize].kind != lm_types::ClassKind::EnumParent =>
             {
-                let binding = hir.classes[export.def as usize].key.clone();
+                let class = &hir.classes[export.def as usize];
+                let binding = class.key.clone();
                 selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
                     binding,
                     contract_hash: [0; 32],
@@ -1169,6 +1170,16 @@ pub(crate) fn select_linkage(
                     kind: IfaceSlotKind::Class,
                     late: false,
                 });
+                for (name, _) in &class.methods {
+                    let binding = format!("{}.{name}", class.key);
+                    selected.entry(binding.clone()).or_insert(IfaceSlotSpec {
+                        binding,
+                        contract_hash: [0; 32],
+                        key: [0; 32],
+                        kind: IfaceSlotKind::Method,
+                        late: false,
+                    });
+                }
             }
             _ => {}
         }
@@ -1911,7 +1922,7 @@ mod tests {
             "app.main",
             &SourceFile::new(
                 "app/main.lm",
-                "use lib.math.twice\ndef portable(): FunctionCode[(Int,), Int]\n  codeof(twice)\nend\ndef run(): Int\n  twice(21)\nend\nrun()\n",
+                "use lib.math.twice\ndef portable(): FunctionCode[(Int) -> Int]\n  codeof(twice)\nend\ndef run(): Int\n  twice(21)\nend\nrun()\n",
             ),
             &compile_env.freeze(),
             true,
