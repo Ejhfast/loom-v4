@@ -220,6 +220,48 @@ fn deferred_effect_replies_resume_native_execution() {
 }
 
 #[test]
+fn retained_byte_replies_collect_only_current_native_roots() {
+    const INPUT_BYTES: usize = 4 << 20;
+    let source = concat!(
+        "use std.io.read_to_end\n",
+        "def main() with Io.Write, Io.ReadBytes\n",
+        "  input = read_to_end(1073741824).expect(\"the input reads\")\n",
+        "  print(\"#{input.len()}\\n\")\n",
+        "end\n",
+        "main()\n",
+    );
+    let artifact = lm_testkit::compile_text("jit-read-to-end.lm", source)
+        .expect("the retained byte reply case compiles");
+    let (arena, namespace) = lm_testkit::publish_compiled_artifact(artifact)
+        .expect("the retained byte reply case publishes");
+    let engine = Arc::new(Engine::new(EngineMode::Auto));
+    let host = std::rc::Rc::new(std::cell::RefCell::new(RecordingHost::new(1)));
+    host.borrow_mut().input_bytes = vec![b'x'; INPUT_BYTES];
+    let mut world = World::new_with_engine(
+        arena,
+        namespace,
+        VmConfig {
+            heap_bytes: 10 << 20,
+            ..VmConfig::default()
+        },
+        Box::new(std::rc::Rc::clone(&host)),
+        Arc::clone(&engine),
+    );
+    world
+        .allow("Io.ReadBytes")
+        .expect("the byte read operation has a grant");
+    world
+        .allow("Io.Write")
+        .expect("the byte write operation has a grant");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(outcome, Outcome::Done(lm_value::Value::Unit));
+    assert_eq!(host.borrow().written_bytes, b"4194304\n");
+    let metrics = engine.metrics();
+    assert!(metrics.native_effect_exits > 0, "{metrics:?}");
+    assert!(metrics.native_continuation_resumes > 0, "{metrics:?}");
+}
+
+#[test]
 fn vm_control_replies_resume_each_native_activation() {
     let source = concat!(
         "def child(): Int with Clock.Now\n",

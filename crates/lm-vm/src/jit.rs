@@ -146,16 +146,19 @@ impl NativeContinuation {
     }
 
     pub(crate) fn extend_gc_roots(&self, roots: &mut Vec<ObjRef>) {
-        for frame in &self.canonical.frames {
+        debug_assert!(self.root_frame < self.canonical.frames.len());
+        debug_assert!(self.root_local <= self.canonical.locals.len());
+        debug_assert!(self.root_operand <= self.canonical.operands.len());
+        // Native frames replace the canonical root frame and its value windows.
+        // Only the lower canonical prefixes remain live.
+        for frame in &self.canonical.frames[..self.root_frame] {
             if let Some(crate::machine::FrameCapture::Closure(reference)) = frame.closure {
                 roots.push(reference);
             }
         }
-        for value in self
-            .canonical
-            .locals
+        for value in self.canonical.locals[..self.root_local]
             .iter()
-            .chain(self.canonical.operands.iter())
+            .chain(self.canonical.operands[..self.root_operand].iter())
         {
             if let Value::Obj(reference) = value {
                 roots.push(*reference);
