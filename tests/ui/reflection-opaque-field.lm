@@ -1,0 +1,4 @@
+def read(code: ModuleCode): Int
+  code._entry
+end
+0

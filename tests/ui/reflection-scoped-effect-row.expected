@@ -1,0 +1,2 @@
+error[E1046]: this call needs scoped effect row `e`, which cannot escape its reflection arm
+  --> tests/ui/reflection-scoped-effect-row.lm:4:5

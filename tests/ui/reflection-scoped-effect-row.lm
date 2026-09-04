@@ -1,0 +1,8 @@
+def inspect(declaration: DeclarationCode): Int
+  case declaration
+  in Def[effect e, () -> Int with e](call)
+    call()
+  in _ then 0
+  end
+end
+0

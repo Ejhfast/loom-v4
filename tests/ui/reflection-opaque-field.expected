@@ -1,0 +1,2 @@
+error[E1025]: the class `ModuleCode` has no field named `_entry`
+  --> tests/ui/reflection-opaque-field.lm:2:8

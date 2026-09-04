@@ -1,0 +1,8 @@
+def inspect(declaration: DeclarationCode)
+  case declaration
+  in Def[() -> Int](call) then ()
+  in _ then ()
+  end
+  call()
+end
+()

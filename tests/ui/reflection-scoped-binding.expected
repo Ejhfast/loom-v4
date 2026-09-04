@@ -1,0 +1,2 @@
+error[E1005]: cannot find a function named `call`
+  --> tests/ui/reflection-scoped-binding.lm:6:3

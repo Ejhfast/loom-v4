@@ -1,0 +1,2 @@
+error[E1004]: expected DeclarationCode, found Int
+  --> tests/ui/reflection-wrong-descriptor.lm:2:1

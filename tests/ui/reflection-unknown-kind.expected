@@ -1,0 +1,2 @@
+error[E1041]: unknown reflection pattern `Unknown`
+  --> tests/ui/reflection-unknown-kind.lm:3:3

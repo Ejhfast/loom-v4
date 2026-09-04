@@ -1,0 +1,7 @@
+def inspect(declaration: DeclarationCode)
+  case declaration
+  in Unknown[() -> Int](_value) then ()
+  in _ then ()
+  end
+end
+()

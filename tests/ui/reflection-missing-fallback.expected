@@ -1,0 +1,2 @@
+error[E1049]: a reflection case needs a final wildcard arm
+  --> tests/ui/reflection-missing-fallback.lm:3:6

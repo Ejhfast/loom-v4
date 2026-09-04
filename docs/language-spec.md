@@ -905,6 +905,10 @@ A nonescaping parameter can be called or passed to another nonescaping parameter
 
 It cannot be returned, stored, captured, or used inside a type argument.
 
+`nonescaping (A) -> R with e` names a nonescaping callback type explicitly.
+
+This form permits exact callback types in reflection refinements and other callable parameter types.
+
 An unannotated closure can infer an expected polymorphic effect row from its body.
 
 A standalone or ambiguous effectful closure requires an explicit `with` clause.
@@ -2891,13 +2895,25 @@ It returns no compiler-generated declarations. It also returns no declarations f
 
 Each item is a sealed `DeclarationCode` value.
 
-`DeclarationCode.name()` returns its source name. `DeclarationCode.kind()` returns `class`, `enum`, `interface`, `function`, or `constant`.
+`DeclarationCode.name()` returns its source name.
+
+`DeclarationCode.kind()` returns a `CodeKind` case.
+
+The declaration cases are `Class`, `Enum`, `Interface`, `Function`, and `Constant`.
+
+`DeclarationCode.type_parameter_count()` returns the type parameter count for a class or enum.
+
+It returns zero for other declaration kinds.
+
+`DeclarationCode.interface_names()` returns exact direct interface keys for a class or enum.
+
+It returns an empty list for other declaration kinds.
 
 `DeclarationCode.members()` returns effective methods for classes and enums. The list includes inherited methods once.
 
 Other declaration kinds return an empty list.
 
-Each member is a sealed `MemberCode` value. Its `kind()` returns `method`.
+Each member is a sealed `MemberCode` value. Its `kind()` returns `CodeKind.Method`.
 
 Programs cannot construct descriptors or access their storage fields. The verifier enforces this rule independently.
 
@@ -2930,6 +2946,8 @@ Generic declarations do not produce first-class generic callables. Callable refi
 The arm shares its enclosing locals, loop targets, return target, and effect collection.
 
 Refined type and effect parameters exist only inside that arm. Values containing those parameters cannot escape the arm.
+
+Every reflection case ends with one wildcard arm.
 
 The matched callable is an ordinary value. `Vm.activate_or_fault(call, args: values)` activates it without a wrapper closure.
 
@@ -5589,19 +5607,33 @@ end
 
 The entry gives `std.test` exact descriptors for root-package modules. Dependency tests do not run.
 
-Discovery identifies each monomorphic `Test` class. It then requires a pure zero-argument constructor.
+Discovery identifies every class that implements `Test`.
+
+A generic test class produces a class diagnostic because the runner cannot construct its type arguments.
+
+A monomorphic test class needs a pure zero-argument constructor.
 
 Each selected method has type `(C) -> Result[(),E] with e` or `(mut C) -> Result[(),E] with e`.
 
 `E` must implement `Error`. The runner creates a new class instance for each selected method.
 
-A marked class with no selected signature produces a failure. A class without a pure zero-argument constructor also produces a failure.
+A marked class with no runnable signature produces a class diagnostic.
+
+A class without a pure zero-argument constructor also produces a class diagnostic.
+
+A class diagnostic increases the failure count. It does not increase the test count.
 
 Filters match substrings of fully qualified test names.
 
+Filters also match the fully qualified class name before the runner reports a class diagnostic.
+
 The generated entry grants `Vm`, `Io.Write`, and `Args`. Other test effects need an explicit `--allow` option.
 
-The runner passes a discovered method's declared row to the root policy. This action does not grant an operation.
+The runner passes a discovered method's declared row to the root activation policy.
+
+This action does not grant an operation.
+
+Child activations use default-deny policy unless their machine has an explicit host policy.
 
 Normal artifacts use entry reachability. Therefore, unused test classes and their support code do not enter program artifacts.
 
