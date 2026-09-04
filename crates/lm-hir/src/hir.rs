@@ -76,16 +76,17 @@ pub enum HirReflectionDef {
 }
 
 /// One source declaration in a reflected module.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirReflectionDeclaration {
     pub kind: lm_bytecode::ExportKind,
     pub name: String,
     pub def: Option<HirReflectionDef>,
     pub callable: Option<u32>,
+    pub constant: Option<HirConst>,
 }
 
 /// One exact source module surface.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HirReflectionModule {
     pub name: String,
     pub declarations: Vec<HirReflectionDeclaration>,
@@ -569,6 +570,28 @@ pub struct HArm {
     pub body: Vec<HStmt>,
 }
 
+/// The declaration family accepted by one reflection arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReflectKind {
+    Class,
+    Function,
+    Method,
+    Constant,
+}
+
+/// One checked reflection arm with scoped generic parameters.
+#[derive(Clone)]
+pub struct HReflectArm {
+    pub kind: ReflectKind,
+    /// A metadata function holds the refined type and its bounds.
+    pub pattern: u32,
+    pub type_base: u32,
+    pub effect_base: u32,
+    /// The refined value enters this local slot.
+    pub binding: Option<u32>,
+    pub body: Vec<HStmt>,
+}
+
 #[derive(Clone)]
 pub enum HExprKind {
     Unit,
@@ -765,6 +788,13 @@ pub enum HExprKind {
         scrut_slot: u32,
         arms: Vec<HArm>,
     },
+    /// A descriptor case with scoped type and effect binders.
+    ReflectCase {
+        scrut: Box<HExpr>,
+        scrut_slot: u32,
+        arms: Vec<HReflectArm>,
+        fallback: Vec<HStmt>,
+    },
     /// One `PERFORM` of an exact manifest operation. The receiver of
     /// a VM control operation is the first argument.
     Perform {
@@ -901,6 +931,22 @@ impl HExpr {
                 if scrut.flow == Flow::Never {
                     Flow::Never
                 } else if arms.iter().any(|arm| block_flow(&arm.body) == Flow::Normal) {
+                    Flow::Normal
+                } else {
+                    Flow::Never
+                }
+            }
+            HExprKind::ReflectCase {
+                scrut,
+                arms,
+                fallback,
+                ..
+            } => {
+                if scrut.flow == Flow::Never {
+                    Flow::Never
+                } else if block_flow(fallback) == Flow::Normal
+                    || arms.iter().any(|arm| block_flow(&arm.body) == Flow::Normal)
+                {
                     Flow::Normal
                 } else {
                     Flow::Never

@@ -19,7 +19,7 @@
 //! shared module state: it re-interns the records of the image into
 //! the table of the target world.
 
-use crate::{BcClass, BcClassKind, BcRow, BcType, CodeTableView, NO_PARENT};
+use crate::{BcClass, BcClassKind, BcInterfaceUse, BcRow, BcType, CodeTableView, NO_PARENT};
 use lm_value::TypeEnvId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1535,6 +1535,166 @@ impl TypeEnvs {
         rows: Vec<ClosedRow>,
     ) -> Result<TypeEnvId, TypeEnvFull> {
         self.intern_env(TypeEnv { types, rows })
+    }
+
+    /// Return one interned prefix of an existing environment.
+    pub fn prefix_env(
+        &mut self,
+        env: TypeEnvId,
+        type_len: usize,
+        row_len: usize,
+    ) -> Result<TypeEnvId, TypeEnvFull> {
+        let source = self.env(env).ok_or(TypeEnvFull { types: false })?;
+        if type_len > source.types.len() || row_len > source.rows.len() {
+            return Err(TypeEnvFull { types: false });
+        }
+        let types = source.types[..type_len].to_vec();
+        let rows = source.rows[..row_len].to_vec();
+        self.env_of(types, rows)
+    }
+
+    /// Test one closed type against an applied interface bound.
+    pub fn satisfies_interface(
+        &mut self,
+        module: &impl CodeTableView,
+        subject: ClosedTypeId,
+        required: &BcInterfaceUse,
+        env: TypeEnvId,
+    ) -> Result<bool, TypeEnvFull> {
+        self.satisfies_interface_inner(module, subject, required, env, 0)
+    }
+
+    fn satisfies_interface_inner(
+        &mut self,
+        module: &impl CodeTableView,
+        subject: ClosedTypeId,
+        required: &BcInterfaceUse,
+        env: TypeEnvId,
+        depth: usize,
+    ) -> Result<bool, TypeEnvFull> {
+        if depth >= MAX_CLOSED_DEPTH as usize {
+            return Ok(false);
+        }
+        let required_types = required
+            .types
+            .iter()
+            .map(|ty| self.close(module, *ty, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        let required_rows: Vec<ClosedRow> = required
+            .rows
+            .iter()
+            .map(|row| self.close_row(module, row, env))
+            .collect();
+        let Some((class, args)) = self.closed_instance(module, subject) else {
+            return Ok(false);
+        };
+        let conformances: Vec<_> = module.conformances().iter().cloned().collect();
+        for conformance in conformances {
+            let Some(owner_args) = self.ancestor_args(module, class, &args, conformance.class)
+            else {
+                continue;
+            };
+            let owner = self.env_of(owner_args.clone(), Vec::new())?;
+            let mut premises_hold = true;
+            for premise in &conformance.premises {
+                let Some(actual) = owner_args.get(premise.param as usize).copied() else {
+                    premises_hold = false;
+                    break;
+                };
+                for bound in &premise.bounds {
+                    if !self.satisfies_interface_inner(module, actual, bound, owner, depth + 1)? {
+                        premises_hold = false;
+                        break;
+                    }
+                }
+                if !premises_hold {
+                    break;
+                }
+            }
+            if !premises_hold {
+                continue;
+            }
+            let actual_types = conformance
+                .application
+                .types
+                .iter()
+                .map(|ty| self.close(module, *ty, owner))
+                .collect::<Result<Vec<_>, _>>()?;
+            let actual_rows: Vec<ClosedRow> = conformance
+                .application
+                .rows
+                .iter()
+                .map(|row| self.close_row(module, row, owner))
+                .collect();
+            if self.interface_application_implies(
+                module,
+                subject,
+                conformance.application.interface,
+                &actual_types,
+                &actual_rows,
+                required.interface,
+                &required_types,
+                &required_rows,
+                depth + 1,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn interface_application_implies(
+        &mut self,
+        module: &impl CodeTableView,
+        subject: ClosedTypeId,
+        interface: u32,
+        types: &[ClosedTypeId],
+        rows: &[ClosedRow],
+        required_interface: u32,
+        required_types: &[ClosedTypeId],
+        required_rows: &[ClosedRow],
+        depth: usize,
+    ) -> Result<bool, TypeEnvFull> {
+        if depth >= MAX_CLOSED_DEPTH as usize {
+            return Ok(false);
+        }
+        if interface == required_interface && types == required_types && rows == required_rows {
+            return Ok(true);
+        }
+        let Some(contract) = module.interfaces().get(interface as usize).cloned() else {
+            return Ok(false);
+        };
+        let mut arguments = Vec::with_capacity(types.len() + 1);
+        arguments.push(subject);
+        arguments.extend_from_slice(types);
+        let env = self.env_of(arguments, rows.to_vec())?;
+        for parent in &contract.parents {
+            let parent_types = parent
+                .types
+                .iter()
+                .map(|ty| self.close(module, *ty, env))
+                .collect::<Result<Vec<_>, _>>()?;
+            let parent_rows: Vec<ClosedRow> = parent
+                .rows
+                .iter()
+                .map(|row| self.close_row(module, row, env))
+                .collect();
+            if self.interface_application_implies(
+                module,
+                subject,
+                parent.interface,
+                &parent_types,
+                &parent_rows,
+                required_interface,
+                required_types,
+                required_rows,
+                depth + 1,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The nominal class and closed arguments of one instance type.

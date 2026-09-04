@@ -332,12 +332,16 @@ impl<'o> FnChecker<'o> {
                 args[0].span,
             ));
         };
-        if self.lookup_slot(root).is_some() {
-            return Err(Diagnostic::new(
-                "E1026",
-                "`codeof` cannot reify a local value",
-                args[0].span,
-            ));
+        if let Some(slot) = self.lookup_slot(root) {
+            let message = if matches!(
+                ctx.store.get(self.locals[slot as usize].0),
+                Type::Fn(..) | Type::Callback(..)
+            ) {
+                "`codeof` cannot reify a local function value"
+            } else {
+                "`codeof` cannot reify a local value"
+            };
+            return Err(Diagnostic::new("E1026", message, args[0].span));
         }
         if name == root {
             if let Some(UseBinding::Module(path)) = self.use_binding(ctx, root)? {

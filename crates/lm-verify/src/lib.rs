@@ -93,6 +93,8 @@ enum Flat {
 pub struct VerifiedBlockState {
     locals: Vec<Option<u32>>,
     stack: Vec<u32>,
+    /// Metadata functions for active reflection scopes.
+    scopes: Vec<u32>,
 }
 
 impl VerifiedBlockState {
@@ -104,6 +106,11 @@ impl VerifiedBlockState {
     /// Return the proven operand types at the block entry.
     pub fn stack(&self) -> &[u32] {
         &self.stack
+    }
+
+    /// Return the active reflection pattern functions.
+    pub fn reflection_scopes(&self) -> &[u32] {
+        &self.scopes
     }
 }
 
@@ -295,7 +302,7 @@ use tables::verify_tables;
 /// key: a rule change invalidates every cached admission.
 /// The verifier covers every bytecode instruction, table contract,
 /// core role, effect row, and exported constant.
-pub const VERIFIER_VERSION: u32 = 42;
+pub const VERIFIER_VERSION: u32 = 43;
 
 /// Verify a full module. Every table and every function must pass.
 ///

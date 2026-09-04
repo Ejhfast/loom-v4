@@ -1995,6 +1995,45 @@ impl<'a> Materializer<'a> {
     }
 }
 
+/// Resolve one reflected constant through definitions already in the checker.
+pub(crate) fn reflection_constant(
+    ctx: &mut Ctx,
+    env: &ImportEnv,
+    constant: &IfaceConst,
+    name: &str,
+    span: Span,
+) -> Result<crate::hir::HirConst, Diagnostic> {
+    let mut resolver = Materializer::new(env);
+    for import in &ctx.imports {
+        if import.kind == ImportKind::Class {
+            let HirImportDef::Class(class) = import.def else {
+                continue;
+            };
+            resolver
+                .classes
+                .insert((import.module.clone(), import.name.clone()), class);
+        }
+    }
+    for (index, interface) in ctx.interfaces.iter().enumerate() {
+        if let Some(origin) = &interface.origin {
+            resolver.interfaces.insert(origin.clone(), index as u32);
+        }
+    }
+    let ty = resolver.resolve_type(ctx, &constant.ty, span)?;
+    let value = const_value_expr(ctx, &constant.value, ty).ok_or_else(|| {
+        Diagnostic::new(
+            "E1053",
+            format!("the reflected constant `{name}` has an invalid value"),
+            span,
+        )
+    })?;
+    Ok(crate::hir::HirConst {
+        name: name.to_string(),
+        ty,
+        value,
+    })
+}
+
 /// Build one imported literal expression without runtime storage.
 fn const_value_expr(ctx: &mut Ctx, value: &IfaceConstValue, expected: TypeId) -> Option<HExpr> {
     let kind = match value {

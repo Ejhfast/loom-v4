@@ -2486,6 +2486,9 @@ impl Parser<'_> {
                         span,
                     });
                 }
+                if matches!(self.peek(), Tok::LBracket) {
+                    return self.refinement_pattern(name, span);
+                }
                 let mut parts = vec![name];
                 let mut hi = span;
                 while matches!(self.peek(), Tok::Dot) {
@@ -2540,6 +2543,63 @@ impl Parser<'_> {
             other => Err(self.error("E1041", format!("expected a pattern, found {other}"))),
         }
     }
+
+    /// Parse `Kind[type T, effect e, Signature](binding)`.
+    fn refinement_pattern(&mut self, kind: String, start: Span) -> Result<Pattern, Diagnostic> {
+        self.expect(Tok::LBracket, "`[` to open the refinement")?;
+        let mut generics = Vec::new();
+        loop {
+            let is_effect = matches!(self.peek(), Tok::KwEffect);
+            let is_type = matches!(self.peek(), Tok::KwType);
+            if !is_effect && !is_type {
+                break;
+            }
+            self.pos += 1;
+            let (name, span) = self.ident("a refinement parameter name")?;
+            if generics
+                .iter()
+                .any(|generic: &GenericParam| generic.name == name)
+            {
+                return Err(Diagnostic::new(
+                    "E1014",
+                    format!("duplicate refinement parameter name `{name}`"),
+                    span,
+                ));
+            }
+            let bounds = if is_type && matches!(self.peek(), Tok::Colon) {
+                self.pos += 1;
+                let mut bounds = vec![self.interface_ref()?];
+                while matches!(self.peek(), Tok::Plus) {
+                    self.pos += 1;
+                    bounds.push(self.interface_ref()?);
+                }
+                bounds
+            } else {
+                Vec::new()
+            };
+            generics.push(GenericParam {
+                name,
+                is_effect,
+                bounds,
+                span,
+            });
+            self.expect(Tok::Comma, "`,` before the refined type")?;
+        }
+        let signature = self.type_expr()?;
+        self.expect(Tok::RBracket, "`]` to complete the refinement")?;
+        self.expect(Tok::LParen, "`(` to open the refinement binding")?;
+        let binding = self.pattern()?;
+        let close = self.expect(Tok::RParen, "`)` to complete the refinement")?;
+        Ok(Pattern {
+            kind: PatternKind::Reflect {
+                kind,
+                generics,
+                signature,
+                binding: Box::new(binding),
+            },
+            span: start.to(close.span),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2570,6 +2630,30 @@ mod tests {
         assert_eq!(class.methods.len(), 1);
         assert!(class.methods[0].mut_self);
         assert_eq!(module.entry.len(), 3);
+    }
+
+    #[test]
+    fn parses_scoped_callable_refinement() {
+        let source = "case code\nin Class[type C, effect e, () -> C with e](make) then make\nin _ then ()\nend\n";
+        let module = parse(source).unwrap();
+        let ExprKind::Case { arms, .. } = &module.entry[0].kind else {
+            panic!("expected a case expression");
+        };
+        let PatternKind::Reflect {
+            kind,
+            generics,
+            signature,
+            binding,
+        } = &arms[0].pattern.kind
+        else {
+            panic!("expected a refinement pattern");
+        };
+        assert_eq!(kind, "Class");
+        assert_eq!(generics.len(), 2);
+        assert!(!generics[0].is_effect);
+        assert!(generics[1].is_effect);
+        assert!(matches!(signature.kind, TypeExprKind::Fn(..)));
+        assert!(matches!(binding.kind, PatternKind::Name(ref name) if name == "make"));
     }
 
     #[test]

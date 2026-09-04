@@ -381,6 +381,8 @@ pub(super) fn emit_segment_body(
                 | Instr::Extended(ExtendedInstr::ReflectionName)
                 | Instr::Extended(ExtendedInstr::ReflectionDeclarationKind)
                 | Instr::Extended(ExtendedInstr::ReflectionMemberKind)
+                | Instr::Extended(ExtendedInstr::ReflectionRefine { .. })
+                | Instr::Extended(ExtendedInstr::ReflectionEnd { .. })
                 | Instr::Extended(ExtendedInstr::CodeSource { .. })
                 | Instr::Extended(ExtendedInstr::CodeDefinition)
                 | Instr::Extended(ExtendedInstr::FaultSite { .. })

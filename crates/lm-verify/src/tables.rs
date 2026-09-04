@@ -370,11 +370,13 @@ fn verify_reflections(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 ExportKind::Function => {
                     module.funcs.get(declaration.def as usize).is_some()
                         && declaration.callable == declaration.def
+                        && declaration.constant.is_none()
                 }
                 ExportKind::Class => {
                     module.classes.get(declaration.def as usize).is_some()
                         && module.funcs.get(declaration.callable as usize).is_some()
                         && ctx.constructor_class(declaration.callable) == Some(declaration.def)
+                        && declaration.constant.is_none()
                 }
                 ExportKind::Enum => {
                     module
@@ -382,11 +384,23 @@ fn verify_reflections(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                         .get(declaration.def as usize)
                         .is_some_and(|class| class.kind == BcClassKind::Abstract)
                         && no_callable
+                        && declaration.constant.is_none()
                 }
                 ExportKind::Interface => {
-                    module.interfaces.get(declaration.def as usize).is_some() && no_callable
+                    module.interfaces.get(declaration.def as usize).is_some()
+                        && no_callable
+                        && declaration.constant.is_none()
                 }
-                ExportKind::Constant => no_def && no_callable,
+                ExportKind::Constant => {
+                    let valid_constant = declaration.constant.as_ref().is_some_and(|constant| {
+                        if constant.ty as usize >= module.types.len() {
+                            return false;
+                        }
+                        constant_value_type(ctx, &constant.value, 0)
+                            .is_ok_and(|actual| ctx.is_subtype(actual, constant.ty))
+                    });
+                    no_def && no_callable && valid_constant
+                }
                 ExportKind::EnumCase => false,
             };
             if !valid {
@@ -2034,7 +2048,6 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             .params
             .iter()
             .chain(func.captures.iter())
-            .chain(func.local_types.iter())
             .chain([&func.ret])
         {
             if *t as usize >= module.types.len() {
@@ -2053,6 +2066,42 @@ fn verify_signatures(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
                 return Err(err(
                     fidx as u32,
                     "the signature uses an associated type without its interface bound",
+                ));
+            }
+        }
+        let reflection_patterns: Vec<usize> = func
+            .blocks
+            .iter()
+            .flatten()
+            .filter_map(|instruction| match instruction {
+                Instr::Extended(ExtendedInstr::ReflectionRefine { pattern, .. }) => {
+                    Some(pattern.function() as usize)
+                }
+                Instr::Extended(ExtendedInstr::ReflectionEnd { pattern, .. }) => {
+                    Some(*pattern as usize)
+                }
+                _ => None,
+            })
+            .collect();
+        for ty in &func.local_types {
+            if *ty as usize >= module.types.len() {
+                return Err(err(
+                    fidx as u32,
+                    "the local-type table references an invalid type index",
+                ));
+            }
+            let in_function_scope = ctx.vars_bounded(*ty, func.type_params, func.effect_params)
+                && ctx.projections_proven(*ty, &module.func_bounds[fidx]);
+            let in_reflection_scope = reflection_patterns.iter().any(|pattern| {
+                module.funcs.get(*pattern).is_some_and(|scope| {
+                    ctx.vars_bounded(*ty, scope.type_params, scope.effect_params)
+                        && ctx.projections_proven(*ty, &module.func_bounds[*pattern])
+                })
+            });
+            if !in_function_scope && !in_reflection_scope {
+                return Err(err(
+                    fidx as u32,
+                    "a local type uses variables outside every active scope",
                 ));
             }
         }

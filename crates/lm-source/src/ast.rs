@@ -354,6 +354,14 @@ pub enum PatternKind {
         args: Vec<Pattern>,
         has_parens: bool,
     },
+    /// Refine one reflection descriptor and bind its value.
+    /// The binders exist only inside this case arm.
+    Reflect {
+        kind: String,
+        generics: Vec<GenericParam>,
+        signature: TypeExpr,
+        binding: Box<Pattern>,
+    },
     /// A tuple pattern: `(a, b)`. One element needs a trailing
     /// comma, as a one-tuple expression does.
     Tuple(Vec<Pattern>),
@@ -738,6 +746,22 @@ fn dump_pattern(pattern: &Pattern) -> String {
                 let _ = write!(out, "({})", parts.join(", "));
             }
             out
+        }
+        PatternKind::Reflect {
+            kind,
+            generics,
+            signature,
+            binding,
+        } => {
+            let mut items: Vec<String> = generics
+                .iter()
+                .map(|generic| {
+                    let prefix = if generic.is_effect { "effect" } else { "type" };
+                    format!("{prefix} {}", generic.name)
+                })
+                .collect();
+            items.push(dump_type(signature));
+            format!("{kind}[{}]({})", items.join(", "), dump_pattern(binding))
         }
         PatternKind::Int(v) => v.to_string(),
         PatternKind::Bool(v) => v.to_string(),

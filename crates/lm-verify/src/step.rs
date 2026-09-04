@@ -106,16 +106,6 @@ pub(crate) fn step(
             ))
         }
     };
-    let hashable_map = |map: u32| -> Result<(u32, u32), VerifyError> {
-        let (key, value) = as_map(map)?;
-        if ctx.hashable_map_key(fidx, key) {
-            Ok((key, value))
-        } else {
-            Err(fail(
-                "an interface-backed map instruction needs a Hashable key type".to_string(),
-            ))
-        }
-    };
     // The claimed row of a call must sit inside the caller's row.
     let charge_row = |row: &[BcRow]| -> Result<(), VerifyError> {
         if ctx.row_included(row, &func.row) {
@@ -126,6 +116,48 @@ pub(crate) fn step(
             ))
         }
     };
+    let scope = state.scopes.last().copied().unwrap_or(fidx);
+    let scope_func = module.funcs.get(scope as usize).ok_or_else(|| {
+        fail("the active reflection scope names no metadata function".to_string())
+    })?;
+    let scope_bounds = module
+        .func_bounds
+        .get(scope as usize)
+        .ok_or_else(|| fail("the active reflection scope has no bound table".to_string()))?;
+    let check_application_scope = |app: &lm_bytecode::TypeApp| -> Result<(), VerifyError> {
+        if app.types.iter().any(|ty| {
+            !ctx.vars_bounded(*ty, scope_func.type_params, scope_func.effect_params)
+                || !ctx.projections_proven(*ty, scope_bounds)
+        }) || app
+            .rows
+            .iter()
+            .any(|row| !ctx.row_vars_bounded(row, scope_func.effect_params))
+        {
+            return Err(fail(
+                "a type application uses a variable outside the active scope".to_string(),
+            ));
+        }
+        Ok(())
+    };
+    let hashable_map = |map: u32| -> Result<(u32, u32), VerifyError> {
+        let (key, value) = as_map(map)?;
+        if ctx.hashable_map_key(scope, key) {
+            Ok((key, value))
+        } else {
+            Err(fail(
+                "an interface-backed map instruction needs a Hashable key type".to_string(),
+            ))
+        }
+    };
+    for ty in state.stack.iter().chain(state.locals.iter().flatten()) {
+        if !ctx.vars_bounded(*ty, scope_func.type_params, scope_func.effect_params)
+            || !ctx.projections_proven(*ty, scope_bounds)
+        {
+            return Err(fail(
+                "a live value uses a type outside the active scope".to_string(),
+            ));
+        }
+    }
     match instr {
         Instr::ConstUnit => push(state, TY_UNIT)?,
         Instr::ConstBool(_) => push(state, TY_BOOL)?,
@@ -719,6 +751,18 @@ pub(crate) fn step(
         Instr::CallG { func: callee, app } => {
             let sig = &module.funcs[*callee as usize];
             let app = &module.apps[*app as usize];
+            check_application_scope(app)?;
+            if !ctx.type_arguments_meet_bounds(
+                &app.types,
+                &app.rows,
+                &module.func_bounds[*callee as usize],
+                scope_bounds,
+                Some(scope),
+            ) {
+                return Err(fail(
+                    "a call type argument does not meet its interface bounds".to_string(),
+                ));
+            }
             let row = ctx.row_subst(&sig.row, &app.rows);
             charge_row(&row)?;
             let params: Vec<u32> = sig
@@ -800,6 +844,7 @@ pub(crate) fn step(
                 .ok_or_else(|| fail(format!("selector {selector} is not a class method")))?;
             let sig = &module.funcs[target as usize];
             let app = &module.apps[*app as usize];
+            check_application_scope(app)?;
             // The declaring class may be a generic ancestor. Its type
             // arguments come from the class table, not from the call
             // site, so no application can forge them.
@@ -821,8 +866,8 @@ pub(crate) fn step(
                 &targs,
                 &app.rows,
                 &module.func_bounds[target as usize],
-                &module.func_bounds[fidx as usize],
-                Some(fidx),
+                scope_bounds,
+                Some(scope),
             ) {
                 return Err(fail(
                     "a virtual call type argument does not meet its interface bounds".to_string(),
@@ -856,13 +901,23 @@ pub(crate) fn step(
                 return Err(fail("interface call on a short stack".to_string()));
             }
             let recv_ty = state.stack[state.stack.len() - 1 - argc];
+            if !ctx.vars_bounded(
+                *declared_recv_ty,
+                scope_func.type_params,
+                scope_func.effect_params,
+            ) || !ctx.projections_proven(*declared_recv_ty, scope_bounds)
+            {
+                return Err(fail(
+                    "the interface receiver type is outside the active scope".to_string(),
+                ));
+            }
             if !ctx.is_subtype(recv_ty, *declared_recv_ty)
                 || !ctx.is_subtype(*declared_recv_ty, recv_ty)
             {
                 return Err(fail("interface receiver type mismatch".to_string()));
             }
             let application = ctx
-                .interface_application(fidx, recv_ty, interface, 0)
+                .interface_application(scope, recv_ty, interface, 0)
                 .ok_or_else(|| fail("interface call lacks a proven receiver bound".to_string()))?;
             let method_application = if *app == lm_bytecode::NO_APP {
                 None
@@ -875,6 +930,9 @@ pub(crate) fn step(
             let own_rows = method_application
                 .map(|application| application.rows.as_slice())
                 .unwrap_or(&[]);
+            if let Some(application) = method_application {
+                check_application_scope(application)?;
+            }
             let mut prefix_types = Vec::with_capacity(application.types.len() + 1);
             prefix_types.push(recv_ty);
             prefix_types.extend_from_slice(&application.types);
@@ -884,7 +942,7 @@ pub(crate) fn step(
                 &requirement.type_bounds,
                 &prefix_types,
                 &application.rows,
-                fidx,
+                scope,
             ) {
                 return Err(fail(
                     "an interface call type argument does not meet its interface bounds"
@@ -898,20 +956,11 @@ pub(crate) fn step(
             rows.extend_from_slice(&application.rows);
             rows.extend_from_slice(own_rows);
             for premise in &requirement.premises {
-                let subject = ctx.subst_with_bounds(
-                    premise.subject,
-                    &types,
-                    &rows,
-                    &module.func_bounds[fidx as usize],
-                );
+                let subject = ctx.subst_with_bounds(premise.subject, &types, &rows, scope_bounds);
                 for bound in &premise.bounds {
-                    let required = ctx.subst_interface_use_with_bounds(
-                        bound,
-                        &types,
-                        &rows,
-                        &module.func_bounds[fidx as usize],
-                    );
-                    let found = ctx.interface_application(fidx, subject, required.interface, 0);
+                    let required =
+                        ctx.subst_interface_use_with_bounds(bound, &types, &rows, scope_bounds);
+                    let found = ctx.interface_application(scope, subject, required.interface, 0);
                     if found.as_ref() != Some(&required) {
                         return Err(fail(
                             "an interface method premise is not satisfied".to_string(),
@@ -957,6 +1006,16 @@ pub(crate) fn step(
         }
         Instr::MakeClosure { func: f, .. } => {
             let target = &module.funcs[*f as usize];
+            let closed = target.type_params == 0 && target.effect_params == 0;
+            if !closed
+                && (target.type_params != scope_func.type_params
+                    || target.effect_params != scope_func.effect_params
+                    || module.func_bounds[*f as usize] != *scope_bounds)
+            {
+                return Err(fail(
+                    "a closure body does not match the active generic scope".to_string(),
+                ));
+            }
             pop_args(state, &target.captures)?;
             let fn_ty = BcType::Fn(
                 target.params.clone(),
@@ -976,6 +1035,16 @@ pub(crate) fn step(
         }
         Instr::Extended(ExtendedInstr::MakeCallback { func: f, .. }) => {
             let target = &module.funcs[*f as usize];
+            let closed = target.type_params == 0 && target.effect_params == 0;
+            if !closed
+                && (target.type_params != scope_func.type_params
+                    || target.effect_params != scope_func.effect_params
+                    || module.func_bounds[*f as usize] != *scope_bounds)
+            {
+                return Err(fail(
+                    "a callback body does not match the active generic scope".to_string(),
+                ));
+            }
             pop_args(state, &target.captures)?;
             let callback_ty = BcType::Callback(
                 target.params.clone(),
@@ -1063,6 +1132,89 @@ pub(crate) fn step(
                 .map_err(&fail)?;
             pop_expect(state, member_code)?;
             push(state, TY_STR)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionRefine {
+            pattern,
+            fail: target,
+        }) => {
+            let kind = pattern.kind();
+            let pattern = pattern.function();
+            let descriptor = match kind {
+                lm_bytecode::ReflectionKind::Class
+                | lm_bytecode::ReflectionKind::Function
+                | lm_bytecode::ReflectionKind::Constant => ctx
+                    .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                    .map_err(&fail)?,
+                lm_bytecode::ReflectionKind::Method => ctx
+                    .plain_inst(ctx.core.member_code, "MemberCode")
+                    .map_err(&fail)?,
+            };
+            pop_expect(state, descriptor)?;
+            let miss = state.clone();
+            edge(*target as usize, miss)?;
+            let metadata = module
+                .funcs
+                .get(pattern as usize)
+                .ok_or_else(|| fail("reflection pattern out of range".to_string()))?;
+            if metadata.params.len() != 1
+                || metadata.param_muts != [false]
+                || !metadata.captures.is_empty()
+                || (kind != lm_bytecode::ReflectionKind::Constant
+                    && !matches!(ctx.ty(metadata.params[0]), BcType::Fn(..)))
+            {
+                return Err(fail(
+                    "reflection pattern has an invalid refined signature".to_string(),
+                ));
+            }
+            let parent = state.scopes.last().copied().unwrap_or(fidx);
+            let parent_metadata = &module.funcs[parent as usize];
+            if metadata.type_params < parent_metadata.type_params
+                || metadata.effect_params < parent_metadata.effect_params
+                || module.func_bounds[pattern as usize].get(..parent_metadata.type_params as usize)
+                    != module.func_bounds[parent as usize]
+                        .get(..parent_metadata.type_params as usize)
+            {
+                return Err(fail(
+                    "reflection pattern does not extend its parent scope".to_string(),
+                ));
+            }
+            state.scopes.push(pattern);
+            push(state, metadata.params[0])?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionEnd { pattern, bases }) => {
+            let type_base = bases.type_base();
+            let effect_base = bases.effect_base();
+            if state.scopes.last() != Some(pattern) {
+                return Err(fail("reflection scopes end out of order".to_string()));
+            }
+            state.scopes.pop();
+            let parent = state.scopes.last().copied().unwrap_or(fidx);
+            let parent_metadata = &module.funcs[parent as usize];
+            if type_base != parent_metadata.type_params
+                || effect_base != parent_metadata.effect_params
+            {
+                return Err(fail(
+                    "reflection scope base does not match its parent".to_string(),
+                ));
+            }
+            let parent_bounds = &module.func_bounds[parent as usize];
+            for ty in &state.stack {
+                if !ctx.vars_bounded(*ty, type_base, effect_base)
+                    || !ctx.projections_proven(*ty, parent_bounds)
+                {
+                    return Err(fail(
+                        "a reflection-scoped value escapes its case arm".to_string(),
+                    ));
+                }
+            }
+            for (slot, held) in state.locals.iter_mut().enumerate() {
+                let ty = func.local_types[slot];
+                if !ctx.vars_bounded(ty, type_base, effect_base)
+                    || !ctx.projections_proven(ty, parent_bounds)
+                {
+                    *held = None;
+                }
+            }
         }
         Instr::Extended(ExtendedInstr::CodeSource { ty }) => {
             let code = pop(state)?;
@@ -1169,6 +1321,18 @@ pub(crate) fn step(
                 return Err(fail("NewG cannot allocate a sealed core class".to_string()));
             }
             let app = &module.apps[*app as usize];
+            check_application_scope(app)?;
+            if !ctx.type_arguments_meet_bounds(
+                &app.types,
+                &[],
+                &module.class_bounds[*class as usize],
+                scope_bounds,
+                Some(scope),
+            ) {
+                return Err(fail(
+                    "a class type argument does not meet its interface bounds".to_string(),
+                ));
+            }
             let inside_constructor = ctx.constructor_class(fidx) == Some(*class);
             if module.classes[*class as usize].is_frozen
                 && app
@@ -1313,7 +1477,7 @@ pub(crate) fn step(
         }
         Instr::MapNew { ty, count } => {
             let (k, v) = as_map(*ty)?;
-            if !ctx.hashable_map_key(fidx, k) {
+            if !ctx.hashable_map_key(scope, k) {
                 return Err(fail(
                     "map construction needs a Hashable key type".to_string(),
                 ));
@@ -1694,6 +1858,21 @@ pub(crate) fn step(
                 let application = &module.apps[*app as usize];
                 (&application.types, &application.rows)
             };
+            if *app != lm_bytecode::NO_APP {
+                let application = &module.apps[*app as usize];
+                check_application_scope(application)?;
+                if !ctx.type_arguments_meet_bounds(
+                    &application.types,
+                    &application.rows,
+                    &contract.type_bounds,
+                    scope_bounds,
+                    Some(scope),
+                ) {
+                    return Err(fail(
+                        "a slot type argument does not meet its interface bounds".to_string(),
+                    ));
+                }
+            }
             let row = ctx.row_subst(&contract.row, rows);
             charge_row(&row)?;
             let params: Vec<u32> = contract
@@ -1715,6 +1894,21 @@ pub(crate) fn step(
                 let application = &module.apps[*app as usize];
                 (&application.types, &application.rows)
             };
+            if *app != lm_bytecode::NO_APP {
+                let application = &module.apps[*app as usize];
+                check_application_scope(application)?;
+                if !ctx.type_arguments_meet_bounds(
+                    &application.types,
+                    &application.rows,
+                    &constructor.type_bounds,
+                    scope_bounds,
+                    Some(scope),
+                ) {
+                    return Err(fail(
+                        "a class slot type argument does not meet its interface bounds".to_string(),
+                    ));
+                }
+            }
             let row = ctx.row_subst(&constructor.row, rows);
             charge_row(&row)?;
             let params: Vec<u32> = constructor

@@ -1127,6 +1127,7 @@ impl Ctx {
         })?;
         let mut declarations = Vec::new();
         for export in interface.exports.into_iter().filter(|export| export.source) {
+            let mut constant = None;
             let (def, callable) = match export.kind {
                 lm_bytecode::ExportKind::Function => {
                     let function = self.imports.iter().find_map(|import| {
@@ -1178,7 +1179,34 @@ impl Ctx {
                     };
                     (Some(HirReflectionDef::Interface(interface)), None)
                 }
-                lm_bytecode::ExportKind::Constant => (None, None),
+                lm_bytecode::ExportKind::Constant => {
+                    let lm_bytecode::interface::IfaceItem::Const(value) = &export.item else {
+                        return Err(Diagnostic::new(
+                            "E1053",
+                            format!("the constant `{path}.{}` has invalid metadata", export.name),
+                            span,
+                        ));
+                    };
+                    let import_env = self.import_env.clone();
+                    constant = Some(crate::import::reflection_constant(
+                        self,
+                        &import_env,
+                        value,
+                        &export.name,
+                        span,
+                    )?);
+                    let key = (path.to_string(), export.name.clone(), export.iface_hash);
+                    if self.used_constant_pins.insert(key) {
+                        self.imports.push(HirImport {
+                            module: path.to_string(),
+                            name: export.name.clone(),
+                            kind: lm_bytecode::ImportKind::Constant,
+                            def: HirImportDef::Constant,
+                            hash: export.iface_hash,
+                        });
+                    }
+                    (None, None)
+                }
                 lm_bytecode::ExportKind::EnumCase => continue,
             };
             declarations.push(HirReflectionDeclaration {
@@ -1186,6 +1214,7 @@ impl Ctx {
                 name: export.name,
                 def,
                 callable,
+                constant,
             });
         }
         let index = self.reflections.len() as u32;
@@ -4123,13 +4152,23 @@ fn resolve_generic_bounds(
     env: &TyEnv,
     generics: &[ast::GenericParam],
 ) -> Result<Vec<Vec<InterfaceUse>>, Diagnostic> {
+    resolve_generic_bounds_from(ctx, env, generics, env.type_offset)
+}
+
+/// Resolve bounds for parameters that start at one variable index.
+pub(crate) fn resolve_generic_bounds_from(
+    ctx: &mut Ctx,
+    env: &TyEnv,
+    generics: &[ast::GenericParam],
+    start: u32,
+) -> Result<Vec<Vec<InterfaceUse>>, Diagnostic> {
     let capacity = generics.iter().filter(|generic| !generic.is_effect).count();
     let mut out = Vec::with_capacity(capacity);
     let mut type_index = 0u32;
     for generic in generics {
         if !generic.is_effect {
             let direct = resolve_interface_bounds(ctx, env, &generic.bounds)?;
-            let base = ctx.store.intern(Type::Var(env.type_offset + type_index));
+            let base = ctx.store.intern(Type::Var(start + type_index));
             out.push(expand_interface_bounds(ctx, base, direct, generic.span)?);
             type_index += 1;
         }

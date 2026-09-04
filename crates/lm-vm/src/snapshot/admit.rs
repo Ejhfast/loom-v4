@@ -2042,7 +2042,8 @@ impl Admit<'_> {
                 // closure never held.
                 Value::Obj(reference) => match m.objects[reference.slot as usize].object {
                     Object::Closure { func, env, .. }
-                        if func == frame.func && env.env().0 == frame.env => {}
+                        if func == frame.func
+                            && self.environment_is_frame_entry(env.env().0, frame) => {}
                     _ => {
                         return fail(
                             ImageReason::Reference,
@@ -2054,7 +2055,9 @@ impl Admit<'_> {
                 },
                 Value::Callback(reference) => {
                     let callback = &m.callbacks[reference.slot as usize];
-                    if callback.func != frame.func || callback.env != frame.env {
+                    if callback.func != frame.func
+                        || !self.environment_is_frame_entry(callback.env, frame)
+                    {
                         return fail(
                             ImageReason::Reference,
                             at(&format!(
@@ -2832,6 +2835,26 @@ impl Admit<'_> {
             })
     }
 
+    /// Return the active reflection pattern at one frame boundary.
+    /// Test whether one environment is the entry prefix of one frame.
+    fn environment_is_frame_entry(&self, prefix: u32, frame: &super::ImageFrame) -> bool {
+        let Some(function) = self.module.funcs.get(frame.func as usize) else {
+            return false;
+        };
+        let Some(prefix) = self.image.envs.get(prefix as usize) else {
+            return false;
+        };
+        let Some(full) = self.image.envs.get(frame.env as usize) else {
+            return false;
+        };
+        let type_count = function.type_params as usize;
+        let effect_count = function.effect_params as usize;
+        prefix.types.len() == type_count
+            && prefix.rows.len() == effect_count
+            && full.types.get(..type_count) == Some(prefix.types.as_slice())
+            && full.rows.get(..effect_count) == Some(prefix.rows.as_slice())
+    }
+
     /// Prove the structural rules of the machine witness.
     ///
     /// The stored proc body states the body function and its
@@ -2867,10 +2890,15 @@ impl Admit<'_> {
                 // closure, so the branch above answers there. Every
                 // other machine with a frame runs its own body in the
                 // bottom frame.
-                None => machine.frames.first().map(|f| (f.func, f.env)),
+                None => machine.frames.first().map(|frame| (frame.func, frame.env)),
             };
             if let Some((func, env)) = derived {
-                if machine.body_func != Some(func) || machine.witness != env {
+                let environment_matches =
+                    machine.start_body.is_some_and(|_| machine.witness == env)
+                        || machine.frames.first().is_some_and(|frame| {
+                            self.environment_is_frame_entry(machine.witness, frame)
+                        });
+                if machine.body_func != Some(func) || !environment_matches {
                     return fail(
                         ImageReason::State,
                         at("the machine witness does not match its body"),

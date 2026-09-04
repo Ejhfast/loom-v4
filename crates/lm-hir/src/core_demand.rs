@@ -483,6 +483,21 @@ impl CoreDemand {
                     self.add_pattern(bundle, element);
                 }
             }
+            ast::PatternKind::Reflect {
+                kind,
+                generics,
+                signature,
+                binding,
+            } => {
+                match kind.as_str() {
+                    "Class" | "Def" | "Const" => self.name("DeclarationCode"),
+                    "Method" => self.name("MemberCode"),
+                    _ => {}
+                }
+                self.add_generics(generics);
+                self.add_type(signature);
+                self.add_pattern(bundle, binding);
+            }
             ast::PatternKind::Wildcard
             | ast::PatternKind::Int(_)
             | ast::PatternKind::Bool(_)

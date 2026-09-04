@@ -636,41 +636,47 @@ pub fn lower_module_with_linkage(
             }),
         });
     }
-    let reflections = hir
-        .reflections
-        .iter()
-        .map(|module| ReflectionModule {
-            name: module.name.clone(),
-            declarations: module
-                .declarations
-                .iter()
-                .map(|declaration| {
-                    let def = match declaration.def {
-                        Some(HirReflectionDef::Function(function)) => function,
-                        Some(HirReflectionDef::Class(class)) => class,
-                        Some(HirReflectionDef::Interface(interface)) => interface,
-                        None => NO_REFLECTION_DEF,
-                    };
-                    let callable = declaration.callable.unwrap_or_else(|| {
-                        if declaration.kind == lm_bytecode::ExportKind::Class {
-                            match declaration.def {
-                                Some(HirReflectionDef::Class(class)) => new_base + class,
-                                _ => NO_REFLECTION_DEF,
-                            }
-                        } else {
-                            NO_REFLECTION_DEF
-                        }
-                    });
-                    ReflectionDeclaration {
-                        kind: declaration.kind,
-                        name: declaration.name.clone(),
-                        def,
-                        callable,
+    let mut reflections = Vec::with_capacity(hir.reflections.len());
+    for module in &hir.reflections {
+        let mut declarations = Vec::with_capacity(module.declarations.len());
+        for declaration in &module.declarations {
+            let def = match declaration.def {
+                Some(HirReflectionDef::Function(function)) => function,
+                Some(HirReflectionDef::Class(class)) => class,
+                Some(HirReflectionDef::Interface(interface)) => interface,
+                None => NO_REFLECTION_DEF,
+            };
+            let callable = declaration.callable.unwrap_or_else(|| {
+                if declaration.kind == lm_bytecode::ExportKind::Class {
+                    match declaration.def {
+                        Some(HirReflectionDef::Class(class)) => new_base + class,
+                        _ => NO_REFLECTION_DEF,
                     }
+                } else {
+                    NO_REFLECTION_DEF
+                }
+            });
+            let constant = if let Some(constant) = &declaration.constant {
+                Some(lm_bytecode::Constant {
+                    ty: m.bc_ty(constant.ty),
+                    value: lower_const_value(&constant.value)?,
                 })
-                .collect(),
-        })
-        .collect();
+            } else {
+                None
+            };
+            declarations.push(ReflectionDeclaration {
+                kind: declaration.kind,
+                name: declaration.name.clone(),
+                def,
+                callable,
+                constant,
+            });
+        }
+        reflections.push(ReflectionModule {
+            name: module.name.clone(),
+            declarations,
+        });
+    }
     // The generated constructor of a class takes a binding derived
     // from the qualified key of that class. The class structural hash
     // covers no constructor, because the constructor is a function
@@ -811,6 +817,14 @@ struct LoopTargets {
     exit_block: u32,
     result_slot: Option<u32>,
     entry_depth: usize,
+    reflection_depth: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ActiveReflection {
+    pattern: u32,
+    type_base: u32,
+    effect_base: u32,
 }
 
 struct Lowerer<'a, 'm> {
@@ -823,6 +837,8 @@ struct Lowerer<'a, 'm> {
     block_depths: Vec<Option<usize>>,
     /// Targets and entry depth for each active loop.
     loops: Vec<LoopTargets>,
+    /// Active refinement scopes in lexical order.
+    reflections: Vec<ActiveReflection>,
     /// The declared type of every local slot so far. The checker
     /// types come first; scratch slots append their true types. The
     /// slot count is the vector length.
@@ -848,6 +864,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             stack_depth: 0,
             block_depths: vec![Some(0)],
             loops: Vec::new(),
+            reflections: Vec::new(),
             local_types,
         }
     }
@@ -901,6 +918,15 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         }
     }
 
+    fn record_block_depth_as(&mut self, block: u32, wanted: usize) {
+        let depth = &mut self.block_depths[block as usize];
+        if let Some(found) = *depth {
+            debug_assert_eq!(found, wanted);
+        } else {
+            *depth = Some(wanted);
+        }
+    }
+
     /// Remove operands that the current expression left above one loop.
     fn unwind_to_loop(&mut self, entry_depth: usize) {
         while self.stack_depth > entry_depth {
@@ -914,7 +940,20 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             exit_block,
             result_slot,
             entry_depth: self.stack_depth,
+            reflection_depth: self.reflections.len(),
         });
+    }
+
+    fn emit_reflection_unwind(&mut self, depth: usize) {
+        let scopes: Vec<ActiveReflection> =
+            self.reflections[depth..].iter().copied().rev().collect();
+        for scope in scopes {
+            self.emit(extended(ExtendedInstr::ReflectionEnd {
+                pattern: scope.pattern,
+                bases: lm_bytecode::ReflectionBases::new(scope.type_base, scope.effect_base)
+                    .expect("reflection generic arities fit one instruction"),
+            }));
+        }
     }
 
     /// Lower one operand and report whether evaluation can continue.
@@ -1295,6 +1334,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                     }
                 }
                 self.unwind_to_loop(targets.entry_depth);
+                self.emit_reflection_unwind(targets.reflection_depth);
                 self.emit(Instr::Jump(targets.exit_block));
                 let dead = self.new_block();
                 self.switch_to(dead);
@@ -1302,6 +1342,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HStmt::Continue => {
                 let targets = *self.loops.last().expect("checked loop context");
                 self.unwind_to_loop(targets.entry_depth);
+                self.emit_reflection_unwind(targets.reflection_depth);
                 self.emit(Instr::Jump(targets.continue_block));
                 let dead = self.new_block();
                 self.switch_to(dead);
@@ -2295,6 +2336,12 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 scrut_slot,
                 arms,
             } => self.lower_case(scrut, *scrut_slot, arms, expr.ty == UNIT),
+            HExprKind::ReflectCase {
+                scrut,
+                scrut_slot,
+                arms,
+                fallback,
+            } => self.lower_reflect_case(scrut, *scrut_slot, arms, fallback, expr.ty == UNIT),
             HExprKind::Perform { op, args } => {
                 if !self.lower_operands(args) {
                     return;
@@ -2916,6 +2963,71 @@ impl<'a, 'm> Lowerer<'a, 'm> {
         self.switch_to(join_b);
     }
 
+    /// Lower a descriptor case without creating an execution frame.
+    fn lower_reflect_case(
+        &mut self,
+        scrut: &HExpr,
+        scrut_slot: u32,
+        arms: &[HReflectArm],
+        fallback: &[HStmt],
+        unit_valued: bool,
+    ) {
+        if !self.lower_operand(scrut) {
+            return;
+        }
+        self.emit(Instr::StoreLocal(scrut_slot));
+        let join = self.new_block();
+        for arm in arms {
+            let fail = self.new_block();
+            self.emit(Instr::LoadLocal(scrut_slot));
+            let failure_depth = self.stack_depth - 1;
+            let kind = match arm.kind {
+                ReflectKind::Class => lm_bytecode::ReflectionKind::Class,
+                ReflectKind::Function => lm_bytecode::ReflectionKind::Function,
+                ReflectKind::Method => lm_bytecode::ReflectionKind::Method,
+                ReflectKind::Constant => lm_bytecode::ReflectionKind::Constant,
+            };
+            self.emit(extended(ExtendedInstr::ReflectionRefine {
+                pattern: lm_bytecode::ReflectionPattern::new(kind, arm.pattern)
+                    .expect("a reflection function index fits one instruction"),
+                fail,
+            }));
+            self.record_block_depth_as(fail, failure_depth);
+            if let Some(slot) = arm.binding {
+                self.emit(Instr::StoreLocal(slot));
+            } else {
+                self.emit(Instr::Pop);
+            }
+            let scope = ActiveReflection {
+                pattern: arm.pattern,
+                type_base: arm.type_base,
+                effect_base: arm.effect_base,
+            };
+            self.reflections.push(scope);
+            let pushed = if unit_valued {
+                let diverged = self.lower_block_stmt(&arm.body);
+                if !diverged {
+                    self.emit(Instr::ConstUnit);
+                }
+                !diverged
+            } else {
+                self.lower_block_value(&arm.body)
+            };
+            if pushed {
+                self.emit(extended(ExtendedInstr::ReflectionEnd {
+                    pattern: scope.pattern,
+                    bases: lm_bytecode::ReflectionBases::new(scope.type_base, scope.effect_base)
+                        .expect("reflection generic arities fit one instruction"),
+                }));
+                self.emit(Instr::Jump(join));
+            }
+            self.reflections.pop();
+            self.switch_to(fail);
+        }
+        self.lower_branch(fallback, unit_valued, join);
+        self.switch_to(join);
+    }
+
     /// Lower one pattern over the value in `src`. With `fail` the
     /// tests jump there on a mismatch; without it the pattern only
     /// destructures, because the checker proved it must match.
@@ -3305,6 +3417,26 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
                 for s in &mut arm.body {
                     shift_stmt_in_place(s, base, max);
                 }
+            }
+        }
+        HExprKind::ReflectCase {
+            scrut,
+            scrut_slot,
+            arms,
+            fallback,
+        } => {
+            shift_expr_in_place(scrut, base, max);
+            shift_slot(scrut_slot, base, max);
+            for arm in arms {
+                if let Some(slot) = &mut arm.binding {
+                    shift_slot(slot, base, max);
+                }
+                for statement in &mut arm.body {
+                    shift_stmt_in_place(statement, base, max);
+                }
+            }
+            for statement in fallback {
+                shift_stmt_in_place(statement, base, max);
             }
         }
         HExprKind::Perform { args, .. } | HExprKind::PrepareWait { args, .. } => {
@@ -4404,6 +4536,16 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         ExtendedInstr::ReflectionName => "ReflectionName".to_string(),
         ExtendedInstr::ReflectionDeclarationKind => "ReflectionDeclarationKind".to_string(),
         ExtendedInstr::ReflectionMemberKind => "ReflectionMemberKind".to_string(),
+        ExtendedInstr::ReflectionRefine { pattern, fail } => format!(
+            "ReflectionRefine {:?} fn{} block{fail}",
+            pattern.kind(),
+            pattern.function()
+        ),
+        ExtendedInstr::ReflectionEnd { pattern, bases } => format!(
+            "ReflectionEnd fn{pattern} types{} effects{}",
+            bases.type_base(),
+            bases.effect_base()
+        ),
         ExtendedInstr::CodeSource { ty } => format!("CodeSource ty{ty}"),
         ExtendedInstr::CodeDefinition => "CodeDefinition".to_string(),
         ExtendedInstr::FaultSite { ty } => format!("FaultSite ty{ty}"),

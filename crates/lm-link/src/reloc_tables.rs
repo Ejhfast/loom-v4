@@ -185,6 +185,13 @@ pub(crate) fn reloc_reflection(source: &ReflectionModule, reloc: &Reloc) -> Refl
                     name: declaration.name.clone(),
                     def,
                     callable,
+                    constant: declaration
+                        .constant
+                        .as_ref()
+                        .map(|constant| lm_bytecode::Constant {
+                            ty: reloc.types[constant.ty as usize],
+                            value: constant.value.clone(),
+                        }),
                 }
             })
             .collect(),
@@ -896,6 +903,18 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         },
         ExtendedInstr::ModuleCode { module } => ExtendedInstr::ModuleCode {
             module: reloc.reflections[*module as usize],
+        },
+        ExtendedInstr::ReflectionRefine { pattern, fail } => ExtendedInstr::ReflectionRefine {
+            pattern: lm_bytecode::ReflectionPattern::new(
+                pattern.kind(),
+                reloc.funcs[pattern.function() as usize],
+            )
+            .expect("a relocated reflection function index fits one instruction"),
+            fail: *fail,
+        },
+        ExtendedInstr::ReflectionEnd { pattern, bases } => ExtendedInstr::ReflectionEnd {
+            pattern: reloc.funcs[*pattern as usize],
+            bases: *bases,
         },
         ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
             ty: reloc.types[*ty as usize],

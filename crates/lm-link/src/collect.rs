@@ -542,7 +542,13 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
                 lm_bytecode::ExportKind::Interface => {
                     edges.push(offsets.interface(declaration.def));
                 }
-                lm_bytecode::ExportKind::Constant => {}
+                lm_bytecode::ExportKind::Constant => {
+                    let constant = declaration
+                        .constant
+                        .as_ref()
+                        .expect("the verifier checks reflected constants");
+                    edges.push(offsets.ty(constant.ty));
+                }
                 lm_bytecode::ExportKind::EnumCase => unreachable!("the verifier rejects cases"),
             }
             if declaration.callable != NO_REFLECTION_DEF {
@@ -1227,6 +1233,12 @@ fn extended_edges(
                 lm_bytecode::corepin::ROLE_MODULE_CODE,
                 edges,
             );
+        }
+        ExtendedInstr::ReflectionRefine { pattern, .. } => {
+            edges.push(offsets.func(pattern.function()));
+        }
+        ExtendedInstr::ReflectionEnd { pattern, .. } => {
+            edges.push(offsets.func(*pattern));
         }
         ExtendedInstr::ReflectionDeclarations => role_edges(
             module,

@@ -292,10 +292,20 @@ impl Machine {
     /// first. The children of the new object are roots during the
     /// collection because they are not yet reachable from the arenas.
     pub fn alloc(&mut self, object: Object) -> Result<Value, FaultCode> {
+        self.alloc_with_roots(object, &[])
+    }
+
+    /// Allocate one object while local values remain outside the arenas.
+    pub(super) fn alloc_with_roots(
+        &mut self,
+        object: Object,
+        values: &[Value],
+    ) -> Result<Value, FaultCode> {
         let mut cost = self.vm.heap.allocation_cost(&object);
         if self.vm.heap.collection_due(cost) {
             let mut extra = Vec::new();
             object.children(&mut extra);
+            extra.extend(values.iter().filter_map(|value| value.as_obj()));
             self.collect_garbage(&extra);
             cost = self.vm.heap.allocation_cost(&object);
             if self.vm.heap.would_exceed(cost) {

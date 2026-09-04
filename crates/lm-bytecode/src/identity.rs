@@ -786,6 +786,10 @@ fn preflight(module: &Module, bundle: &lm_abi::AbiBundle) -> Result<(), Identity
                 ExportKind::Constant => {
                     declaration.def == NO_REFLECTION_DEF
                         && declaration.callable == NO_REFLECTION_DEF
+                        && declaration
+                            .constant
+                            .as_ref()
+                            .is_some_and(|constant| (constant.ty as usize) < s.types)
                 }
                 ExportKind::EnumCase => false,
             };
@@ -1177,6 +1181,23 @@ fn preflight_extended(
                 return Err(bad("reflection module"));
             }
         }
+        ExtendedInstr::ReflectionRefine { pattern, fail, .. } => {
+            if pattern.function() as usize >= s.funcs {
+                return Err(bad("reflection pattern"));
+            }
+            if module
+                .funcs
+                .get(fidx)
+                .is_none_or(|function| *fail as usize >= function.blocks.len())
+            {
+                return Err(bad("reflection failure block"));
+            }
+        }
+        ExtendedInstr::ReflectionEnd { pattern, .. } => {
+            if *pattern as usize >= s.funcs {
+                return Err(bad("reflection pattern"));
+            }
+        }
         ExtendedInstr::OptionSome { ty }
         | ExtendedInstr::OptionNone { ty }
         | ExtendedInstr::OptionPayload { ty }
@@ -1499,6 +1520,12 @@ impl Graph {
                                 list.push(s.func_node(*func));
                                 called[*func as usize] = true;
                             }
+                            ExtendedInstr::ReflectionRefine { pattern, .. } => {
+                                list.push(s.func_node(pattern.function()));
+                            }
+                            ExtendedInstr::ReflectionEnd { pattern, .. } => {
+                                list.push(s.func_node(*pattern));
+                            }
                             ExtendedInstr::ModuleCode { module: reflection } => {
                                 for declaration in
                                     &module.reflections[*reflection as usize].declarations
@@ -1515,7 +1542,14 @@ impl Graph {
                                                 called[declaration.callable as usize] = true;
                                             }
                                         }
-                                        ExportKind::Interface | ExportKind::Constant => {}
+                                        ExportKind::Constant => {
+                                            let constant = declaration
+                                                .constant
+                                                .as_ref()
+                                                .expect("preflight checks reflected constants");
+                                            list.push(s.type_node(constant.ty));
+                                        }
+                                        ExportKind::Interface => {}
                                         ExportKind::EnumCase => {
                                             unreachable!("preflight rejects reflected enum cases")
                                         }
@@ -2491,6 +2525,8 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ReflectionName => 0x11d,
             ExtendedInstr::ReflectionDeclarationKind => 0x11e,
             ExtendedInstr::ReflectionMemberKind => 0x11f,
+            ExtendedInstr::ReflectionRefine { .. } => 0x120,
+            ExtendedInstr::ReflectionEnd { .. } => 0x121,
         }
     }
 
@@ -2846,6 +2882,16 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ModuleCode { module } => {
                 self.reflection_module_bytes(out, *module);
             }
+            ExtendedInstr::ReflectionRefine { pattern, fail } => {
+                out.push(pattern.kind() as u8);
+                write_ident(out, &self.func_ident(pattern.function()));
+                out.extend_from_slice(&fail.to_le_bytes());
+            }
+            ExtendedInstr::ReflectionEnd { pattern, bases } => {
+                write_ident(out, &self.func_ident(*pattern));
+                out.extend_from_slice(&bases.type_base().to_le_bytes());
+                out.extend_from_slice(&bases.effect_base().to_le_bytes());
+            }
             ExtendedInstr::OptionSome { ty }
             | ExtendedInstr::OptionNone { ty }
             | ExtendedInstr::OptionPayload { ty }
@@ -2958,7 +3004,14 @@ impl<'a> Resolver<'a> {
                     };
                     out.extend_from_slice(&digest);
                 }
-                ExportKind::Constant => {}
+                ExportKind::Constant => {
+                    let constant = declaration
+                        .constant
+                        .as_ref()
+                        .expect("preflight checks reflected constants");
+                    out.extend_from_slice(&self.type_digest(constant.ty));
+                    crate::interface::encode_const_value(out, &constant.value);
+                }
                 ExportKind::EnumCase => {
                     unreachable!("preflight rejects reflected enum cases")
                 }

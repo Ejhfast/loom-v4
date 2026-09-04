@@ -439,8 +439,8 @@ pub struct Frame {
     pub closure: Option<FrameCapture>,
     /// The type environment of this activation.
     ///
-    /// The call site supplies it. A monomorphic call copies the empty
-    /// environment, so a monomorphic frame does no type work.
+    /// Reflection refinement can extend this environment inside one
+    /// case arm.
     pub env: TypeEnvId,
 }
 

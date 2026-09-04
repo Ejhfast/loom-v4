@@ -17,6 +17,11 @@ impl<'o> FnChecker<'o> {
     ) -> Result<HPattern, Diagnostic> {
         match &pat.kind {
             PatternKind::Wildcard => Ok(HPattern::Wildcard),
+            PatternKind::Reflect { .. } => Err(Diagnostic::new(
+                "E1041",
+                "a reflection pattern is valid only in a reflection case",
+                pat.span,
+            )),
             // `Call(Op, call, args)` on a request: one operation
             // identity test that binds the call and its arguments.
             PatternKind::Ctor {

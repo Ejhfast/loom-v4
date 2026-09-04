@@ -1052,6 +1052,13 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
                 collect_dependency_block(&arm.body, out);
             }
         }
+        HExprKind::ReflectCase { scrut, arms, .. } => {
+            collect_dependency_expr(scrut, out);
+            for arm in arms {
+                out.nested_functions.insert(arm.pattern);
+                collect_dependency_block(&arm.body, out);
+            }
+        }
         HExprKind::TableEdit { table, mock, .. } => {
             collect_dependency_expr(table, out);
             if let Some(mock) = mock {

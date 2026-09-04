@@ -100,13 +100,18 @@ pub(crate) fn perform_argc(ctx: &Ctx<'_>, op: u32) -> u32 {
 /// the caller's variable scope.
 pub(crate) fn check_app(
     ctx: &Ctx<'_>,
-    caller: &Func,
+    scope: u32,
     fidx: u32,
     at: &dyn Fn(&str) -> String,
     app_idx: u32,
     want_types: u32,
     want_rows: u32,
 ) -> Result<(), VerifyError> {
+    let caller = ctx
+        .module
+        .funcs
+        .get(scope as usize)
+        .ok_or_else(|| err(fidx, at("generic scope function out of range")))?;
     let app = ctx
         .module
         .apps
@@ -125,7 +130,7 @@ pub(crate) fn check_app(
                 at("type application uses a variable outside the caller scope"),
             ));
         }
-        if !ctx.projections_proven(*t, &ctx.module.func_bounds[fidx as usize]) {
+        if !ctx.projections_proven(*t, &ctx.module.func_bounds[scope as usize]) {
             return Err(err(
                 fidx,
                 at("type application uses an unproven associated type"),
@@ -141,6 +146,34 @@ pub(crate) fn check_app(
         }
     }
     Ok(())
+}
+
+/// Validate one application in at least one reachable generic scope.
+#[allow(clippy::too_many_arguments)]
+fn check_app_in_possible_scope(
+    ctx: &Ctx<'_>,
+    scopes: &[u32],
+    fidx: u32,
+    at: &dyn Fn(&str) -> String,
+    app_idx: u32,
+    want_types: u32,
+    want_rows: u32,
+) -> Result<(), VerifyError> {
+    if scopes
+        .iter()
+        .any(|scope| check_app(ctx, *scope, fidx, at, app_idx, want_types, want_rows).is_ok())
+    {
+        return Ok(());
+    }
+    check_app(
+        ctx,
+        scopes.first().copied().unwrap_or(fidx),
+        fidx,
+        at,
+        app_idx,
+        want_types,
+        want_rows,
+    )
 }
 
 pub(crate) fn verify_func(
@@ -169,6 +202,15 @@ pub(crate) fn verify_func(
     }
     if func.blocks.is_empty() {
         return Err(err(fidx, "the function has no blocks"));
+    }
+    let mut possible_scopes = vec![fidx];
+    for instruction in func.blocks.iter().flatten() {
+        if let Instr::Extended(ExtendedInstr::ReflectionRefine { pattern, .. }) = instruction {
+            let pattern = pattern.function();
+            if !possible_scopes.contains(&pattern) {
+                possible_scopes.push(pattern);
+            }
+        }
     }
     // Structural pass: every block ends with a terminator and every
     // operand index is inside its table.
@@ -246,9 +288,9 @@ pub(crate) fn verify_func(
                     if target.type_params == 0 && target.effect_params == 0 {
                         return Err(err(fidx, at("a type application on a non-generic callee")));
                     }
-                    check_app(
+                    check_app_in_possible_scope(
                         ctx,
-                        func,
+                        &possible_scopes,
                         fidx,
                         at_dyn,
                         *app,
@@ -256,13 +298,16 @@ pub(crate) fn verify_func(
                         target.effect_params,
                     )?;
                     let application = &module.apps[*app as usize];
-                    if !ctx.type_arguments_meet_bounds(
-                        &application.types,
-                        &application.rows,
-                        &module.func_bounds[*callee as usize],
-                        &module.func_bounds[fidx as usize],
-                        Some(fidx),
-                    ) {
+                    let bounds_hold = possible_scopes.iter().any(|scope| {
+                        ctx.type_arguments_meet_bounds(
+                            &application.types,
+                            &application.rows,
+                            &module.func_bounds[*callee as usize],
+                            &module.func_bounds[*scope as usize],
+                            Some(*scope),
+                        )
+                    });
+                    if !bounds_hold {
                         return Err(err(
                             fidx,
                             at("a call type argument does not meet its interface bounds"),
@@ -297,21 +342,21 @@ pub(crate) fn verify_func(
                     let Some(a) = module.apps.get(*app as usize) else {
                         return Err(err(fidx, at("type application index out of range")));
                     };
-                    for t in &a.types {
-                        if !ctx.vars_bounded(*t, func.type_params, func.effect_params) {
-                            return Err(err(
-                                fidx,
-                                at("type application uses a variable outside the caller scope"),
-                            ));
-                        }
-                    }
-                    for row in &a.rows {
-                        if !ctx.row_vars_bounded(row, func.effect_params) {
-                            return Err(err(
-                                fidx,
-                                at("type application row uses a variable outside the caller scope"),
-                            ));
-                        }
+                    let in_scope = possible_scopes.iter().any(|scope| {
+                        let scope_func = &module.funcs[*scope as usize];
+                        a.types.iter().all(|ty| {
+                            ctx.vars_bounded(*ty, scope_func.type_params, scope_func.effect_params)
+                                && ctx.projections_proven(*ty, &module.func_bounds[*scope as usize])
+                        }) && a
+                            .rows
+                            .iter()
+                            .all(|row| ctx.row_vars_bounded(row, scope_func.effect_params))
+                    });
+                    if !in_scope {
+                        return Err(err(
+                            fidx,
+                            at("type application uses a variable outside every reachable scope"),
+                        ));
                     }
                 }
                 Instr::MakeClosure { func: f, captures } => {
@@ -328,10 +373,14 @@ pub(crate) fn verify_func(
                     // its signature is closed, so any scope may close
                     // over it. The `spawn` sugar takes that path.
                     let closed = target.type_params == 0 && target.effect_params == 0;
-                    if !closed
-                        && (target.type_params != func.type_params
-                            || target.effect_params != func.effect_params)
-                    {
+                    let matching_scope = possible_scopes.iter().any(|scope| {
+                        let scope_func = &module.funcs[*scope as usize];
+                        target.type_params == scope_func.type_params
+                            && target.effect_params == scope_func.effect_params
+                            && module.func_bounds[*f as usize]
+                                == module.func_bounds[*scope as usize]
+                    });
+                    if !closed && !matching_scope {
                         return Err(err(
                             fidx,
                             at("a closure body must keep the enclosing generic arity"),
@@ -370,15 +419,26 @@ pub(crate) fn verify_func(
                     if c.type_params == 0 {
                         return Err(err(fidx, at("a type application on a non-generic class")));
                     }
-                    check_app(ctx, func, fidx, at_dyn, *app, c.type_params, 0)?;
+                    check_app_in_possible_scope(
+                        ctx,
+                        &possible_scopes,
+                        fidx,
+                        at_dyn,
+                        *app,
+                        c.type_params,
+                        0,
+                    )?;
                     let application = &module.apps[*app as usize];
-                    if !ctx.type_arguments_meet_bounds(
-                        &application.types,
-                        &[],
-                        &module.class_bounds[*class as usize],
-                        &module.func_bounds[fidx as usize],
-                        Some(fidx),
-                    ) {
+                    let bounds_hold = possible_scopes.iter().any(|scope| {
+                        ctx.type_arguments_meet_bounds(
+                            &application.types,
+                            &[],
+                            &module.class_bounds[*class as usize],
+                            &module.func_bounds[*scope as usize],
+                            Some(*scope),
+                        )
+                    });
+                    if !bounds_hold {
                         return Err(err(
                             fidx,
                             at("a class type argument does not meet its interface bounds"),
@@ -436,16 +496,16 @@ pub(crate) fn verify_func(
                     let Some(requirement) = contract.methods.get(method as usize) else {
                         return Err(err(fidx, at("interface method index out of range")));
                     };
-                    if !ctx.vars_bounded(*recv_ty, func.type_params, func.effect_params) {
+                    let receiver_scope = possible_scopes.iter().find(|scope| {
+                        let scope_func = &module.funcs[**scope as usize];
+                        ctx.vars_bounded(*recv_ty, scope_func.type_params, scope_func.effect_params)
+                            && ctx
+                                .projections_proven(*recv_ty, &module.func_bounds[**scope as usize])
+                    });
+                    if receiver_scope.is_none() {
                         return Err(err(
                             fidx,
                             at("interface receiver type uses a variable outside the caller scope"),
-                        ));
-                    }
-                    if !ctx.projections_proven(*recv_ty, &module.func_bounds[fidx as usize]) {
-                        return Err(err(
-                            fidx,
-                            at("interface receiver type uses an unproven associated type"),
                         ));
                     }
                     if requirement.type_params == 0 && requirement.effect_params == 0 {
@@ -462,9 +522,9 @@ pub(crate) fn verify_func(
                                 at("a generic interface method needs a type application"),
                             ));
                         }
-                        check_app(
+                        check_app_in_possible_scope(
                             ctx,
-                            func,
+                            &possible_scopes,
                             fidx,
                             at_dyn,
                             *app,
@@ -497,10 +557,14 @@ pub(crate) fn verify_func(
                             return Err(err(fidx, at("closure capture count mismatch")));
                         }
                         let closed = target.type_params == 0 && target.effect_params == 0;
-                        if !closed
-                            && (target.type_params != func.type_params
-                                || target.effect_params != func.effect_params)
-                        {
+                        let matching_scope = possible_scopes.iter().any(|scope| {
+                            let scope_func = &module.funcs[*scope as usize];
+                            target.type_params == scope_func.type_params
+                                && target.effect_params == scope_func.effect_params
+                                && module.func_bounds[*f as usize]
+                                    == module.func_bounds[*scope as usize]
+                        });
+                        if !closed && !matching_scope {
                             return Err(err(
                                 fidx,
                                 at("a closure body must keep the enclosing generic arity"),
@@ -527,6 +591,19 @@ pub(crate) fn verify_func(
                     ExtendedInstr::ModuleCode { module: reflection } => {
                         if module.reflections.get(*reflection as usize).is_none() {
                             return Err(err(fidx, at("reflection module out of range")));
+                        }
+                    }
+                    ExtendedInstr::ReflectionRefine { pattern, fail, .. } => {
+                        if module.funcs.get(pattern.function() as usize).is_none() {
+                            return Err(err(fidx, at("reflection pattern out of range")));
+                        }
+                        if *fail as usize >= func.blocks.len() {
+                            return Err(err(fidx, at("reflection failure block out of range")));
+                        }
+                    }
+                    ExtendedInstr::ReflectionEnd { pattern, .. } => {
+                        if module.funcs.get(*pattern as usize).is_none() {
+                            return Err(err(fidx, at("reflection pattern out of range")));
                         }
                     }
                     ExtendedInstr::ReflectionDeclarations
@@ -581,15 +658,26 @@ pub(crate) fn verify_func(
                                 ));
                             }
                             (true, types, rows) => {
-                                check_app(ctx, func, fidx, at_dyn, *app, types, rows)?;
+                                check_app_in_possible_scope(
+                                    ctx,
+                                    &possible_scopes,
+                                    fidx,
+                                    at_dyn,
+                                    *app,
+                                    types,
+                                    rows,
+                                )?;
                                 let application = &module.apps[*app as usize];
-                                if !ctx.type_arguments_meet_bounds(
-                                    &application.types,
-                                    &application.rows,
-                                    &callable.type_bounds,
-                                    &module.func_bounds[fidx as usize],
-                                    Some(fidx),
-                                ) {
+                                let bounds_hold = possible_scopes.iter().any(|scope| {
+                                    ctx.type_arguments_meet_bounds(
+                                        &application.types,
+                                        &application.rows,
+                                        &callable.type_bounds,
+                                        &module.func_bounds[*scope as usize],
+                                        Some(*scope),
+                                    )
+                                });
+                                if !bounds_hold {
                                     return Err(err(
                                         fidx,
                                         at("a slot type argument does not meet its interface bounds"),
@@ -624,15 +712,26 @@ pub(crate) fn verify_func(
                                 ));
                             }
                             (true, types, rows) => {
-                                check_app(ctx, func, fidx, at_dyn, *app, types, rows)?;
+                                check_app_in_possible_scope(
+                                    ctx,
+                                    &possible_scopes,
+                                    fidx,
+                                    at_dyn,
+                                    *app,
+                                    types,
+                                    rows,
+                                )?;
                                 let application = &module.apps[*app as usize];
-                                if !ctx.type_arguments_meet_bounds(
-                                    &application.types,
-                                    &application.rows,
-                                    &constructor.type_bounds,
-                                    &module.func_bounds[fidx as usize],
-                                    Some(fidx),
-                                ) {
+                                let bounds_hold = possible_scopes.iter().any(|scope| {
+                                    ctx.type_arguments_meet_bounds(
+                                        &application.types,
+                                        &application.rows,
+                                        &constructor.type_bounds,
+                                        &module.func_bounds[*scope as usize],
+                                        Some(*scope),
+                                    )
+                                });
+                                if !bounds_hold {
                                     return Err(err(
                                         fidx,
                                         at("a class slot type argument does not meet its interface bounds"),
@@ -744,6 +843,7 @@ pub(crate) fn dataflow(
     states[0] = Some(VerifiedBlockState {
         locals,
         stack: Vec::new(),
+        scopes: Vec::new(),
     });
     let mut worklist = VecDeque::new();
     worklist.push_back(0usize);
@@ -847,6 +947,12 @@ pub(crate) fn merge(
             worklist.push_back(target);
         }
         Some(existing) => {
+            if existing.scopes != edge.scopes {
+                return Err(err(
+                    fidx,
+                    format!("block {target} enters through different reflection scopes"),
+                ));
+            }
             if existing.stack.len() != edge.stack.len() {
                 return Err(err(
                     fidx,

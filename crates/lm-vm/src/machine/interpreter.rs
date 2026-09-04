@@ -275,6 +275,18 @@ impl Machine {
             ExtendedInstr::ReflectionMemberKind => {
                 self.exec_reflection_member_kind(module)?;
             }
+            ExtendedInstr::ReflectionRefine { pattern, fail } => {
+                self.exec_reflection_refine(
+                    module,
+                    envs,
+                    pattern.kind(),
+                    pattern.function(),
+                    fail,
+                )?;
+            }
+            ExtendedInstr::ReflectionEnd { pattern: _, bases } => {
+                self.exec_reflection_end(envs, bases.type_base(), bases.effect_base())?;
+            }
             ExtendedInstr::CodeSource { ty } => {
                 self.exec_code_source(module, envs, ty)?;
             }

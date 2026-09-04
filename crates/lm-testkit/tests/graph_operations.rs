@@ -345,7 +345,7 @@ fn graph_examples_have_checked_output() {
             "cycle-digest.lm",
             &read("examples/06-graphs/cycle-digest.lm")
         ),
-        "Done(9f6770cb336f406b3bb2dc38bb5b35664e67fe666f2fa1be095edb3900ea44bf)"
+        "Done(4d073614556980d830368bc3e489ada1dc2aff1369a35023b6d2fb1c094b26aa)"
     );
     assert_eq!(
         run(

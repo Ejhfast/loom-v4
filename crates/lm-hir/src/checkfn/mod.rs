@@ -23,8 +23,9 @@ mod sysabi;
 use map_key::{map_key_parameter, MapKeyParameter, MapKeyUse};
 
 use crate::check::{
-    camel_member, check_key_type, resolve_param_type, resolve_row, resolve_type, snake_member,
-    sys_group_name, Ctx, FnSig, InterfaceUse, MethodSig, TyEnv, UseBinding,
+    camel_member, check_key_type, hir_bounds, resolve_generic_bounds_from, resolve_param_type,
+    resolve_row, resolve_type, snake_member, sys_group_name, Ctx, FnSig, InterfaceUse, MethodSig,
+    TyEnv, UseBinding,
 };
 use crate::exhaust::{useful, APat, PatMeta};
 use crate::hir::*;

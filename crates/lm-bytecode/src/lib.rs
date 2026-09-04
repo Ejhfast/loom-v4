@@ -907,6 +907,16 @@ pub enum ExtendedInstr {
     ReflectionDeclarationKind,
     /// Pop a member descriptor and push its member kind.
     ReflectionMemberKind,
+    /// Refine one descriptor against a scoped callable pattern.
+    ReflectionRefine {
+        pattern: ReflectionPattern,
+        fail: u32,
+    },
+    /// Leave one scoped callable refinement.
+    ReflectionEnd {
+        pattern: u32,
+        bases: ReflectionBases,
+    },
     /// Read optional source data from portable definition code.
     CodeSource { ty: u32 },
     /// Read the stable binding data from portable definition code.
@@ -939,6 +949,88 @@ pub enum ExtendedInstr {
     RegexMatchGroup { ty: u32 },
     /// Load one optional named capture.
     RegexMatchNamed { ty: u32 },
+}
+
+/// One callable declaration family used by reflection refinement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ReflectionKind {
+    Class = 0,
+    Function = 1,
+    Method = 2,
+    Constant = 3,
+}
+
+impl ReflectionKind {
+    fn from_tag(tag: u8) -> Option<ReflectionKind> {
+        match tag {
+            0 => Some(ReflectionKind::Class),
+            1 => Some(ReflectionKind::Function),
+            2 => Some(ReflectionKind::Method),
+            3 => Some(ReflectionKind::Constant),
+            _ => None,
+        }
+    }
+}
+
+const REFLECTION_FUNCTION_BITS: u32 = 30;
+const REFLECTION_FUNCTION_MASK: u32 = (1 << REFLECTION_FUNCTION_BITS) - 1;
+
+/// One compact reflection kind and metadata function index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ReflectionPattern(u32);
+
+impl ReflectionPattern {
+    /// Pack one reflection pattern into one instruction field.
+    pub const fn new(kind: ReflectionKind, function: u32) -> Option<ReflectionPattern> {
+        if function > REFLECTION_FUNCTION_MASK {
+            return None;
+        }
+        Some(ReflectionPattern(
+            ((kind as u32) << REFLECTION_FUNCTION_BITS) | function,
+        ))
+    }
+
+    /// Return the declaration family of this pattern.
+    pub const fn kind(self) -> ReflectionKind {
+        match self.0 >> REFLECTION_FUNCTION_BITS {
+            0 => ReflectionKind::Class,
+            1 => ReflectionKind::Function,
+            2 => ReflectionKind::Method,
+            _ => ReflectionKind::Constant,
+        }
+    }
+
+    /// Return the metadata function index of this pattern.
+    pub const fn function(self) -> u32 {
+        self.0 & REFLECTION_FUNCTION_MASK
+    }
+}
+
+/// Compact parent generic arities for one reflection scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ReflectionBases(u32);
+
+impl ReflectionBases {
+    /// Pack parent type and effect arities into one instruction field.
+    pub const fn new(type_base: u32, effect_base: u32) -> Option<ReflectionBases> {
+        if type_base > u16::MAX as u32 || effect_base > u16::MAX as u32 {
+            return None;
+        }
+        Some(ReflectionBases(type_base | (effect_base << 16)))
+    }
+
+    /// Return the parent type arity.
+    pub const fn type_base(self) -> u32 {
+        self.0 & u16::MAX as u32
+    }
+
+    /// Return the parent effect arity.
+    pub const fn effect_base(self) -> u32 {
+        self.0 >> 16
+    }
 }
 
 const WAIT_FIELD_BITS: u32 = 16;
@@ -1425,6 +1517,8 @@ pub struct ReflectionDeclaration {
     pub def: u32,
     /// The callable function. Classes use their constructor.
     pub callable: u32,
+    /// The typed literal of a constant declaration.
+    pub constant: Option<Constant>,
 }
 
 /// One exact module surface available to runtime reflection.
@@ -2002,7 +2096,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 72;
+pub const VERSION: u16 = 73;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2266,6 +2360,8 @@ const EXT_REFLECTION_MEMBERS: u8 = 28;
 const EXT_REFLECTION_NAME: u8 = 29;
 const EXT_REFLECTION_DECLARATION_KIND: u8 = 30;
 const EXT_REFLECTION_MEMBER_KIND: u8 = 31;
+const EXT_REFLECTION_REFINE: u8 = 32;
+const EXT_REFLECTION_END: u8 = 33;
 
 fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
@@ -2562,6 +2658,14 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             write_bytes(&mut out, declaration.name.as_bytes());
             write_u32(&mut out, declaration.def);
             write_u32(&mut out, declaration.callable);
+            match &declaration.constant {
+                None => out.push(0),
+                Some(constant) => {
+                    out.push(1);
+                    write_u32(&mut out, constant.ty);
+                    interface::encode_const_value(&mut out, &constant.value);
+                }
+            }
         }
     }
     write_u32(&mut out, module.funcs.len() as u32);
@@ -3380,6 +3484,20 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
         ExtendedInstr::ReflectionMemberKind => {
             out.push(OP_EXTENSION);
             out.push(EXT_REFLECTION_MEMBER_KIND);
+        }
+        ExtendedInstr::ReflectionRefine { pattern, fail } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_REFINE);
+            out.push(pattern.kind() as u8);
+            write_u32(out, pattern.function());
+            write_u32(out, fail);
+        }
+        ExtendedInstr::ReflectionEnd { pattern, bases } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_END);
+            write_u32(out, pattern);
+            write_u32(out, bases.type_base());
+            write_u32(out, bases.effect_base());
         }
         ExtendedInstr::CodeSource { ty } => {
             out.push(OP_CODE_SOURCE);
@@ -4241,6 +4359,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     }
     let reflection_count = cur.len()?;
     let mut reflections = decode_vec(reflection_count)?;
+    let mut reflection_const_allocation = 0usize;
     for _ in 0..reflection_count {
         let name = cur.string()?;
         let declaration_count = cur.len()?;
@@ -4250,11 +4369,24 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             let name = cur.string()?;
             let def = cur.u32()?;
             let callable = cur.u32()?;
+            let constant = match cur.u8()? {
+                0 => None,
+                1 => Some(Constant {
+                    ty: cur.u32()?,
+                    value: interface::decode_const_value(
+                        &mut cur,
+                        0,
+                        &mut reflection_const_allocation,
+                    )?,
+                }),
+                _ => return Err(DecodeError::BadExport),
+            };
             declarations.push(ReflectionDeclaration {
                 kind,
                 name,
                 def,
                 callable,
+                constant,
             });
         }
         reflections.push(ReflectionModule { name, declarations });
@@ -4598,6 +4730,25 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
                 Instr::Extended(ExtendedInstr::ReflectionDeclarationKind)
             }
             EXT_REFLECTION_MEMBER_KIND => Instr::Extended(ExtendedInstr::ReflectionMemberKind),
+            EXT_REFLECTION_REFINE => {
+                let kind = ReflectionKind::from_tag(cur.u8()?)
+                    .ok_or(DecodeError::BadOpcode(OP_EXTENSION))?;
+                let function = cur.u32()?;
+                let pattern =
+                    ReflectionPattern::new(kind, function).ok_or(DecodeError::BadLength)?;
+                Instr::Extended(ExtendedInstr::ReflectionRefine {
+                    pattern,
+                    fail: cur.u32()?,
+                })
+            }
+            EXT_REFLECTION_END => {
+                let pattern = cur.u32()?;
+                let type_base = cur.u32()?;
+                let effect_base = cur.u32()?;
+                let bases =
+                    ReflectionBases::new(type_base, effect_base).ok_or(DecodeError::BadLength)?;
+                Instr::Extended(ExtendedInstr::ReflectionEnd { pattern, bases })
+            }
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
@@ -4919,12 +5070,24 @@ mod tests {
                         name: "main".to_string(),
                         def: 0,
                         callable: 0,
+                        constant: None,
                     },
                     ReflectionDeclaration {
                         kind: ExportKind::Class,
                         name: "Counter".to_string(),
                         def: 0,
                         callable: NO_REFLECTION_DEF,
+                        constant: None,
+                    },
+                    ReflectionDeclaration {
+                        kind: ExportKind::Constant,
+                        name: "Answer".to_string(),
+                        def: NO_REFLECTION_DEF,
+                        callable: NO_REFLECTION_DEF,
+                        constant: Some(Constant {
+                            ty: 1,
+                            value: ConstValue::Int(42),
+                        }),
                     },
                 ],
             }],
@@ -5394,6 +5557,26 @@ mod tests {
             Instr::Extended(ExtendedInstr::ReflectionName),
             Instr::Extended(ExtendedInstr::ReflectionDeclarationKind),
             Instr::Extended(ExtendedInstr::ReflectionMemberKind),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::Class, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::Function, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::Method, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::Constant, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionEnd {
+                pattern: 1,
+                bases: ReflectionBases::new(2, 3).unwrap(),
+            }),
             Instr::Extended(ExtendedInstr::CodeSource { ty: 0 }),
             Instr::Extended(ExtendedInstr::CodeDefinition),
             Instr::Extended(ExtendedInstr::FaultSite { ty: 0 }),
