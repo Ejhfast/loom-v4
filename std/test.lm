@@ -106,23 +106,31 @@ def run_matching(
   for module in modules
     for declaration in module.declarations()
       case declaration
-      in Class[type C: Test, () -> C](make)
-        runnable = 0
-        for member in declaration.members()
-          case member
-          in Method[type E: Error, effect e, (mut C) -> Result[(), E] with e](test)
-            runnable = runnable + 1
-            name = "#{module.name()}.#{declaration.name()}.#{member.name()}"
-            if _selected(name, filters)
-              _run_one(report, name, test, make())
+      in Class[type C: Test](class_descriptor)
+        case class_descriptor
+        in Class[() -> C](make)
+          runnable = 0
+          for member in declaration.members()
+            case member
+            in Method[type E: Error, effect e, (mut C) -> Result[(), E] with e](test)
+              runnable = runnable + 1
+              name = "#{module.name()}.#{declaration.name()}.#{member.name()}"
+              if _selected(name, filters)
+                _run_one(report, name, test, make())
+              end
+            in _ then ()
             end
-          in _ then ()
           end
-        end
-        if runnable == 0
+          if runnable == 0
+            report.record_failure(
+              "#{module.name()}.#{declaration.name()}",
+              "the test class has no test methods"
+            )
+          end
+        in _
           report.record_failure(
             "#{module.name()}.#{declaration.name()}",
-            "the test class has no test methods"
+            "the test class needs a zero-argument constructor"
           )
         end
       in _ then ()

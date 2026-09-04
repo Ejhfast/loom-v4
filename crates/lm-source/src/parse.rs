@@ -2544,7 +2544,7 @@ impl Parser<'_> {
         }
     }
 
-    /// Parse `Kind[type T, effect e, Signature](binding)`.
+    /// Parse a reflection refinement with an optional class signature.
     fn refinement_pattern(&mut self, kind: String, start: Span) -> Result<Pattern, Diagnostic> {
         self.expect(Tok::LBracket, "`[` to open the refinement")?;
         let mut generics = Vec::new();
@@ -2583,9 +2583,16 @@ impl Parser<'_> {
                 bounds,
                 span,
             });
+            if matches!(self.peek(), Tok::RBracket) {
+                break;
+            }
             self.expect(Tok::Comma, "`,` before the refined type")?;
         }
-        let signature = self.type_expr()?;
+        let signature = if matches!(self.peek(), Tok::RBracket) {
+            None
+        } else {
+            Some(self.type_expr()?)
+        };
         self.expect(Tok::RBracket, "`]` to complete the refinement")?;
         self.expect(Tok::LParen, "`(` to open the refinement binding")?;
         let binding = self.pattern()?;
@@ -2652,8 +2659,33 @@ mod tests {
         assert_eq!(generics.len(), 2);
         assert!(!generics[0].is_effect);
         assert!(generics[1].is_effect);
-        assert!(matches!(signature.kind, TypeExprKind::Fn(..)));
+        assert!(matches!(
+            signature.as_ref().map(|item| &item.kind),
+            Some(TypeExprKind::Fn(..))
+        ));
         assert!(matches!(binding.kind, PatternKind::Name(ref name) if name == "make"));
+    }
+
+    #[test]
+    fn parses_class_descriptor_refinement() {
+        let source = "case code\nin Class[type C](descriptor) then descriptor\nin _ then ()\nend\n";
+        let module = parse(source).unwrap();
+        let ExprKind::Case { arms, .. } = &module.entry[0].kind else {
+            panic!("expected a case expression");
+        };
+        let PatternKind::Reflect {
+            kind,
+            generics,
+            signature,
+            binding,
+        } = &arms[0].pattern.kind
+        else {
+            panic!("expected a refinement pattern");
+        };
+        assert_eq!(kind, "Class");
+        assert_eq!(generics.len(), 1);
+        assert!(signature.is_none());
+        assert!(matches!(binding.kind, PatternKind::Name(ref name) if name == "descriptor"));
     }
 
     #[test]

@@ -959,6 +959,7 @@ pub enum ReflectionKind {
     Function = 1,
     Method = 2,
     Constant = 3,
+    ClassDescriptor = 4,
 }
 
 impl ReflectionKind {
@@ -968,12 +969,13 @@ impl ReflectionKind {
             1 => Some(ReflectionKind::Function),
             2 => Some(ReflectionKind::Method),
             3 => Some(ReflectionKind::Constant),
+            4 => Some(ReflectionKind::ClassDescriptor),
             _ => None,
         }
     }
 }
 
-const REFLECTION_FUNCTION_BITS: u32 = 30;
+const REFLECTION_FUNCTION_BITS: u32 = 29;
 const REFLECTION_FUNCTION_MASK: u32 = (1 << REFLECTION_FUNCTION_BITS) - 1;
 
 /// One compact reflection kind and metadata function index.
@@ -998,7 +1000,8 @@ impl ReflectionPattern {
             0 => ReflectionKind::Class,
             1 => ReflectionKind::Function,
             2 => ReflectionKind::Method,
-            _ => ReflectionKind::Constant,
+            3 => ReflectionKind::Constant,
+            _ => ReflectionKind::ClassDescriptor,
         }
     }
 
@@ -5571,6 +5574,10 @@ mod tests {
             }),
             Instr::Extended(ExtendedInstr::ReflectionRefine {
                 pattern: ReflectionPattern::new(ReflectionKind::Constant, 1).unwrap(),
+                fail: 0,
+            }),
+            Instr::Extended(ExtendedInstr::ReflectionRefine {
+                pattern: ReflectionPattern::new(ReflectionKind::ClassDescriptor, 1).unwrap(),
                 fail: 0,
             }),
             Instr::Extended(ExtendedInstr::ReflectionEnd {

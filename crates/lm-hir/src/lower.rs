@@ -2982,6 +2982,7 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             self.emit(Instr::LoadLocal(scrut_slot));
             let failure_depth = self.stack_depth - 1;
             let kind = match arm.kind {
+                ReflectKind::ClassDescriptor => lm_bytecode::ReflectionKind::ClassDescriptor,
                 ReflectKind::Class => lm_bytecode::ReflectionKind::Class,
                 ReflectKind::Function => lm_bytecode::ReflectionKind::Function,
                 ReflectKind::Method => lm_bytecode::ReflectionKind::Method,

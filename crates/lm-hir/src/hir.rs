@@ -573,6 +573,7 @@ pub struct HArm {
 /// The declaration family accepted by one reflection arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectKind {
+    ClassDescriptor,
     Class,
     Function,
     Method,

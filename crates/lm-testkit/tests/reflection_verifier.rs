@@ -197,6 +197,23 @@ fn a_valid_reflection_scope_verifies() {
 }
 
 #[test]
+fn a_valid_class_descriptor_scope_verifies() {
+    let (mut module, function, pattern) = reflection_scope_module();
+    let variable = type_index(&module, BcType::Var(0));
+    module.funcs[pattern as usize].params[0] = variable;
+    module.funcs[pattern as usize].local_types[0] = variable;
+    let Instr::Extended(ExtendedInstr::ReflectionRefine {
+        pattern: instruction,
+        ..
+    }) = &mut module.funcs[function as usize].blocks[0][1]
+    else {
+        panic!("the fixture has a refinement instruction");
+    };
+    *instruction = ReflectionPattern::new(ReflectionKind::ClassDescriptor, pattern).unwrap();
+    lm_verify::verify_module(&module).expect("the class descriptor scope verifies");
+}
+
+#[test]
 fn a_reflection_scope_needs_valid_pattern_metadata() {
     let (mut module, _, pattern) = reflection_scope_module();
     let int = type_index(&module, BcType::Int);
@@ -210,8 +227,22 @@ fn a_reflection_scope_needs_valid_pattern_metadata() {
     else {
         panic!("the fixture has a refinement instruction");
     };
-    *pattern = ReflectionPattern::new(ReflectionKind::Function, u32::MAX >> 2).unwrap();
+    *pattern = ReflectionPattern::new(ReflectionKind::Function, u32::MAX >> 3).unwrap();
     assert_rejected(&module, "reflection pattern out of range");
+
+    let (mut module, function, pattern) = reflection_scope_module();
+    let Instr::Extended(ExtendedInstr::ReflectionRefine {
+        pattern: instruction,
+        ..
+    }) = &mut module.funcs[function as usize].blocks[0][1]
+    else {
+        panic!("the fixture has a refinement instruction");
+    };
+    *instruction = ReflectionPattern::new(ReflectionKind::ClassDescriptor, pattern).unwrap();
+    assert_rejected(
+        &module,
+        "class descriptor refinement has invalid type metadata",
+    );
 }
 
 #[test]

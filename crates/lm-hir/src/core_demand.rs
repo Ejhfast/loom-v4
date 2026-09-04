@@ -495,7 +495,9 @@ impl CoreDemand {
                     _ => {}
                 }
                 self.add_generics(generics);
-                self.add_type(signature);
+                if let Some(signature) = signature {
+                    self.add_type(signature);
+                }
                 self.add_pattern(bundle, binding);
             }
             ast::PatternKind::Wildcard

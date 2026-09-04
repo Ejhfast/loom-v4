@@ -1142,7 +1142,8 @@ pub(crate) fn step(
             let descriptor = match kind {
                 lm_bytecode::ReflectionKind::Class
                 | lm_bytecode::ReflectionKind::Function
-                | lm_bytecode::ReflectionKind::Constant => ctx
+                | lm_bytecode::ReflectionKind::Constant
+                | lm_bytecode::ReflectionKind::ClassDescriptor => ctx
                     .plain_inst(ctx.core.declaration_code, "DeclarationCode")
                     .map_err(&fail)?,
                 lm_bytecode::ReflectionKind::Method => ctx
@@ -1159,8 +1160,11 @@ pub(crate) fn step(
             if metadata.params.len() != 1
                 || metadata.param_muts != [false]
                 || !metadata.captures.is_empty()
-                || (kind != lm_bytecode::ReflectionKind::Constant
-                    && !matches!(ctx.ty(metadata.params[0]), BcType::Fn(..)))
+                || (!matches!(
+                    kind,
+                    lm_bytecode::ReflectionKind::Constant
+                        | lm_bytecode::ReflectionKind::ClassDescriptor
+                ) && !matches!(ctx.ty(metadata.params[0]), BcType::Fn(..)))
             {
                 return Err(fail(
                     "reflection pattern has an invalid refined signature".to_string(),
@@ -1178,8 +1182,21 @@ pub(crate) fn step(
                     "reflection pattern does not extend its parent scope".to_string(),
                 ));
             }
+            if kind == lm_bytecode::ReflectionKind::ClassDescriptor
+                && (parent_metadata.type_params.checked_add(1) != Some(metadata.type_params)
+                    || metadata.effect_params != parent_metadata.effect_params
+                    || ctx.ty(metadata.params[0]) != BcType::Var(parent_metadata.type_params))
+            {
+                return Err(fail(
+                    "class descriptor refinement has invalid type metadata".to_string(),
+                ));
+            }
             state.scopes.push(pattern);
-            push(state, metadata.params[0])?;
+            if kind == lm_bytecode::ReflectionKind::ClassDescriptor {
+                push(state, descriptor)?;
+            } else {
+                push(state, metadata.params[0])?;
+            }
         }
         Instr::Extended(ExtendedInstr::ReflectionEnd { pattern, bases }) => {
             let type_base = bases.type_base();

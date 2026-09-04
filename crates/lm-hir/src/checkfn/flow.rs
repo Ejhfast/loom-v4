@@ -542,17 +542,15 @@ impl<'o> FnChecker<'o> {
         descriptor_ty: TypeId,
         kind_name: &str,
         generics: &[ast::GenericParam],
-        signature: &ast::TypeExpr,
+        signature: &Option<ast::TypeExpr>,
         binding: &ast::Pattern,
         body: &[ast::Expr],
         mode: BlockMode,
         span: Span,
     ) -> Result<(HReflectArm, bool), Diagnostic> {
-        let (kind, descriptor_name) = match kind_name {
-            "Class" => (ReflectKind::Class, "DeclarationCode"),
-            "Def" => (ReflectKind::Function, "DeclarationCode"),
-            "Method" => (ReflectKind::Method, "MemberCode"),
-            "Const" => (ReflectKind::Constant, "DeclarationCode"),
+        let descriptor_name = match kind_name {
+            "Class" | "Def" | "Const" => "DeclarationCode",
+            "Method" => "MemberCode",
             _ => {
                 return Err(Diagnostic::new(
                     "E1041",
@@ -597,21 +595,56 @@ impl<'o> FnChecker<'o> {
         }
         let fresh_bounds = resolve_generic_bounds_from(ctx, &env, generics, first_type)?;
         env.type_bounds[first_type as usize..].clone_from_slice(&fresh_bounds);
-        let refined_ty = resolve_type(ctx, &env, signature)?;
-        if kind != ReflectKind::Constant && !matches!(ctx.store.get(refined_ty), Type::Fn(..)) {
-            return Err(Diagnostic::new(
-                "E1004",
-                "a callable refinement needs a function type",
-                signature.span,
-            ));
-        }
+        let (kind, match_ty, binding_ty) = match signature {
+            Some(signature) => {
+                let kind = match kind_name {
+                    "Class" => ReflectKind::Class,
+                    "Def" => ReflectKind::Function,
+                    "Method" => ReflectKind::Method,
+                    "Const" => ReflectKind::Constant,
+                    _ => unreachable!("the reflection kind was checked"),
+                };
+                let refined_ty = resolve_type(ctx, &env, signature)?;
+                if kind != ReflectKind::Constant
+                    && !matches!(ctx.store.get(refined_ty), Type::Fn(..))
+                {
+                    return Err(Diagnostic::new(
+                        "E1004",
+                        "a callable refinement needs a function type",
+                        signature.span,
+                    ));
+                }
+                (kind, refined_ty, refined_ty)
+            }
+            None => {
+                if kind_name != "Class" {
+                    return Err(Diagnostic::new(
+                        "E1041",
+                        "only a class refinement can omit its callable signature",
+                        span,
+                    ));
+                }
+                if generics.len() != 1 || generics[0].is_effect {
+                    return Err(Diagnostic::new(
+                        "E1041",
+                        "a class descriptor refinement needs one type parameter",
+                        span,
+                    ));
+                }
+                (
+                    ReflectKind::ClassDescriptor,
+                    ctx.store.intern(Type::Var(first_type)),
+                    required_descriptor,
+                )
+            }
+        };
         let binding_name = match &binding.kind {
             PatternKind::Name(name) if name != "_" => Some(name.clone()),
             PatternKind::Wildcard => None,
             _ => {
                 return Err(Diagnostic::new(
                     "E1041",
-                    "a callable refinement binds one name or `_`",
+                    "a reflection refinement binds one name or `_`",
                     binding.span,
                 ));
             }
@@ -627,20 +660,20 @@ impl<'o> FnChecker<'o> {
                 type_params: env.type_bounds.len() as u32,
                 type_bounds: hir_bounds(&env.type_bounds),
                 effect_params: env.effect_names.len() as u32,
-                params: vec![refined_ty],
+                params: vec![match_ty],
                 param_muts: vec![false],
                 param_names: vec!["value".to_string()],
                 ret: UNIT,
                 row: Vec::new(),
                 captures: Vec::new(),
-                locals: vec![refined_ty],
+                locals: vec![match_ty],
                 body: Vec::new(),
             },
             FnSig {
                 type_params: env.type_names.clone(),
                 type_bounds: env.type_bounds.clone(),
                 effect_params: env.effect_names.clone(),
-                params: vec![refined_ty],
+                params: vec![match_ty],
                 param_muts: vec![false],
                 param_names: vec!["value".to_string()],
                 ret: UNIT,
@@ -650,7 +683,7 @@ impl<'o> FnChecker<'o> {
 
         let binding_slot = binding_name.as_ref().map(|_| {
             let slot = self.locals.len() as u32;
-            self.locals.push((refined_ty, false));
+            self.locals.push((binding_ty, false));
             slot
         });
         let mut scope = Scope::default();

@@ -1,7 +1,7 @@
 //! Runtime operations for exact reflection descriptors.
 
 use super::*;
-use lm_bytecode::closed::{ClosedTypeId, TypeEnv};
+use lm_bytecode::closed::{ClosedType, ClosedTypeId, TypeEnv};
 use lm_bytecode::{
     BcRow, BcType, ConstValue, Constant, ExportKind, ReflectionKind, NO_REFLECTION_DEF,
 };
@@ -10,6 +10,7 @@ use std::collections::HashSet;
 enum ReflectedValue {
     Callable(u32),
     Constant(Constant),
+    ClassDescriptor { descriptor: Value, class: u32 },
 }
 
 impl Machine {
@@ -263,6 +264,32 @@ impl Machine {
         kind: ReflectionKind,
     ) -> Result<Option<ReflectedValue>, FaultCode> {
         match kind {
+            ReflectionKind::ClassDescriptor => {
+                let fields = self.reflection_fields(
+                    module,
+                    descriptor,
+                    lm_bytecode::corepin::ROLE_DECLARATION_CODE,
+                    2,
+                )?;
+                let reflection = usize::try_from(fields[0]).map_err(|_| BAD_TYPE)?;
+                let declaration = usize::try_from(fields[1]).map_err(|_| BAD_TYPE)?;
+                let Some(declaration) = module
+                    .reflections
+                    .get(reflection)
+                    .and_then(|surface| surface.declarations.get(declaration))
+                else {
+                    return Ok(None);
+                };
+                if declaration.kind != ExportKind::Class {
+                    return Ok(None);
+                }
+                Ok(module.classes.get(declaration.def as usize).map(|_| {
+                    ReflectedValue::ClassDescriptor {
+                        descriptor,
+                        class: declaration.def,
+                    }
+                }))
+            }
             ReflectionKind::Class | ReflectionKind::Function => {
                 let fields = self.reflection_fields(
                     module,
@@ -383,6 +410,23 @@ impl Machine {
                 &mut rows,
                 0,
             )?,
+            ReflectedValue::ClassDescriptor { class, .. } => {
+                let Some(definition) = module.classes.get(*class as usize) else {
+                    return Ok(None);
+                };
+                let Some(BcType::Var(variable)) = module.types.get(target.params[0] as usize)
+                else {
+                    return Ok(None);
+                };
+                let Some(binding) = types.get_mut(*variable as usize) else {
+                    return Ok(None);
+                };
+                if definition.type_params != 0 || binding.is_some() {
+                    return Ok(None);
+                }
+                *binding = Some(envs.intern(ClosedType::Class(*class)).map_err(env_fault)?);
+                true
+            }
         };
         if !matches {
             return Ok(None);
@@ -423,6 +467,7 @@ impl Machine {
             ReflectedValue::Constant(constant) => {
                 self.alloc_reflection_constant(&constant.value, &mut Vec::new(), 0)
             }
+            ReflectedValue::ClassDescriptor { descriptor, .. } => Ok(descriptor),
         }
     }
 

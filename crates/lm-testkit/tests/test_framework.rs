@@ -136,6 +136,34 @@ fn a_test_class_without_runnable_methods_is_a_failure() {
 }
 
 #[test]
+fn a_test_class_with_constructor_arguments_is_a_failure() {
+    let tree = TempTree::new("constructor");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "app/src/suite.lm",
+        r#"
+use std.test
+
+class ConfiguredTest implements Test
+  value: Int
+
+  def init(mut self, value: Int)
+    self.value = value
+  end
+
+  def passes(self): Result[(), test.TestFailure]
+    test.pass()
+  end
+end
+"#,
+    );
+    assert_eq!(run_tests(&tree), "Done(1)");
+}
+
+#[test]
 fn a_program_artifact_omits_an_unreachable_test_class() {
     let tree = TempTree::new("thin-program");
     tree.write(

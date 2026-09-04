@@ -359,7 +359,8 @@ pub enum PatternKind {
     Reflect {
         kind: String,
         generics: Vec<GenericParam>,
-        signature: TypeExpr,
+        /// A callable signature, or none for a class descriptor refinement.
+        signature: Option<TypeExpr>,
         binding: Box<Pattern>,
     },
     /// A tuple pattern: `(a, b)`. One element needs a trailing
@@ -760,7 +761,9 @@ fn dump_pattern(pattern: &Pattern) -> String {
                     format!("{prefix} {}", generic.name)
                 })
                 .collect();
-            items.push(dump_type(signature));
+            if let Some(signature) = signature {
+                items.push(dump_type(signature));
+            }
             format!("{kind}[{}]({})", items.join(", "), dump_pattern(binding))
         }
         PatternKind::Int(v) => v.to_string(),

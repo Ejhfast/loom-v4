@@ -89,6 +89,7 @@ const Answer: Int = 42
         "app/src/main.lm",
         r##"
 use lib.cases
+use lib.cases.Marker
 
 module_code = codeof(cases)
 out = [module_code.name()]
@@ -96,6 +97,13 @@ for declaration in module_code.declarations()
   out.push("#{declaration.kind()}:#{declaration.name()}")
   for member in declaration.members()
     out.push("#{declaration.name()}.#{member.kind()}:#{member.name()}")
+  end
+end
+for declaration in module_code.declarations()
+  case declaration
+  in Class[type C: Marker](class_descriptor)
+    out.push("matched:#{class_descriptor.name()}")
+  in _ then ()
   end
 end
 out
@@ -114,7 +122,7 @@ out
         "Done([\"lib.cases\", \"interface:Marker\", \"class:Base\", \
          \"Base.method:base\", \"class:Sample\", \"Sample.method:own\", \
          \"Sample.method:marked\", \"Sample.method:base\", \"enum:Choice\", \
-         \"function:twice\", \"constant:Answer\"])"
+         \"function:twice\", \"constant:Answer\", \"matched:Sample\"])"
     );
 }
 
