@@ -409,19 +409,19 @@ fn resolve(
             Node::Heap(Kind::Map)
         }
         ClosedType::Inst(class, args)
-            if args.len() == 2
+            if args.len() == 1
                 && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_CODE] =>
         {
             Node::Heap(Kind::FunctionCode)
         }
         ClosedType::Inst(class, args)
-            if args.len() == 2
+            if args.len() == 1
                 && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_DEF] =>
         {
             Node::Heap(Kind::FunctionDef)
         }
         ClosedType::Inst(class, args)
-            if args.len() == 2
+            if args.len() == 1
                 && *class == module.core_roles[lm_bytecode::corepin::ROLE_FUNCTION_BINDING] =>
         {
             Node::Heap(Kind::FunctionBinding)

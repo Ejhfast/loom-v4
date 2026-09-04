@@ -55,7 +55,7 @@ def evaluate(text: String): Result[Int, CodeError] with Compiler, Vm
 
   # The caller states the type it expects. The lookup fails as an
   # ordinary error when the entry carries another type.
-  entry = instance.entry[(), Int]()?
+  entry = instance.entry[() -> Int]()?
   case image.activate(entry, args: ())?.run()
   in Ok(value) then Ok(value)
   in Err(_) then Err(CodeError("the program faulted"))

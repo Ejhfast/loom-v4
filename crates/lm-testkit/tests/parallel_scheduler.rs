@@ -1659,7 +1659,7 @@ def exercise(): Result[Bool, String] with Vm, Proc
   launcher = image.install(launch).map_error() {
     |error: CodeError| error.message
   }?
-  original = instance.function_binding[(Int,), Int]("rate").map_error() {
+  original = instance.function_binding[(Int) -> Int]("rate").map_error() {
     |error: CodeError| error.message
   }?
   revision = image.install(revised_rate).map_error() {

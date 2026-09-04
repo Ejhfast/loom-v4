@@ -306,6 +306,49 @@ execute()
 }
 
 #[test]
+fn installed_function_handles_keep_parameter_modes_and_effects() {
+    let source = r#"
+def inspect(mut values: List[Int]): Int with Io.Write
+  values.len()
+end
+
+def execute(): Int with Vm
+  image = sys.vm.Vm()
+  binding: FunctionBinding[(mut List[Int]) -> Int with Io.Write] =
+    case image.install(codeof(inspect))
+    in Ok(value) then value
+    in Err(_) then return -1
+    end
+  target: FunctionDef[(mut List[Int]) -> Int with Io.Write] =
+    case binding.target()
+    in Ok(value) then value
+    in Err(_) then return -2
+    end
+  instance = case binding.instance()
+  in Ok(value) then value
+  in Err(_) then return -3
+  end
+  case instance.function_binding[(mut List[Int]) -> Int with Io.Write]("inspect")
+  in Err(_) then return -4
+  in Ok(_) then ()
+  end
+  case instance.function_binding[(List[Int]) -> Int with Io.Write]("inspect")
+  in Ok(_) then return -5
+  in Err(_) then ()
+  end
+  case instance.function_binding[(mut List[Int]) -> Int]("inspect")
+  in Ok(_) then return -6
+  in Err(_) then ()
+  end
+  42
+end
+
+execute()
+"#;
+    assert_eq!(run_with_files(source, &[]), "Done(42)");
+}
+
+#[test]
 fn named_function_bindings_replace_directly() {
     let source = r#"
 def rate(value: Int): Int
@@ -318,7 +361,7 @@ end
 
 def call(
   image: Vm,
-  binding: FunctionBinding[(Int,), Int],
+  binding: FunctionBinding[(Int) -> Int],
   value: Int
 ): Result[Int, String] with Vm
   run = image.activate(binding, args: (value,)).map_error() {
@@ -332,7 +375,7 @@ end
 
 def call_target(
   image: Vm,
-  target: FunctionDef[(Int,), Int],
+  target: FunctionDef[(Int) -> Int],
   value: Int
 ): Result[Int, String] with Vm
   run = image.activate(target, args: (value,)).map_error() {
@@ -442,7 +485,7 @@ end
 
 def call_add(
   image: Vm,
-  function: FunctionBinding[(Int,), Int]
+  function: FunctionBinding[(Int) -> Int]
 ): Result[Int, String] with Vm
   run = image.activate(function, args: (1,)).map_error() {
     |error: CodeError| error.message
@@ -577,7 +620,7 @@ end
 
 def run_entry(
   image: Vm,
-  entry: FunctionBinding[(), Int]
+  entry: FunctionBinding[() -> Int]
 ): Result[Int, String] with Vm
   run = image.activate(entry, args: ()).map_error() {
     |error: CodeError| error.message
@@ -605,7 +648,7 @@ def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify
     |error: CodeError| error.message
   }?
   instance = original.instance().map_error() { |error: CodeError| error.message }?
-  entry = instance.entry_binding[(), Int]().map_error() {
+  entry = instance.entry_binding[() -> Int]().map_error() {
     |error: CodeError| error.message
   }?
   before = run_entry(image, entry)?
@@ -635,7 +678,7 @@ def read_box(): Int
   Box().amount()
 end
 
-def run_read(image: Vm, function: FunctionBinding[(), Int]): Result[Int, String] with Vm
+def run_read(image: Vm, function: FunctionBinding[() -> Int]): Result[Int, String] with Vm
   run = image.activate(function, args: ()).map_error() {
     |error: CodeError| error.message
   }?
@@ -695,10 +738,10 @@ def execute(): Result[(Int, Int, String), String] with Compiler.Compile, Compile
   replacement_instance = replacement.instance().map_error() {
     |error: CodeError| error.message
   }?
-  original_amount = original_instance.function_binding[(Box,), Int]("Box.amount").map_error() {
+  original_amount = original_instance.function_binding[(Box) -> Int]("Box.amount").map_error() {
     |error: CodeError| error.message
   }?
-  replacement_amount = replacement_instance.function_binding[(Box,), Int]("Box.amount").map_error() {
+  replacement_amount = replacement_instance.function_binding[(Box) -> Int]("Box.amount").map_error() {
     |error: CodeError| error.message
   }?
   before = run_read(image, reader)?
@@ -784,7 +827,7 @@ end
 
 def call_total(
   image: Vm,
-  function: FunctionBinding[(Int,), Int],
+  function: FunctionBinding[(Int) -> Int],
   value: Int
 ): Result[Int, String] with Vm
   run = image.activate(function, args: (value,)).map_error() {
@@ -881,7 +924,7 @@ end
 
 def run_price(
   image: Vm,
-  function: FunctionBinding[(), Int]
+  function: FunctionBinding[() -> Int]
 ): Result[Int, String] with Vm
   run = image.activate(function, args: ()).map_error() {
     |error: CodeError| error.message
@@ -1162,7 +1205,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Vm
   in Err(_)
     return -3
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -4
@@ -1299,7 +1342,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   in Err(_)
     return -6
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -7
@@ -1421,7 +1464,7 @@ def execute(): Int with Compiler.CompileSyntax, Compiler.Verify, Reflect.ParseSy
   in Err(_)
     return -6
   end
-  function = case instance.function[(Int,), Int]("add")
+  function = case instance.function[(Int) -> Int]("add")
   in Ok(value) then value
   in Err(_)
     return -7
@@ -1473,7 +1516,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_)
     return -3
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -4
@@ -1518,7 +1561,7 @@ def compile_revision(
   artifact.verify().map_error() { |error: CodeError| error.message }
 end
 
-def run_entry(image: Vm, entry: FunctionDef[(), Int]): Result[Int, String] with Vm
+def run_entry(image: Vm, entry: FunctionDef[() -> Int]): Result[Int, String] with Vm
   run = image.activate(entry, args: ()).map_error() {
     |error: CodeError| error.message
   }?
@@ -1561,7 +1604,7 @@ def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify
   third = image.install(third_module).map_error() {
     |error: CodeError| error.message
   }?
-  entry = second.entry[(), Int]().map_error() {
+  entry = second.entry[() -> Int]().map_error() {
     |error: CodeError| error.message
   }?
   before = run_entry(image, entry)?
@@ -1583,7 +1626,7 @@ def execute(): Result[(Int, Int), String] with Compiler.Compile, Compiler.Verify
   slot = second.slot_for(spec).map_error() {
     |error: CodeError| error.message
   }?
-  target = first.function[(Int,), Int]("add").map_error() {
+  target = first.function[(Int) -> Int]("add").map_error() {
     |error: CodeError| error.message
   }?
   image.replace(slot, target).map_error() {
@@ -1673,7 +1716,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_)
     return -6
   end
-  entry = case program_instance.entry[(), Int]()
+  entry = case program_instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -7
@@ -1765,7 +1808,7 @@ def execute(): Int with Compiler.Compile, Compiler.Verify, Vm
   in Err(_)
     return -6
   end
-  entry = case program_instance.entry[(), Int]()
+  entry = case program_instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -7
@@ -1951,7 +1994,7 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
       in Ok(_) then return -3
       in Err(_) then ()
       end
-      case instance.entry[(), Int]()
+      case instance.entry[() -> Int]()
       in Err(_) then -3
       in Ok(entry)
         case image.activate(entry, args: ())
@@ -2041,7 +2084,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
   in Ok(instance) then instance
   in Err(_) then return false
   end
-  entry = case first.entry[(), Int]()
+  entry = case first.entry[() -> Int]()
   in Ok(value) then value
   in Err(_) then return false
   end
@@ -2053,7 +2096,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Compiler.Verify, Vm
   in Ok(value) then value
   in Err(_) then return false
   end
-  target = case second.function[(Int,), Int]("step")
+  target = case second.function[(Int) -> Int]("step")
   in Ok(value) then value
   in Err(_) then return false
   end
@@ -2301,7 +2344,7 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_)
     return (-4, -4)
   end
-  entry = case first.entry[(), Int]()
+  entry = case first.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return (-5, -5)
@@ -2326,7 +2369,7 @@ def execute(): (Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_)
     return (-7, -7)
   end
-  target = case second.function[(Int,), Int]("step")
+  target = case second.function[(Int) -> Int]("step")
   in Ok(value) then value
   in Err(_)
     return (-8, -8)
@@ -2374,7 +2417,7 @@ def read_artifact(path: String): Artifact with Fs.Open, Fs.Read, Fs.Close, Vm, C
   sys.vm.artifact(bytes)
 end
 
-def run_entry(image: Vm, entry: FunctionDef[(), Int]): Int with Vm
+def run_entry(image: Vm, entry: FunctionDef[() -> Int]): Int with Vm
   case image.activate(entry, args: ())
   in Err(_) then -20
   in Ok(run)
@@ -2403,11 +2446,11 @@ def execute(): (Int, Int, Int, Int) with Fs.Open, Fs.Read, Fs.Close, Vm, Compile
   in Ok(instance) then instance
   in Err(_) then return (-4, -4, -4, -4)
   end
-  first_entry = case first_instance.entry[(), Int]()
+  first_entry = case first_instance.entry[() -> Int]()
   in Ok(entry) then entry
   in Err(_) then return (-5, -5, -5, -5)
   end
-  second_entry = case second_instance.entry[(), Int]()
+  second_entry = case second_instance.entry[() -> Int]()
   in Ok(entry) then entry
   in Err(_) then return (-6, -6, -6, -6)
   end
@@ -2483,7 +2526,7 @@ def start_worker(
   image: Vm,
   instance: Instance
 ): Result[Handle[Never, Int], String] with Vm, Proc
-  entry = instance.entry[(), Handle[Never, Int]]().map_error() {
+  entry = instance.entry[() -> Handle[Never, Int] with Proc]().map_error() {
     |error: CodeError| error.message
   }?
   run = image.activate(entry, args: ()).map_error() {
@@ -2577,7 +2620,7 @@ def start_worker(
   image: Vm,
   instance: Instance
 ): Result[Handle[Never, Int], String] with Vm, Proc
-  entry = instance.entry[(), Handle[Never, Int]]().map_error() {
+  entry = instance.entry[() -> Handle[Never, Int] with Proc]().map_error() {
     |error: CodeError| error.message
   }?
   run = image.activate(entry, args: ()).map_error() {
@@ -2639,7 +2682,7 @@ def execute(): Result[(Int, Int), String] with Fs.Open, Fs.Read, Fs.Close, Vm, P
   slot = first_instance.slot_for(spec).map_error() {
     |error: CodeError| error.message
   }?
-  target = second_instance.function[(Int,), Int]("step").map_error() {
+  target = second_instance.function[(Int) -> Int]("step").map_error() {
     |error: CodeError| error.message
   }?
   image.replace_function(slot, target).map_error() {
@@ -2721,7 +2764,7 @@ def start_worker(
   image: Vm,
   instance: Instance
 ): Result[Handle[(Int, Handle[Int, Int]), Int], String] with Vm, Proc
-  entry = instance.entry[(), Handle[(Int, Handle[Int, Int]), Int]]().map_error() {
+  entry = instance.entry[() -> Handle[(Int, Handle[Int, Int]), Int] with Proc]().map_error() {
     |error: CodeError| error.message
   }?
   run = image.activate(entry, args: ()).map_error() {
@@ -2777,7 +2820,7 @@ def execute(): Result[(Int, Int), String] with Fs.Open, Fs.Read, Fs.Close, Vm, P
   slot = first_instance.slot_for(spec).map_error() {
     |error: CodeError| error.message
   }?
-  target = second_instance.function[(Int,), Int]("step").map_error() {
+  target = second_instance.function[(Int) -> Int]("step").map_error() {
     |error: CodeError| error.message
   }?
   image.replace(slot, target).map_error() { |error: CodeError| error.message }?
@@ -2870,7 +2913,7 @@ def execute(): Result[(Int, Int), String] with Vm, Proc
   launcher = image.install(launch).map_error() {
     |error: CodeError| error.message
   }?
-  original = service.function_binding[(Int,), Int]("rate").map_error() {
+  original = service.function_binding[(Int) -> Int]("rate").map_error() {
     |error: CodeError| error.message
   }?
   replacement = image.install(with_fee).map_error() {
@@ -2937,7 +2980,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_)
     return false
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return false
@@ -3012,7 +3055,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   in Err(_)
     return false
   end
-  function = case instance.function[(Int,), Int]("step")
+  function = case instance.function[(Int) -> Int]("step")
   in Ok(value) then value
   in Err(_)
     return false
@@ -3353,7 +3396,7 @@ def execute(): Bool with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_)
     return false
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return false
@@ -3536,7 +3579,7 @@ def execute(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Compiler.Verify
   in Err(_)
     return -2
   end
-  entry = case instance.entry[(), Int]()
+  entry = case instance.entry[() -> Int]()
   in Ok(value) then value
   in Err(_)
     return -3

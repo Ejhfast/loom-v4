@@ -49,8 +49,8 @@ end
 def drive(
   image: Vm,
   run: Run[[Int]],
-  original: FunctionBinding[(Int,), Int],
-  upgrade: FunctionBinding[(Int,), Int]
+  original: FunctionBinding[(Int) -> Int with Io.ReadBytes],
+  upgrade: FunctionBinding[(Int) -> Int with Io.ReadBytes]
 ): Result[[Int], String] with Vm
   upgraded = false
   loop do

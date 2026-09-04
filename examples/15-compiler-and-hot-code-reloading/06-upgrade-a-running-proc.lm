@@ -93,7 +93,7 @@ def serve(): Result[(Int, Int, Int), String] with Vm, Proc
   }?
   service = worker_class.instance().map_error() { |e: CodeError| e.message }?
   launcher = image.install(launch).map_error() { |e: CodeError| e.message }?
-  original = service.function_binding[(Int,), Int]("rate").map_error() {
+  original = service.function_binding[(Int) -> Int]("rate").map_error() {
     |e: CodeError| e.message
   }?
   upgrade = image.install(with_fee).map_error() { |e: CodeError| e.message }?

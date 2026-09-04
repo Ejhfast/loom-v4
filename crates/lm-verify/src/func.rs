@@ -579,7 +579,6 @@ pub(crate) fn verify_func(
                         if target.type_params != 0
                             || target.effect_params != 0
                             || !target.captures.is_empty()
-                            || target.param_muts.iter().any(|marker| *marker)
                         {
                             return Err(err(fidx, at("function code target is not portable")));
                         }

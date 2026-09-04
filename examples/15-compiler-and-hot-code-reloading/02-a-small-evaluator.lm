@@ -58,7 +58,7 @@ def evaluate(tree: SyntaxNode): Result[String, CodeError] with Compiler, Vm
   module = artifact.verify()?
   image = sys.vm.Vm()
   instance = image.install(module)?
-  entry = instance.entry[(), DynValue]()?
+  entry = instance.entry[() -> DynValue]()?
   case image.activate(entry, args: ())?.run()
   in Ok(value) then Ok(value.render())
   in Err(_) then Err(CodeError("the program faulted"))

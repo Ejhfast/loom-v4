@@ -38,7 +38,7 @@ def score(text: String): Result[Int, CodeError] with Compiler, Vm
   module = build(text)?
   image = sys.vm.Vm()
   instance = image.install(module)?
-  entry = instance.entry[(), Int]()?
+  entry = instance.entry[() -> Int with Io.Write]()?
 
   # A new run starts with the default-deny table. The holder passes
   # nothing through, so any operation the guest performs stops here.

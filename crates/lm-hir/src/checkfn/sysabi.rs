@@ -1135,7 +1135,10 @@ impl<'o> FnChecker<'o> {
             ("Instance", "dynamic_entry") => {
                 Self::expect_no_args(name, args, span)?;
                 let dynamic = Self::core_class(ctx, "DynValue");
-                let function = Self::core_inst(ctx, "FunctionDef", vec![UNIT, dynamic]);
+                let callable =
+                    ctx.store
+                        .intern(Type::Fn(Vec::new(), Vec::new(), dynamic, Vec::new()));
+                let function = Self::core_inst(ctx, "FunctionDef", vec![callable]);
                 self.charge_op(ctx, lm_abi::OP_VM_INSTANCE_ENTRY, span)?;
                 Ok(HExpr {
                     flow: Flow::Normal,
@@ -1151,20 +1154,19 @@ impl<'o> FnChecker<'o> {
             | ("Instance", "function")
             | ("Instance", "entry_binding")
             | ("Instance", "function_binding") => {
-                if type_args.len() != 2 {
+                if type_args.len() != 1 {
                     return Err(Diagnostic::new(
                         "E1024",
-                        format!("`{name}` needs argument and result type arguments"),
+                        format!("`{name}` needs one function type argument"),
                         name_span,
                     ));
                 }
                 let env = self.env.clone();
-                let input = resolve_type(ctx, &env, &type_args[0])?;
-                let output = resolve_type(ctx, &env, &type_args[1])?;
-                if !matches!(ctx.store.get(input), Type::Unit | Type::Tuple(_)) {
+                let callable = resolve_type(ctx, &env, &type_args[0])?;
+                if !matches!(ctx.store.get(callable), Type::Fn(..)) {
                     return Err(Diagnostic::new(
                         "E1004",
-                        "a function definition argument view must be () or a tuple",
+                        "an installed function view needs a function type",
                         type_args[0].span,
                     ));
                 }
@@ -1174,7 +1176,7 @@ impl<'o> FnChecker<'o> {
                 } else {
                     "FunctionDef"
                 };
-                let function = Self::core_inst(ctx, class, vec![input, output]);
+                let function = Self::core_inst(ctx, class, vec![callable]);
                 let entry = matches!(name, "entry" | "entry_binding");
                 let (op, values) = if entry {
                     Self::expect_no_args(name, args, span)?;
@@ -1425,18 +1427,24 @@ impl<'o> FnChecker<'o> {
                         (view, ret, op)
                     }
                     Type::Inst(class, values)
-                        if ctx.core_types.get("FunctionDef") == Some(&class.0)
+                        if (ctx.core_types.get("FunctionDef") == Some(&class.0)
+                            || ctx.core_types.get("FunctionBinding") == Some(&class.0))
                             && name == "activate"
-                            && values.len() == 2 =>
+                            && values.len() == 1 =>
                     {
-                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
-                    }
-                    Type::Inst(class, values)
-                        if ctx.core_types.get("FunctionBinding") == Some(&class.0)
-                            && name == "activate"
-                            && values.len() == 2 =>
-                    {
-                        (values[0], values[1], lm_abi::OP_VM_ACTIVATE_DEF)
+                        let Type::Fn(params, _, ret, _) = ctx.store.get(values[0]).clone() else {
+                            return Err(Diagnostic::new(
+                                "E1004",
+                                "an installed function handle has an invalid type",
+                                args[0].span,
+                            ));
+                        };
+                        let view = if params.is_empty() {
+                            UNIT
+                        } else {
+                            ctx.store.intern(Type::Tuple(params))
+                        };
+                        (view, ret, lm_abi::OP_VM_ACTIVATE_DEF)
                     }
                     _ => {
                         let expected = if name == "activate_or_fault" {
@@ -1497,31 +1505,19 @@ impl<'o> FnChecker<'o> {
                         if ctx.core_types.get("FunctionCode") == Some(&class.0)
                             && values.len() == 1 =>
                     {
-                        let Type::Fn(params, _, ret, _) = ctx.store.get(values[0]).clone() else {
+                        if !matches!(ctx.store.get(values[0]), Type::Fn(..)) {
                             return Err(Diagnostic::new(
                                 "E1004",
                                 "`install` needs valid function code",
                                 args[0].span,
                             ));
-                        };
-                        let input = if params.is_empty() {
-                            UNIT
-                        } else {
-                            ctx.store.intern(Type::Tuple(params))
-                        };
-                        Self::core_inst(ctx, "FunctionBinding", vec![input, ret])
+                        }
+                        Self::core_inst(ctx, "FunctionBinding", values)
                     }
                     Type::Class(class) if ctx.core_types.get("ClassCode") == Some(&class.0) => {
                         Self::core_class(ctx, "ClassBinding")
                     }
-                    Type::Fn(params, _, ret, _) => {
-                        let input = if params.is_empty() {
-                            UNIT
-                        } else {
-                            ctx.store.intern(Type::Tuple(params))
-                        };
-                        Self::core_inst(ctx, "FunctionBinding", vec![input, ret])
-                    }
+                    Type::Fn(..) => Self::core_inst(ctx, "FunctionBinding", vec![code.ty]),
                     _ => {
                         return Err(Diagnostic::new(
                             "E1004",
@@ -1572,7 +1568,8 @@ impl<'o> FnChecker<'o> {
                     Type::Class(class) if ctx.core_types.get("Slot") == Some(&class.0) => 0,
                     Type::Inst(class, values)
                         if ctx.core_types.get("FunctionBinding") == Some(&class.0)
-                            && values.len() == 2 =>
+                            && values.len() == 1
+                            && matches!(ctx.store.get(values[0]), Type::Fn(..)) =>
                     {
                         1
                     }
@@ -1591,7 +1588,8 @@ impl<'o> FnChecker<'o> {
                     Type::Inst(class, values)
                         if (ctx.core_types.get("FunctionDef") == Some(&class.0)
                             || ctx.core_types.get("FunctionBinding") == Some(&class.0))
-                            && values.len() == 2
+                            && values.len() == 1
+                            && matches!(ctx.store.get(values[0]), Type::Fn(..))
                 ) || matches!(ctx.store.get(target.ty), Type::Fn(_, muts, _, _) if !muts.iter().any(|marker| *marker));
                 let is_class = matches!(
                     ctx.store.get(target.ty),

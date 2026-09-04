@@ -912,7 +912,7 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   in Err(error)
     panic(error.message)
   end
-  function_binding = case instance.function_binding[(Int,), Int]("step")
+  function_binding = case instance.function_binding[(Int) -> Int]("step")
   in Ok(value) then value
   in Err(_)
     return -3
@@ -922,7 +922,7 @@ def go(): Int with Fs.Open, Fs.Read, Fs.Close, Vm, Proc, Compiler.Verify
   in Err(_)
     return -4
   end
-  function = case instance.function[(Int,), Int]("step")
+  function = case instance.function[(Int) -> Int]("step")
   in Ok(value) then value
   in Err(_)
     return -5

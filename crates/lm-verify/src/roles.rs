@@ -1227,8 +1227,13 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
     for (role, name, arity) in [
         (lm_bytecode::corepin::ROLE_LIST, "List", 1),
         (lm_bytecode::corepin::ROLE_MAP, "Map", 2),
-        (lm_bytecode::corepin::ROLE_FUNCTION_DEF, "FunctionDef", 2),
+        (lm_bytecode::corepin::ROLE_FUNCTION_DEF, "FunctionDef", 1),
         (lm_bytecode::corepin::ROLE_FUNCTION_CODE, "FunctionCode", 1),
+        (
+            lm_bytecode::corepin::ROLE_FUNCTION_BINDING,
+            "FunctionBinding",
+            1,
+        ),
     ] {
         let Some(idx) = slot(role) else { continue };
         let class = &module.classes[idx as usize];

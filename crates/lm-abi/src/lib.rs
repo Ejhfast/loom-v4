@@ -27,7 +27,7 @@ pub use hash::{hash256, hash256_hex};
 /// increment this value.
 /// The version covers operation definitions, groups, resources,
 /// signatures, identities, and slot order.
-pub const ABI_VERSION: u32 = 46;
+pub const ABI_VERSION: u32 = 47;
 
 /// A dense group slot: the index in `GROUPS`.
 pub type GroupSlot = u32;
@@ -3430,7 +3430,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Instance) -> Result[FunctionDef[A,T], CodeError]",
+        schema: "[F](Instance) -> Result[FunctionDef[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3439,7 +3439,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Instance, String) -> Result[FunctionDef[A,T], CodeError]",
+        schema: "[F](Instance, String) -> Result[FunctionDef[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3466,7 +3466,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Vm, FunctionDef[A,T] | FunctionBinding[A,T], control A) -> Result[Run[T], CodeError]",
+        schema: "[F](Vm, FunctionDef[F] | FunctionBinding[F], control Args[F]) -> Result[Run[Return[F]], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3475,7 +3475,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T,e](Vm, Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T] | Fn[A,T,e]) -> Result[(), CodeError]",
+        schema: "[F](Vm, Slot | FunctionBinding[F], FunctionDef[F] | FunctionBinding[F] | F) -> Result[(), CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3622,7 +3622,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Instance) -> Result[FunctionBinding[A,T], CodeError]",
+        schema: "[F](Instance) -> Result[FunctionBinding[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3631,7 +3631,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](Instance, String) -> Result[FunctionBinding[A,T], CodeError]",
+        schema: "[F](Instance, String) -> Result[FunctionBinding[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3649,7 +3649,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[Slot, CodeError]",
+        schema: "[F](FunctionBinding[F] | ClassBinding) -> Result[Slot, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3658,7 +3658,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[SlotSpec, CodeError]",
+        schema: "[F](FunctionBinding[F] | ClassBinding) -> Result[SlotSpec, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3667,7 +3667,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](FunctionBinding[A,T] | ClassBinding) -> Result[Instance, CodeError]",
+        schema: "[F](FunctionBinding[F] | ClassBinding) -> Result[Instance, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3676,7 +3676,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T](FunctionBinding[A,T]) -> Result[FunctionDef[A,T], CodeError]",
+        schema: "[F](FunctionBinding[F]) -> Result[FunctionDef[F], CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {
@@ -3694,7 +3694,7 @@ pub const OPS: [OpDef; 149] = [
         kind: OpKind::VmControl,
         params: &[],
         reply: AbiType::UNIT,
-        schema: "[A,T,e](Vm, Slot | FunctionBinding[A,T], FunctionDef[A,T] | FunctionBinding[A,T] | Fn[A,T,e]) -> Result[SlotChange, CodeError]",
+        schema: "[F](Vm, Slot | FunctionBinding[F], FunctionDef[F] | FunctionBinding[F] | F) -> Result[SlotChange, CodeError]",
         snapshot: SnapshotClass::MachineState,
     },
     OpDef {

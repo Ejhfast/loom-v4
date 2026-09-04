@@ -349,7 +349,7 @@ end
 
 def run(
   image: Vm,
-  function: FunctionBinding[(Int,), Int],
+  function: FunctionBinding[(Int) -> Int],
   value: Int
 ): Int with Vm
   active = image.activate(function, args: (value,)).expect("the call activates")

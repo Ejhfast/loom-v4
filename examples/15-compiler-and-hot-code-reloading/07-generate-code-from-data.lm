@@ -70,7 +70,7 @@ def run_tree(tree: SyntaxNode): Result[Int, CodeError] with Compiler, Vm
   module = artifact.verify()?
   image = sys.vm.Vm()
   instance = image.install(module)?
-  entry = instance.entry[(), Int]()?
+  entry = instance.entry[() -> Int]()?
   case image.activate(entry, args: ())?.run()
   in Ok(value) then Ok(value)
   in Err(problem) then Err(CodeError(problem.code()))

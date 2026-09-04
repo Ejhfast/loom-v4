@@ -2607,16 +2607,11 @@ pub(crate) fn step(
                                         "`Vm.Install` has invalid code input".to_string(),
                                     ));
                                 }
-                                let BcType::Fn(params, _, ret, _) = ctx.ty(args[0]) else {
+                                if !matches!(ctx.ty(args[0]), BcType::Fn(..)) {
                                     return Err(fail(
                                         "`Vm.Install` has invalid function code".to_string(),
                                     ));
-                                };
-                                let input = if params.is_empty() {
-                                    TY_UNIT
-                                } else {
-                                    ctx.intern(BcType::Tuple(params))
-                                };
+                                }
                                 let function_binding =
                                     ctx.core.function_binding.ok_or_else(|| {
                                     fail(
@@ -2624,16 +2619,11 @@ pub(crate) fn step(
                                             .to_string(),
                                     )
                                 })?;
-                                ctx.intern(BcType::Inst(function_binding, vec![input, ret]))
+                                ctx.intern(BcType::Inst(function_binding, vec![args[0]]))
                             } else if class_code == Some(code) {
                                 ctx.plain_inst(ctx.core.class_binding, "ClassBinding")
                                     .map_err(&fail)?
-                            } else if let BcType::Fn(params, _, ret, _) = code_ty {
-                                let input = if params.is_empty() {
-                                    TY_UNIT
-                                } else {
-                                    ctx.intern(BcType::Tuple(params))
-                                };
+                            } else if matches!(code_ty, BcType::Fn(..)) {
                                 let function_binding =
                                     ctx.core.function_binding.ok_or_else(|| {
                                     fail(
@@ -2641,7 +2631,7 @@ pub(crate) fn step(
                                             .to_string(),
                                     )
                                 })?;
-                                ctx.intern(BcType::Inst(function_binding, vec![input, ret]))
+                                ctx.intern(BcType::Inst(function_binding, vec![code]))
                             } else {
                                 return Err(fail(
                                     "`Vm.Install` has invalid code input".to_string(),
@@ -2797,16 +2787,15 @@ pub(crate) fn step(
                                         .to_string(),
                                 ));
                             };
-                            if found_function != function_class || function_args.len() != 2 {
+                            if found_function != function_class || function_args.len() != 1 {
                                 return Err(fail(
                                     "an instance function lookup has the wrong handle type"
                                         .to_string(),
                                 ));
                             }
-                            if !matches!(ctx.ty(function_args[0]), BcType::Unit | BcType::Tuple(_))
-                            {
+                            if !matches!(ctx.ty(function_args[0]), BcType::Fn(..)) {
                                 return Err(fail(
-                                    "a function argument view must be unit or a tuple".to_string(),
+                                    "an installed function view needs a function type".to_string(),
                                 ));
                             }
                             push(state, reply_ty)?;
@@ -2868,7 +2857,8 @@ pub(crate) fn step(
                             let function_args = match ctx.ty(binding) {
                                 BcType::Inst(class, args)
                                     if ctx.core.function_binding == Some(class)
-                                        && args.len() == 2 =>
+                                        && args.len() == 1
+                                        && matches!(ctx.ty(args[0]), BcType::Fn(..)) =>
                                 {
                                     Some(args)
                                 }
@@ -2984,15 +2974,30 @@ pub(crate) fn step(
                             };
                             if (ctx.core.function_def != Some(found)
                                 && ctx.core.function_binding != Some(found))
-                                || parts.len() != 2
-                                || !ctx.is_subtype(args_ty, parts[0])
+                                || parts.len() != 1
                             {
                                 return Err(fail(
                                     "`Vm.ActivateDef` arguments do not match the definition"
                                         .to_string(),
                                 ));
                             }
-                            let run = ctx.intern(BcType::Run(parts[1]));
+                            let BcType::Fn(params, _, ret, _) = ctx.ty(parts[0]) else {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` has an invalid function type".to_string(),
+                                ));
+                            };
+                            let want = if params.is_empty() {
+                                TY_UNIT
+                            } else {
+                                ctx.intern(BcType::Tuple(params))
+                            };
+                            if !ctx.is_subtype(args_ty, want) {
+                                return Err(fail(
+                                    "`Vm.ActivateDef` arguments do not match the definition"
+                                        .to_string(),
+                                ));
+                            }
+                            let run = ctx.intern(BcType::Run(ret));
                             let error = ctx
                                 .plain_inst(ctx.core.code_error, "CodeError")
                                 .map_err(&fail)?;
@@ -3014,7 +3019,8 @@ pub(crate) fn step(
                                 BcType::Inst(class, args)
                                     if (ctx.core.function_def == Some(*class)
                                         || ctx.core.function_binding == Some(*class))
-                                        && args.len() == 2
+                                        && args.len() == 1
+                                        && matches!(ctx.ty(args[0]), BcType::Fn(..))
                             ) || matches!(
                                 &definition_ty,
                                 BcType::Fn(_, muts, _, _)
@@ -3030,7 +3036,9 @@ pub(crate) fn step(
                             let binding = matches!(
                                 ctx.ty(slot),
                                 BcType::Inst(class, args)
-                                    if ctx.core.function_binding == Some(class) && args.len() == 2
+                                    if ctx.core.function_binding == Some(class)
+                                        && args.len() == 1
+                                        && matches!(ctx.ty(args[0]), BcType::Fn(..))
                             );
                             if direct_slot != Some(slot) && !binding {
                                 return Err(fail(

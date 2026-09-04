@@ -30,7 +30,7 @@ def read_box(): Int
   Box().amount()
 end
 
-def run_read(image: Vm, f: FunctionBinding[(), Int]): Result[Int, String] with Vm
+def run_read(image: Vm, f: FunctionBinding[() -> Int]): Result[Int, String] with Vm
   run = image.activate(f, args: ()).map_error() {
     |e: CodeError| e.message
   }?

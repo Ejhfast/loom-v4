@@ -43,7 +43,7 @@ end
 
 def run_checkout(
   image: Vm,
-  entry: FunctionBinding[(Int,), (Int, Int)]
+  entry: FunctionBinding[(Int) -> (Int, Int)]
 ): Result[(Int, Int), String] with Vm
   run = image.activate(entry, args: (10,)).map_error() {
     |e: CodeError| e.message

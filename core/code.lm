@@ -107,13 +107,13 @@ end
 final class SlotChange
 end
 
-final class FunctionDef[A, T]
+final class FunctionDef[F]
 end
 
 final class ClassDef
 end
 
-final class FunctionBinding[A, T]
+final class FunctionBinding[F]
 end
 
 final class ClassBinding

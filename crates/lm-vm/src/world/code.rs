@@ -145,6 +145,10 @@ fn source_origin(
         .map(|definition| definition.origin)
 }
 
+fn closed_row_is_subset(left: &[u32], right: &[u32]) -> bool {
+    left.iter().all(|slot| right.binary_search(slot).is_ok())
+}
+
 fn closed_rows_match(left: &[u32], right: &[u32]) -> bool {
     left == right
 }
@@ -302,6 +306,49 @@ fn closed_types_match(
         }
     }
     true
+}
+
+fn closed_callable_fits(
+    bundle: &lm_abi::AbiBundle,
+    found_space: ClosedTypeSpace<'_>,
+    found: ClosedTypeId,
+    expected_space: ClosedTypeSpace<'_>,
+    expected: ClosedTypeId,
+) -> bool {
+    let Some(ClosedType::Fn(found_params, found_muts, found_result, found_row)) =
+        found_space.types.ty(found)
+    else {
+        return false;
+    };
+    let Some(ClosedType::Fn(expected_params, expected_muts, expected_result, expected_row)) =
+        expected_space.types.ty(expected)
+    else {
+        return false;
+    };
+    if found_params.len() != expected_params.len()
+        || found_muts.len() != expected_muts.len()
+        || found_muts
+            .iter()
+            .zip(expected_muts)
+            .any(|(found, expected)| *found && !*expected)
+        || !closed_row_is_subset(found_row, expected_row)
+    {
+        return false;
+    }
+    found_params
+        .iter()
+        .copied()
+        .zip(expected_params.iter().copied())
+        .all(|(found, expected)| {
+            closed_types_match(bundle, found_space, found, expected_space, expected)
+        })
+        && closed_types_match(
+            bundle,
+            found_space,
+            *found_result,
+            expected_space,
+            *expected_result,
+        )
 }
 
 impl World {
@@ -744,13 +791,12 @@ impl World {
             };
             let contract = self
                 .requested_function_contract(vm, function_class)
-                .and_then(|(input, output)| {
-                    self.portable_function_matches_contract(
+                .and_then(|callable| {
+                    self.portable_function_matches_callable(
                         vm,
                         source,
                         source_index.expect("function code has one root export"),
-                        input,
-                        output,
+                        callable,
                     )
                 });
             match contract {
@@ -1270,9 +1316,7 @@ impl World {
         };
         let matches = self
             .requested_function_contract(vm, function_class)
-            .and_then(|(input, output)| {
-                self.function_matches_contract(vm, namespace, function, input, output)
-            });
+            .and_then(|callable| self.function_matches_callable(vm, namespace, function, callable));
         match matches {
             Ok(true) => {
                 self.finish_binding_lookup(vm, op, instance, CodeHandleKind::FunctionBinding, slot)
@@ -1453,9 +1497,8 @@ impl World {
             return;
         };
         let contract = self.requested_function_contract(vm, function_class);
-        let matches = contract.and_then(|(input, output)| {
-            self.function_matches_contract(vm, namespace, function, input, output)
-        });
+        let matches = contract
+            .and_then(|callable| self.function_matches_callable(vm, namespace, function, callable));
         match matches {
             Ok(true) => {
                 let value = self.machines[vm as usize].alloc(Object::NativeCodeHandle {
@@ -2445,7 +2488,7 @@ impl World {
         &mut self,
         vm: VmId,
         function_class: u32,
-    ) -> Result<(ClosedTypeId, ClosedTypeId), FaultCode> {
+    ) -> Result<ClosedTypeId, FaultCode> {
         let result_class = self.core_of(vm).result.ok_or(FaultCode::MalformedState)?;
         let (reply, env) = self.reply_type(vm)?;
         let code = self.code_of(vm).clone();
@@ -2460,8 +2503,10 @@ impl World {
             _ => return Err(FaultCode::MalformedState),
         };
         match self.envs.ty(function).cloned() {
-            Some(ClosedType::Inst(class, args)) if class == function_class && args.len() == 2 => {
-                Ok((args[0], args[1]))
+            Some(ClosedType::Inst(class, args)) if class == function_class && args.len() == 1 => {
+                matches!(self.envs.ty(args[0]), Some(ClosedType::Fn(..)))
+                    .then_some(args[0])
+                    .ok_or(FaultCode::MalformedState)
             }
             _ => Err(FaultCode::MalformedState),
         }
@@ -2496,13 +2541,12 @@ impl World {
         }
     }
 
-    fn function_matches_contract(
+    fn function_matches_callable(
         &mut self,
         vm: VmId,
         namespace: lm_link::NamespaceId,
         function: u32,
-        input: ClosedTypeId,
-        output: ClosedTypeId,
+        callable: ClosedTypeId,
     ) -> Result<bool, FaultCode> {
         let target = self.code_for_namespace(namespace).clone();
         let caller = self.code_of(vm).clone();
@@ -2522,18 +2566,16 @@ impl World {
                     .map_err(|_| FaultCode::BoundaryLimit)?,
             );
         }
-        let actual_input = if params.is_empty() {
-            self.envs
-                .intern(ClosedType::Unit)
-                .map_err(|_| FaultCode::BoundaryLimit)?
-        } else {
-            self.envs
-                .intern(ClosedType::Tuple(params))
-                .map_err(|_| FaultCode::BoundaryLimit)?
-        };
-        let actual_output = self
+        let result = self
             .envs
             .close(target.as_ref(), code.ret, lm_value::TypeEnvId::EMPTY)
+            .map_err(|_| FaultCode::BoundaryLimit)?;
+        let row = self
+            .envs
+            .close_row(target.as_ref(), &code.row, lm_value::TypeEnvId::EMPTY);
+        let actual = self
+            .envs
+            .intern(ClosedType::Fn(params, code.param_muts, result, row))
             .map_err(|_| FaultCode::BoundaryLimit)?;
         let target_identity = target.identity()?.clone();
         let caller_identity = caller.identity()?.clone();
@@ -2547,80 +2589,13 @@ impl World {
             types: &self.envs,
             class_hashes: &caller_identity.class_hashes,
         };
-        Ok(closed_types_match(
+        Ok(closed_callable_fits(
             target.bundle(),
             target_space,
-            actual_input,
+            actual,
             caller_space,
-            input,
-        ) && closed_types_match(
-            target.bundle(),
-            target_space,
-            actual_output,
-            caller_space,
-            output,
+            callable,
         ))
-    }
-
-    fn portable_function_matches_contract(
-        &mut self,
-        vm: VmId,
-        module: &lm_bytecode::Module,
-        function: u32,
-        input: ClosedTypeId,
-        output: ClosedTypeId,
-    ) -> Result<bool, FaultCode> {
-        let code = module
-            .funcs
-            .get(function as usize)
-            .ok_or(FaultCode::MalformedState)?;
-        if code.type_params != 0 || code.effect_params != 0 || !code.captures.is_empty() {
-            return Ok(false);
-        }
-        let target = self.code_of(vm).clone();
-        let bundle = target.bundle().clone();
-        let mut source_types = lm_bytecode::closed::TypeEnvs::new_with_bundle(
-            lm_bytecode::closed::DEFAULT_MAX_CLOSED_TYPES,
-            lm_bytecode::closed::DEFAULT_MAX_TYPE_ENVS,
-            bundle.clone(),
-        );
-        let mut parameters = Vec::with_capacity(code.params.len());
-        for parameter in &code.params {
-            parameters.push(
-                source_types
-                    .close(module, *parameter, TypeEnvId::EMPTY)
-                    .map_err(|_| FaultCode::BoundaryLimit)?,
-            );
-        }
-        let source_input = if parameters.is_empty() {
-            source_types
-                .intern(ClosedType::Unit)
-                .map_err(|_| FaultCode::BoundaryLimit)?
-        } else {
-            source_types
-                .intern(ClosedType::Tuple(parameters))
-                .map_err(|_| FaultCode::BoundaryLimit)?
-        };
-        let source_output = source_types
-            .close(module, code.ret, TypeEnvId::EMPTY)
-            .map_err(|_| FaultCode::BoundaryLimit)?;
-        let source_identity = lm_bytecode::identity::module_identity_with_bundle(module, &bundle)
-            .map_err(|_| FaultCode::MalformedState)?;
-        let target_identity = target.identity()?.clone();
-        let source_space = ClosedTypeSpace {
-            module,
-            types: &source_types,
-            class_hashes: &source_identity.class_hashes,
-        };
-        let target_space = ClosedTypeSpace {
-            module: target.as_ref(),
-            types: &self.envs,
-            class_hashes: &target_identity.class_hashes,
-        };
-        Ok(
-            closed_types_match(&bundle, source_space, source_input, target_space, input)
-                && closed_types_match(&bundle, source_space, source_output, target_space, output),
-        )
     }
 
     fn portable_function_matches_callable(
@@ -2677,7 +2652,7 @@ impl World {
             types: &self.envs,
             class_hashes: &target_identity.class_hashes,
         };
-        Ok(closed_types_match(
+        Ok(closed_callable_fits(
             &bundle,
             source_space,
             source_callable,

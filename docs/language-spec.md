@@ -544,7 +544,7 @@ The type universe has four strata.
 | `DefinitionSource` | Optional syntax and verified identity data for portable code |
 | `SourceRange` | Half-open byte range in one source text |
 | `CodeLocation` | Function identity, bytecode offset, and optional source location |
-| `FunctionDef[A,T]` | Installed function definition |
+| `FunctionDef[F]` | Installed function definition with complete callable type `F` |
 | `ClassDef` | Installed class definition |
 | `SlotChange` | Opaque checked update for one live slot |
 
@@ -2035,9 +2035,9 @@ Activation creates the initial frame but executes no guest instruction.
 
 The VM remains available after activation. It can create later runs with different terminal types.
 
-Installed entries use the same activation rule. A typed caller uses `Instance.entry[A,R]()` with compile-time argument and result types.
+Installed entries use the same activation rule. A typed caller uses `Instance.entry[F]()` with one complete callable type.
 
-`Instance.dynamic_entry()` requests `FunctionDef[(),DynValue]` without a source-level type witness.
+`Instance.dynamic_entry()` requests the pure `FunctionDef[() -> DynValue]` view without a result type witness.
 
 ### 14.3 States
 
@@ -3108,7 +3108,7 @@ Installation links code when necessary and creates an `Instance`:
 ```lm
 case image.install(verified, LinkEnv(providers))
 in Ok(instance)
-  entry = instance.entry[(String,), ()]()
+  entry = instance.entry[(String) -> ()]()
   greeter = instance.class_def("Greeter")
   (entry.is_ok(), greeter.is_ok())
 in Err(_)
@@ -3210,11 +3210,15 @@ Capturing closures cannot become portable code values.
 
 `VerifiedModule.class_code(name)` returns portable code for a named class.
 
-`Instance.entry[A,T]()` and `Instance.function[A,T](name)` return typed `FunctionDef[A,T]` results.
+`Instance.entry[F]()` and `Instance.function[F](name)` return typed `FunctionDef[F]` results.
 
-`Instance.entry_binding[A,T]()` and `Instance.function_binding[A,T](name)` return typed `FunctionBinding[A,T]` results.
+`Instance.entry_binding[F]()` and `Instance.function_binding[F](name)` return typed `FunctionBinding[F]` results.
 
-`Instance.dynamic_entry()` requests the declared `DynValue` entry form.
+`F` retains the complete callable type. It includes parameter modes, the result type, and the allowed effect row.
+
+A function with fewer effects can satisfy a requested type with a broader effect row.
+
+`Instance.dynamic_entry()` requests a pure entry with a `DynValue` result.
 
 `Instance.class_def(name)` returns one opaque `ClassDef` result.
 
@@ -4190,7 +4194,11 @@ Network handles follow the resource rules in sections 16.4 and 25.5.
 
 ### 23.7 VM operations
 
-Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, `T` is the machine's terminal result, `R` is one pending operation's reply type, and `Fn[A,T,e]` is manifest metanotation for a callable with argument tuple `A`, result `T`, and row `e`.
+Generic signatures below are manifest-level schemas instantiated by the compiler. `A` is an argument-tuple type, and `T` is a terminal result.
+
+`R` is one pending operation's reply type. `Fn[A,T,e]` denotes a callable with arguments `A`, result `T`, and row `e`.
+
+`Args[F]` and `Return[F]` denote the argument tuple and result of the complete callable type `F`.
 
 ```text
 Vm.New                         () -> Vm
@@ -4239,19 +4247,19 @@ Vm.Link                        (VerifiedModule)
                                 -> Result[ModuleCode, CodeError]
 Vm.Install[X]                  (Vm, X)
                                 -> Result[Installed[X], CodeError]
-Vm.InstanceEntry[A,T]          (Instance)
-                                -> Result[FunctionDef[A,T], CodeError]
-Vm.InstanceFunction[A,T]       (Instance, String)
-                                -> Result[FunctionDef[A,T], CodeError]
+Vm.InstanceEntry[F]            (Instance)
+                                -> Result[FunctionDef[F], CodeError]
+Vm.InstanceFunction[F]         (Instance, String)
+                                -> Result[FunctionDef[F], CodeError]
 Vm.InstanceSlotFor             (Instance, SlotSpec)
                                 -> Result[Slot, CodeError]
 Vm.InstanceSlotSpec            (Instance, String)
                                 -> Result[SlotSpec, CodeError]
-Vm.ActivateDef[A,T]            (Vm, FunctionDef[A,T] | FunctionBinding[A,T],
-                                control A)
-                                -> Result[Run[T], CodeError]
-Vm.ReplaceFunction[A,T]        (Vm, Slot | FunctionBinding[A,T],
-                                FunctionDef[A,T] | FunctionBinding[A,T])
+Vm.ActivateDef[F]              (Vm, FunctionDef[F] | FunctionBinding[F],
+                                control Args[F])
+                                -> Result[Run[Return[F]], CodeError]
+Vm.ReplaceFunction[F]          (Vm, Slot | FunctionBinding[F],
+                                FunctionDef[F] | FunctionBinding[F])
                                 -> Result[(), CodeError]
 Vm.InstallWith[X]              (Vm, X, LinkEnv)
                                 -> Result[Installed[X], CodeError]
@@ -4263,8 +4271,8 @@ Vm.ReplaceClass                (Vm, Slot | ClassBinding,
 Vm.ReplaceValue[T]             (Vm, Slot, T) -> Result[(), CodeError]
 Vm.ReplaceProcess[M,R]         (Vm, Slot, Handle[M,R])
                                 -> Result[(), CodeError]
-Vm.ChangeFunction[A,T]         (Vm, Slot | FunctionBinding[A,T],
-                                FunctionDef[A,T] | FunctionBinding[A,T])
+Vm.ChangeFunction[F]           (Vm, Slot | FunctionBinding[F],
+                                FunctionDef[F] | FunctionBinding[F])
                                 -> Result[SlotChange, CodeError]
 Vm.ChangeClass                 (Vm, Slot | ClassBinding,
                                 ClassDef | ClassBinding)
@@ -4288,10 +4296,10 @@ Vm.ModuleFunctionCode[F]       (VerifiedModule, String)
                                 -> Result[FunctionCode[F], CodeError]
 Vm.ModuleClassCode             (VerifiedModule, String)
                                 -> Result[ClassCode, CodeError]
-Vm.InstanceEntryBinding[A,T]   (Instance)
-                                -> Result[FunctionBinding[A,T], CodeError]
-Vm.InstanceFunctionBinding[A,T](Instance, String)
-                                -> Result[FunctionBinding[A,T], CodeError]
+Vm.InstanceEntryBinding[F]     (Instance)
+                                -> Result[FunctionBinding[F], CodeError]
+Vm.InstanceFunctionBinding[F]  (Instance, String)
+                                -> Result[FunctionBinding[F], CodeError]
 Vm.InstanceClassBinding        (Instance, String)
                                 -> Result[ClassBinding, CodeError]
 Vm.BindingSlot                 (FunctionBinding | ClassBinding)
@@ -4300,8 +4308,8 @@ Vm.BindingSpec                 (FunctionBinding | ClassBinding)
                                 -> Result[SlotSpec, CodeError]
 Vm.BindingInstance             (FunctionBinding | ClassBinding)
                                 -> Result[Instance, CodeError]
-Vm.BindingFunctionTarget[A,T]  (FunctionBinding[A,T])
-                                -> Result[FunctionDef[A,T], CodeError]
+Vm.BindingFunctionTarget[F]    (FunctionBinding[F])
+                                -> Result[FunctionDef[F], CodeError]
 Vm.BindingClassTarget          (ClassBinding)
                                 -> Result[ClassDef, CodeError]
 ```
@@ -4310,11 +4318,11 @@ This table is the complete public `Vm` operation set for version 0.2.
 
 `Installed[VerifiedModule]` is `Instance`.
 
-For `F = (A) -> T with e`, `Installed[FunctionCode[F]]` is `FunctionBinding[A,T]`.
+`Installed[FunctionCode[F]]` is `FunctionBinding[F]`.
 
 `Installed[ClassCode]` is `ClassBinding`.
 
-`Installed[Fn[A,T,e]]` is `FunctionBinding[A,T]` for a supported named function.
+`Installed[Fn[A,T,e]]` is `FunctionBinding[Fn[A,T,e]]` for a supported named function.
 
 The function convenience form uses the corresponding `FunctionCode` result.
 
