@@ -68,12 +68,24 @@ pub(super) fn emit_numeric_instruction(
                 operation,
                 NumericInstr::IntRotateLeft32 | NumericInstr::IntRotateRight32
             );
-            let invalid = builder.ins().icmp_imm(
-                IntCC::UnsignedGreaterThan,
-                amount,
-                if is_32_bit { 31 } else { 63 },
+            let is_rotation = matches!(
+                operation,
+                NumericInstr::IntRotateLeft
+                    | NumericInstr::IntRotateRight
+                    | NumericInstr::IntRotateLeft32
+                    | NumericInstr::IntRotateRight32
             );
-            emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+            let amount = if is_rotation {
+                builder
+                    .ins()
+                    .band_imm(amount, if is_32_bit { 31 } else { 63 })
+            } else {
+                let invalid = builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThan, amount, 63);
+                emit_interpreter_replay(builder, values, invalid, exit.point, exit.deopt_stack)?;
+                amount
+            };
             let value = if is_32_bit {
                 let value = builder.ins().ireduce(types::I32, value);
                 let amount = builder.ins().ireduce(types::I32, amount);

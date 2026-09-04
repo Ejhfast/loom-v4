@@ -16,7 +16,7 @@ use std::fmt;
 pub enum FaultCode {
     IntegerOverflow,
     DivideByZero,
-    /// A bit shift or rotation used an amount outside 0 through 63.
+    /// A bit shift used an amount outside 0 through 63.
     ShiftOutOfRange,
     OutOfFuel,
     StackLimit,

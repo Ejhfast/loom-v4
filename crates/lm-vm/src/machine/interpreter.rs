@@ -1002,16 +1002,16 @@ impl Machine {
                     NumericInstr::IntWrappingSub => left.wrapping_sub(right),
                     NumericInstr::IntWrappingMul => left.wrapping_mul(right),
                     NumericInstr::IntRotateLeft => {
-                        (left as u64).rotate_left(shift_amount(right)?) as i64
+                        (left as u64).rotate_left(rotation_amount(right, 63)) as i64
                     }
                     NumericInstr::IntRotateRight => {
-                        (left as u64).rotate_right(shift_amount(right)?) as i64
+                        (left as u64).rotate_right(rotation_amount(right, 63)) as i64
                     }
                     NumericInstr::IntRotateLeft32 => {
-                        (left as u32).rotate_left(rotation_amount_32(right)?) as i64
+                        (left as u32).rotate_left(rotation_amount(right, 31)) as i64
                     }
                     NumericInstr::IntRotateRight32 => {
-                        (left as u32).rotate_right(rotation_amount_32(right)?) as i64
+                        (left as u32).rotate_right(rotation_amount(right, 31)) as i64
                     }
                     _ => unreachable!(),
                 };

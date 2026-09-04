@@ -77,6 +77,25 @@ fn byte_word_faults_match_the_interpreter() {
 }
 
 #[test]
+fn checked_byte_word_reads_stay_native() {
+    let source = concat!(
+        "bytes = b\"loom!\"\n",
+        "i = 0\ntotal = 0\nmissing = false\n",
+        "while i < 1000\n",
+        "  total = total ^ bytes.get_u32_be(i & 1).value_or(0)\n",
+        "  missing = missing or bytes.get_u32_le(-1).is_none()\n",
+        "  i = i + 1\n",
+        "end\n(total, missing)\n",
+    );
+    let (interpreted, _, interpreted_dump) = run(source, EngineMode::Interpreter, u64::MAX);
+    let (native, metrics, native_dump) = run(source, EngineMode::Native, u64::MAX);
+    assert_eq!(native, interpreted);
+    assert_eq!(native_dump, interpreted_dump);
+    assert!(metrics.native_retired_instructions > 10_000, "{metrics:?}");
+    assert_eq!(metrics.compiled_interpreter_sites, 0, "{metrics:?}");
+}
+
+#[test]
 fn text_metadata_and_hash_mix_stay_native() {
     let source = concat!(
         "def measure_string(value: String): Int\n",

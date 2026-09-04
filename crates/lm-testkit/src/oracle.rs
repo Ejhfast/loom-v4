@@ -1343,7 +1343,7 @@ impl<'m> Oracle<'m> {
             }
             lm_abi::INTRINSIC_INT_ROTATE_LEFT | lm_abi::INTRINSIC_INT_ROTATE_RIGHT => {
                 let value = self.as_int(&values[0])? as u64;
-                let amount = oracle_shift(self.as_int(&values[1])?)?;
+                let amount = oracle_rotation(self.as_int(&values[1])?, 63);
                 let result = if intrinsic == lm_abi::INTRINSIC_INT_ROTATE_LEFT {
                     value.rotate_left(amount)
                 } else {
@@ -1353,7 +1353,7 @@ impl<'m> Oracle<'m> {
             }
             lm_abi::INTRINSIC_INT_ROTATE_LEFT_32 | lm_abi::INTRINSIC_INT_ROTATE_RIGHT_32 => {
                 let value = self.as_int(&values[0])? as u32;
-                let amount = oracle_rotation_32(self.as_int(&values[1])?)?;
+                let amount = oracle_rotation(self.as_int(&values[1])?, 31);
                 let result = if intrinsic == lm_abi::INTRINSIC_INT_ROTATE_LEFT_32 {
                     value.rotate_left(amount)
                 } else {
@@ -2998,12 +2998,8 @@ fn oracle_shift(value: i64) -> Result<u32, Stop> {
     Ok(value)
 }
 
-fn oracle_rotation_32(value: i64) -> Result<u32, Stop> {
-    let value = u32::try_from(value).map_err(|_| Stop::Fault("ShiftOutOfRange"))?;
-    if value > 31 {
-        return Err(Stop::Fault("ShiftOutOfRange"));
-    }
-    Ok(value)
+fn oracle_rotation(value: i64, mask: u32) -> u32 {
+    (value as u64 & u64::from(mask)) as u32
 }
 
 /// Render a string value with quotation marks and escapes, matching

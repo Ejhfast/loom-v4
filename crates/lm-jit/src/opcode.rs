@@ -295,11 +295,11 @@ fn numeric_treatment(operation: NumericInstr) -> InstructionTreatment {
         NumericInstr::IntShl
         | NumericInstr::IntShr
         | NumericInstr::IntUshr
-        | NumericInstr::IntRotateLeft
+        | NumericInstr::FloatToIntValue => dedicated(Inline).with_replay(),
+        NumericInstr::IntRotateLeft
         | NumericInstr::IntRotateRight
         | NumericInstr::IntRotateLeft32
-        | NumericInstr::IntRotateRight32
-        | NumericInstr::FloatToIntValue => dedicated(Inline).with_replay(),
+        | NumericInstr::IntRotateRight32 => dedicated(Inline),
         NumericInstr::SbAppendFloat => dedicated(Helper)
             .with_replay()
             .with_replay_barrier()

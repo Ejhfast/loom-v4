@@ -654,7 +654,7 @@ impl AbiType {
 
 /// The intrinsic ABI version.
 /// It covers intrinsic names, signatures, identities, and semantics.
-pub const INTRINSIC_ABI_VERSION: u32 = 31;
+pub const INTRINSIC_ABI_VERSION: u32 = 32;
 
 /// A dense intrinsic slot.
 pub type IntrinsicSlot = u32;
@@ -1872,13 +1872,13 @@ pub static INTRINSICS: [IntrinsicDef; 246] = [
         name: "int.rotate_left",
         params: &[AbiType::INT, AbiType::INT],
         reply: AbiType::INT,
-        semantic_revision: 1,
+        semantic_revision: 2,
     },
     IntrinsicDef {
         name: "int.rotate_right",
         params: &[AbiType::INT, AbiType::INT],
         reply: AbiType::INT,
-        semantic_revision: 1,
+        semantic_revision: 2,
     },
     IntrinsicDef {
         name: "int.to_float",
@@ -2435,13 +2435,13 @@ pub static INTRINSICS: [IntrinsicDef; 246] = [
         name: "int.rotate_left_32",
         params: &[AbiType::INT, AbiType::INT],
         reply: AbiType::INT,
-        semantic_revision: 1,
+        semantic_revision: 2,
     },
     IntrinsicDef {
         name: "int.rotate_right_32",
         params: &[AbiType::INT, AbiType::INT],
         reply: AbiType::INT,
-        semantic_revision: 1,
+        semantic_revision: 2,
     },
 ];
 

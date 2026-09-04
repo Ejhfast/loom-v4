@@ -1215,15 +1215,15 @@ An invalid shift amount faults with `ShiftOutOfRange`.
 
 `Int.rotate_left` and `rotate_right` rotate all 64 payload bits.
 
-An invalid 64-bit rotation amount faults with `ShiftOutOfRange`.
+Rotation amounts use Euclidean reduction modulo 64.
+
+Thus, `rotate_left(-1)` equals `rotate_right(1)`.
 
 `Int.rotate_left_32` and `rotate_right_32` rotate the low 32 bits.
 
 They return the zero-extended result as a nonnegative `Int`.
 
-Their rotation amounts must be from 0 through 31.
-
-An invalid 32-bit rotation amount faults with `ShiftOutOfRange`.
+Their rotation amounts use Euclidean reduction modulo 32.
 
 `Int.count_ones` counts set bits in the 64-bit two's-complement value.
 
@@ -1815,16 +1815,19 @@ end
 
 File-not-found, end-of-input, parse failure, connection refusal, mailbox closure, snapshot blockers, and restore binding failures belong in ordinary result types.
 
-A library or user method must be total. It must give an answer for every input of its declared parameter types, and it must not fault. Two forms satisfy the rule: the method defines a meaning for the whole input range, or it reports the failure through `Option` or `Result`.
+An ordinary method can fault when its caller violates a documented precondition. The fault identifies a programming error.
 
-The test is the source of the argument. Any argument can come from a file, a socket, or a configuration value, so an argument range is untrusted input. A separator, a radix, a pattern, and a length all reach a method from data in ordinary programs.
+Expected failures from valid input use `Option` or `Result`.
 
-Two exceptions stand:
+A method defines a result for every input when a useful result exists.
 
-- An index method may fault when the same class publishes a total sibling. `at` faults and `get` answers `Option`, so a caller chooses the form it needs. Section 24.4 states the pair.
-- A machine-integrity failure faults, because no value can describe it. Section 12.2 lists those.
+A strict method has a total sibling when callers commonly test its precondition. For example, `at` faults and `get` returns `Option`.
 
-Prefer a defined meaning over a reported failure when one exists, because a reported failure costs the caller a `case` at every call. `split` with an empty separator matches at every scalar boundary, so it needs no result type.
+External input does not satisfy a precondition by itself. A program validates such input through a total API before a strict call.
+
+Machine resource limits and integrity failures fault. Section 12.2 defines these failures.
+
+Prefer a defined result when one exists. For example, `split` with an empty separator matches at every scalar boundary.
 
 ### 12.2 Machine faults
 
@@ -1887,7 +1890,7 @@ A delayed host failure retains the source coordinate of its suspended `perform` 
 | `MissingCode` | required code hash unavailable |
 | `DeadProc` | operation required a live proc |
 | `IndexOutOfBounds` | invalid sequence index |
-| `ShiftOutOfRange` | shift or rotation amount outside 0 through 63 |
+| `ShiftOutOfRange` | bit-shift amount outside 0 through 63 |
 | `LengthMismatch` | fixed-length operands have different lengths |
 | `InvalidPrecision` | formatting precision is negative |
 | `MissingKey` | faulting map lookup missed |
@@ -4263,6 +4266,14 @@ The diagnostic source name affects only diagnostics and debug records.
 
 Syntax values preserve source text, token structure, trivia, and diagnostics. Construction and detachment produce immutable syntax values.
 
+`SourceRange(start, stop)` requires ordered offsets. Their difference must fit in `Int`.
+
+Backing syntax constructors require records from the reflection codec or `SyntaxBuilder`.
+
+The raw `SyntaxBuilder.token`, `trivia`, and `node` methods require supported grammar kind numbers.
+
+Named builder methods supply supported kind numbers. Programs use them unless they process grammar metadata directly.
+
 All host-operation argument/reply types are frozen ABI definitions. Operations may add ordinary error arms compatibly only through an ABI version change reflected in identity hashes.
 
 ---
@@ -4483,6 +4494,16 @@ freeze(self) -> List[T]
 
 Faulting index methods use `IndexOutOfBounds`; allocation failure obeys heap limits. Higher-order methods call the closure in list order and stop immediately on fault.
 
+`list_with_capacity`, `list_repeated`, and `reserve` require nonnegative counts.
+
+`set`, `remove`, and `swap_remove` require a valid existing position. `swap` requires two valid existing positions.
+
+`insert` accepts positions from zero through the current length.
+
+`slice`, `slice_view`, and `reverse_range` require a valid half-open range.
+
+`truncate` requires a nonnegative length. A length above the current length has no effect.
+
 `swap` exchanges two valid positions. Equal positions do not change the list.
 
 `reverse_range` reverses one valid half-open range. `reverse` applies it to the complete list.
@@ -4509,6 +4530,8 @@ The defaults include mapping, filtering, folding, queries, indexed operations, s
 
 They also include `zip`, `flat_map`, and `unique`.
 
+`take` and `drop` require a nonnegative count. `chunks` requires a positive size.
+
 `zip` stops when either input ends. `flat_map` concatenates each mapped iterable.
 
 `unique` preserves the first occurrence of each value. Its item type must implement `Hashable`.
@@ -4531,6 +4554,7 @@ put(mut self, key: K, value: V) -> Option[V]
 get_or_insert_with[e](mut self, key: K, f: () -> V with e) -> V with e
 remove(mut self, key: K) -> Option[V]
 clear(mut self) -> ()
+reserve(mut self, additional: Int) -> ()
 copy(self) -> Map[K,V]
 keys(self) -> MapKeys[K,V]
 values(self) -> MapValues[K,V]
@@ -4559,6 +4583,8 @@ For a text key type, `has`, `get`, `at`, and indexing accept Text.
 `Map[String,V].put` accepts Text. It creates one bounded String only for a missing key.
 
 Other map insertions require K.
+
+`map_with_capacity` and map or set `reserve` require nonnegative counts.
 
 Core defines `Set[T: Hashable]` as an ordinary final class over `Map[T,()]`.
 
@@ -4750,6 +4776,8 @@ at(index: Int) -> Int
 get(index: Int) -> Option[Int]
 read_u32_be(offset: Int) -> Int
 read_u32_le(offset: Int) -> Int
+get_u32_be(offset: Int) -> Option[Int]
+get_u32_le(offset: Int) -> Option[Int]
 slice(start: Int, length: Int) -> Result[Bytes,IndexError]
 compact() -> Bytes
 concat(other: Bytes) -> Bytes
@@ -4778,7 +4806,9 @@ __ge__(other: Bytes) -> Bool
 
 The word-read methods return an unsigned 32-bit value as a nonnegative `Int`.
 
-They fault with `IndexOutOfBounds` unless four bytes start at the offset.
+The strict `read_u32` methods require four bytes at the offset. They fault with `IndexOutOfBounds` when the range is invalid.
+
+The `get_u32` methods return `None` when four bytes do not start at the offset.
 
 `slice` returns `Err(IndexError.OutOfBounds)` for an invalid range. A successful slice shares immutable storage.
 
@@ -4794,9 +4824,11 @@ It returns `HexError.OddLength` or `HexError.InvalidDigit(index)` for invalid te
 
 `utf8_view` reports invalid encoding through its result. It returns a shared Substring without a content copy.
 
-`text` is a compatibility conversion that faults with `BadCast`. It returns a bounded String after successful validation.
+`text` requires valid UTF-8 and faults with `BadCast` otherwise. `utf8` is its total sibling.
 
-`text_range` validates one byte range and its UTF-8 encoding.
+Both methods return a bounded String after successful validation.
+
+`text_range` requires a valid byte range with valid UTF-8.
 
 It faults with `IndexOutOfBounds` for an invalid range.
 
@@ -4806,7 +4838,9 @@ It creates one bounded String without an intermediate Bytes object.
 
 `intern_text_range` implements the byte-range entry in the closed `BorrowedKey` relation.
 
-It probes an owned String pool with one validated UTF-8 byte range.
+It requires a valid byte range with valid UTF-8.
+
+It probes an owned String pool with that byte range.
 
 A hit returns the stored String without a guest allocation.
 
@@ -4865,6 +4899,10 @@ Any operation on a finished builder faults with `InvalidVmState`.
 `ByteBuffer.set` requires a valid index and a byte from 0 through 255.
 
 An invalid index faults with `IndexOutOfBounds`. An invalid byte faults with `IntegerOverflow`.
+
+`ByteBuffer.append` also requires a byte from 0 through 255.
+
+`ByteBuffer.reserve` requires a nonnegative additional count.
 
 `ByteBuffer.truncate` rejects a negative length. A length above the current length has no effect.
 
@@ -5041,11 +5079,15 @@ It rounds the binary64 value to the nearest decimal result. A tie selects an eve
 
 NaN and infinities use their `Display` text without decimal places.
 
-A negative `digits` value faults with `InvalidPrecision`.
+A caller must pass nonnegative `digits`. A negative value faults with `InvalidPrecision`.
 
 `Int` and `Float` provide the numeric methods in section 6.4.
 
-`Range(start, stop, step)` rejects zero step. `Range.each`, `to_list`, `contains`, and `len` use checked arithmetic. A `for` expression traverses a range directly.
+`Range(start, stop)` defines the half-open integer range from `start` through `stop`.
+
+Its `len` uses checked arithmetic. The range span must fit in `Int`.
+
+A `for` expression traverses a range directly.
 
 ### 24.8 Value utilities
 
@@ -5252,6 +5294,10 @@ CRC-32 returns its unsigned 32-bit value as a nonnegative `Int`.
 `std.uuid` defines immutable RFC 9562 UUID values.
 
 `parse` accepts the canonical 8-4-4-4-12 hexadecimal form. Display emits lowercase canonical text.
+
+`from_bytes` accepts exactly 16 bytes. It reports another length with `UuidError.InvalidByteLength`.
+
+The direct `Uuid(bytes)` constructor requires exactly 16 bytes. Use `from_bytes` for data that needs validation.
 
 UUID equality, hashing, and ordering use all 16 bytes.
 

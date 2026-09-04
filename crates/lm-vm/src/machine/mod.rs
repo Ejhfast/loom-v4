@@ -946,12 +946,8 @@ fn shift_amount(value: i64) -> Result<u32, FaultCode> {
     Ok(amount)
 }
 
-fn rotation_amount_32(value: i64) -> Result<u32, FaultCode> {
-    let amount = u32::try_from(value).map_err(|_| FaultCode::ShiftOutOfRange)?;
-    if amount > 31 {
-        return Err(FaultCode::ShiftOutOfRange);
-    }
-    Ok(amount)
+fn rotation_amount(value: i64, mask: u32) -> u32 {
+    (value as u64 & u64::from(mask)) as u32
 }
 
 fn float_eq(left: u64, right: u64) -> bool {

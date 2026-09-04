@@ -129,6 +129,24 @@ bytes = b"\x01\x23\x45\x67\x89"
 }
 
 #[test]
+fn bytes_get_unsigned_words_reports_invalid_ranges() {
+    let source = r#"
+bytes = b"\x01\x23\x45\x67\x89"
+(
+  bytes.get_u32_be(0),
+  bytes.get_u32_le(1),
+  bytes.get_u32_be(-1),
+  bytes.get_u32_le(2),
+  b"abc".get_u32_be(0)
+)
+"#;
+    assert_eq!(
+        run_text("bytes_get_words.lm", source, VmConfig::default()).unwrap(),
+        "Done((Some(19088743), Some(2305246499), None, None, None))"
+    );
+}
+
+#[test]
 fn bytes_word_reads_check_the_complete_range() {
     for (name, source) in [
         ("bytes_word_negative.lm", "b\"abcd\".read_u32_be(-1)\n"),

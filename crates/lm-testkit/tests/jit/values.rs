@@ -106,12 +106,7 @@ fn numeric_utility_operations_stay_native() {
 
 #[test]
 fn invalid_shift_amounts_replay_one_instruction() {
-    for source in [
-        "1 << 64\n",
-        "1 >> -1\n",
-        "1.rotate_left(64)\n",
-        "1.rotate_right_32(32)\n",
-    ] {
+    for source in ["1 << 64\n", "1 >> -1\n"] {
         let artifact = lm_testkit::compile_text("jit-shift-fault.lm", source)
             .expect("the shift case compiles");
         for fuel in 0..=4 {
@@ -124,6 +119,29 @@ fn invalid_shift_amounts_replay_one_instruction() {
         let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
         assert_eq!(native, Outcome::Fault(lm_vm::FaultCode::ShiftOutOfRange));
         assert_eq!(metrics.native_interpreter_exits, 1, "{metrics:?}");
+    }
+}
+
+#[test]
+fn rotation_amounts_wrap_without_replay() {
+    for (source, expected) in [
+        ("1.rotate_left(64)\n", 1),
+        ("1.rotate_right(-1)\n", 2),
+        ("1.rotate_left_32(-1)\n", 2_147_483_648),
+        ("1.rotate_right_32(32)\n", 1),
+    ] {
+        let artifact = lm_testkit::compile_text("jit-rotation-wrap.lm", source)
+            .expect("the rotation case compiles");
+        for fuel in 0..=4 {
+            let (interpreted, _, interpreted_dump) =
+                run_artifact(&artifact, EngineMode::Interpreter, fuel);
+            let (native, _, native_dump) = run_artifact(&artifact, EngineMode::Native, fuel);
+            assert_eq!(native, interpreted, "fuel {fuel}");
+            assert_eq!(native_dump, interpreted_dump, "fuel {fuel}");
+        }
+        let (native, metrics, _) = run_artifact(&artifact, EngineMode::Native, u64::MAX);
+        assert_eq!(native, Outcome::Done(lm_value::Value::Int(expected)));
+        assert_eq!(metrics.native_interpreter_exits, 0, "{metrics:?}");
     }
 }
 

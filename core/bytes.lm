@@ -41,8 +41,24 @@ final class Bytes implements Hashable, Comparable, Add
     intrinsic("bytes.read_u32_be", self, offset)
   end
 
+  def get_u32_be(self, offset: Int): Option[Int]
+    if offset < 0 or offset > self.len() - 4
+      None
+    else
+      Some(self.read_u32_be(offset))
+    end
+  end
+
   def read_u32_le(self, offset: Int): Int
     intrinsic("bytes.read_u32_le", self, offset)
+  end
+
+  def get_u32_le(self, offset: Int): Option[Int]
+    if offset < 0 or offset > self.len() - 4
+      None
+    else
+      Some(self.read_u32_le(offset))
+    end
   end
 
   def slice(self, start: Int, length: Int): Result[Bytes, IndexError]

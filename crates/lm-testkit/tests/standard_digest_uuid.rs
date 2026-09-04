@@ -157,6 +157,7 @@ fn uuid_text_and_versions_follow_rfc_9562() {
     let source = r#"
 use std.time.Timestamp
 use std.uuid.UuidError
+use std.uuid.from_bytes
 use std.uuid.nil
 use std.uuid.parse
 use std.uuid.v4_from
@@ -167,6 +168,11 @@ in Err(UuidError.InvalidSyntax) then true
 in _ then false
 end
 parsed = parse("550E8400-E29B-41D4-A716-446655440000").expect("the UUID is valid")
+raw = from_bytes(b"\x55\x0e\x84\x00\xe2\x9b\x41\xd4\xa7\x16\x44\x66\x55\x44\x00\x00").expect("the UUID bytes are valid")
+invalid_bytes = case from_bytes(b"short")
+in Err(UuidError.InvalidByteLength) then true
+in _ then false
+end
 four = v4_from(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").expect("the random input fits")
 seven = v7_from(Timestamp(0), b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").expect("the UUID inputs fit")
 (
@@ -174,6 +180,8 @@ seven = v7_from(Timestamp(0), b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").expec
   parsed.version(),
   display(parsed.variant()),
   invalid,
+  display(raw),
+  invalid_bytes,
   display(four),
   four.version(),
   display(seven),
@@ -186,7 +194,8 @@ seven = v7_from(Timestamp(0), b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").expec
         run(source, &[]),
         concat!(
             "Done((\"550e8400-e29b-41d4-a716-446655440000\", 4, ",
-            "\"RFC 4122\", true, \"00000000-0000-4000-8000-000000000000\", 4, ",
+            "\"RFC 4122\", true, \"550e8400-e29b-41d4-a716-446655440000\", true, ",
+            "\"00000000-0000-4000-8000-000000000000\", 4, ",
             "\"00000000-0000-7000-8000-000000000000\", 7, true))"
         )
     );
