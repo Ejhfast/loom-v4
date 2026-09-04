@@ -58,7 +58,7 @@ pub const fn unpack_interface_call_site(site: u32) -> (u32, u32) {
 
 /// The number of stable core role slots. The order is
 /// `corepin::PINNED_LABELS`.
-pub const CORE_ROLE_COUNT: usize = 258;
+pub const CORE_ROLE_COUNT: usize = 261;
 
 /// Join a module path and a declaration name into one qualified key.
 ///
@@ -895,6 +895,18 @@ pub enum ExtendedInstr {
     FunctionCode { func: u32 },
     /// Push one portable view of a named class definition.
     ClassCode { class: u32 },
+    /// Describe one exact source module surface.
+    ModuleCode { module: u32 },
+    /// Pop a module descriptor and push its source declarations.
+    ReflectionDeclarations,
+    /// Pop a declaration descriptor and push its effective methods.
+    ReflectionMembers,
+    /// Pop a reflection descriptor and push its source name.
+    ReflectionName,
+    /// Pop a declaration descriptor and push its declaration kind.
+    ReflectionDeclarationKind,
+    /// Pop a member descriptor and push its member kind.
+    ReflectionMemberKind,
     /// Read optional source data from portable definition code.
     CodeSource { ty: u32 },
     /// Read the stable binding data from portable definition code.
@@ -1392,6 +1404,8 @@ pub struct Constant {
 pub struct Export {
     pub kind: ExportKind,
     pub name: String,
+    /// True when this entry describes one top-level source declaration.
+    pub source: bool,
     /// The class index or the function index.
     pub def: u32,
     /// The construction function index of a class export, or
@@ -1400,6 +1414,28 @@ pub struct Export {
     /// The compile-time value of a constant export.
     pub constant: Option<Constant>,
 }
+
+/// One source declaration in a reified module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectionDeclaration {
+    pub kind: ExportKind,
+    pub name: String,
+    /// The function, class, or interface index. A constant uses
+    /// `NO_REFLECTION_DEF`.
+    pub def: u32,
+    /// The callable function. Classes use their constructor.
+    pub callable: u32,
+}
+
+/// One exact module surface available to runtime reflection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflectionModule {
+    pub name: String,
+    pub declarations: Vec<ReflectionDeclaration>,
+}
+
+/// A reflection constant has no runtime definition.
+pub const NO_REFLECTION_DEF: u32 = u32::MAX;
 
 /// One decoded module.
 #[derive(Debug, Clone, PartialEq)]
@@ -1432,6 +1468,8 @@ pub struct Module {
     /// The verifier and the VM then read slots, never a source name
     /// and never a definition hash.
     pub core_roles: [u32; CORE_ROLE_COUNT],
+    /// Exact source module surfaces used by `codeof` expressions.
+    pub reflections: Vec<ReflectionModule>,
     pub classes: Vec<BcClass>,
     pub funcs: Vec<Func>,
     /// Index of the entry function.
@@ -1769,6 +1807,7 @@ pub struct CodeTables {
     pub class_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
     pub func_bounds: CodeTable<Vec<Vec<BcInterfaceUse>>>,
     pub slots: CodeTable<SlotSpec>,
+    pub reflections: CodeTable<ReflectionModule>,
     pub classes: CodeTable<BcClass>,
     pub funcs: CodeTable<Func>,
     pub debug: Vec<u8>,
@@ -1786,6 +1825,7 @@ pub trait CodeTableView {
     fn interfaces(&self) -> CodeTableRef<'_, BcInterface>;
     fn conformances(&self) -> CodeTableRef<'_, BcConformance>;
     fn slots(&self) -> CodeTableRef<'_, SlotSpec>;
+    fn reflections(&self) -> CodeTableRef<'_, ReflectionModule>;
     fn funcs(&self) -> CodeTableRef<'_, Func>;
 
     fn core_role(&self, _index: usize) -> Option<u32> {
@@ -1820,6 +1860,10 @@ impl CodeTableView for Module {
 
     fn slots(&self) -> CodeTableRef<'_, SlotSpec> {
         CodeTableRef::Slice(&self.slots)
+    }
+
+    fn reflections(&self) -> CodeTableRef<'_, ReflectionModule> {
+        CodeTableRef::Slice(&self.reflections)
     }
 
     fn funcs(&self) -> CodeTableRef<'_, Func> {
@@ -1863,6 +1907,10 @@ impl CodeTableView for CodeTables {
         CodeTableRef::Chunks(&self.slots)
     }
 
+    fn reflections(&self) -> CodeTableRef<'_, ReflectionModule> {
+        CodeTableRef::Chunks(&self.reflections)
+    }
+
     fn funcs(&self) -> CodeTableRef<'_, Func> {
         CodeTableRef::Chunks(&self.funcs)
     }
@@ -1895,6 +1943,10 @@ impl<T: CodeTableView + ?Sized> CodeTableView for std::sync::Arc<T> {
 
     fn slots(&self) -> CodeTableRef<'_, SlotSpec> {
         (**self).slots()
+    }
+
+    fn reflections(&self) -> CodeTableRef<'_, ReflectionModule> {
+        (**self).reflections()
     }
 
     fn funcs(&self) -> CodeTableRef<'_, Func> {
@@ -1950,7 +2002,7 @@ const MAGIC: &[u8; 4] = b"LMBC";
 ///
 /// The format uses append-only tags. Existing tags keep their encoded
 /// values when the format gains a new item.
-pub const VERSION: u16 = 71;
+pub const VERSION: u16 = 72;
 
 /// The byte length of the container header: the magic, the version,
 /// the ABI bundle digest, and three section-table entries.
@@ -2208,6 +2260,12 @@ const EXT_BB_CAPACITY: u8 = 22;
 const EXT_BB_TRUNCATE: u8 = 23;
 const EXT_BYTES_READ_U32_BE: u8 = 24;
 const EXT_BYTES_READ_U32_LE: u8 = 25;
+const EXT_MODULE_CODE: u8 = 26;
+const EXT_REFLECTION_DECLARATIONS: u8 = 27;
+const EXT_REFLECTION_MEMBERS: u8 = 28;
+const EXT_REFLECTION_NAME: u8 = 29;
+const EXT_REFLECTION_DECLARATION_KIND: u8 = 30;
+const EXT_REFLECTION_MEMBER_KIND: u8 = 31;
 
 fn native_extension_tag(instr: NativeInstr) -> Option<u8> {
     Some(match instr {
@@ -2495,6 +2553,17 @@ fn encode_semantic(module: &Module) -> Vec<u8> {
             write_u32(&mut out, *func);
         }
     }
+    write_u32(&mut out, module.reflections.len() as u32);
+    for reflection in &module.reflections {
+        write_bytes(&mut out, reflection.name.as_bytes());
+        write_u32(&mut out, reflection.declarations.len() as u32);
+        for declaration in &reflection.declarations {
+            out.push(declaration.kind.tag());
+            write_bytes(&mut out, declaration.name.as_bytes());
+            write_u32(&mut out, declaration.def);
+            write_u32(&mut out, declaration.callable);
+        }
+    }
     write_u32(&mut out, module.funcs.len() as u32);
     for func in &module.funcs {
         write_u32(&mut out, func.type_params);
@@ -2632,6 +2701,7 @@ fn encode_exports(module: &Module) -> Vec<u8> {
     for export in &module.exports {
         out.push(export.kind.tag());
         write_bytes(&mut out, export.name.as_bytes());
+        out.push(u8::from(export.source));
         write_u32(&mut out, export.def);
         write_u32(&mut out, export.ctor);
         match &export.constant {
@@ -3286,6 +3356,31 @@ fn encode_extended(out: &mut Vec<u8>, instr: ExtendedInstr) {
             out.push(OP_CLASS_CODE);
             write_u32(out, class);
         }
+        ExtendedInstr::ModuleCode { module } => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_MODULE_CODE);
+            write_u32(out, module);
+        }
+        ExtendedInstr::ReflectionDeclarations => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_DECLARATIONS);
+        }
+        ExtendedInstr::ReflectionMembers => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_MEMBERS);
+        }
+        ExtendedInstr::ReflectionName => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_NAME);
+        }
+        ExtendedInstr::ReflectionDeclarationKind => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_DECLARATION_KIND);
+        }
+        ExtendedInstr::ReflectionMemberKind => {
+            out.push(OP_EXTENSION);
+            out.push(EXT_REFLECTION_MEMBER_KIND);
+        }
         ExtendedInstr::CodeSource { ty } => {
             out.push(OP_CODE_SOURCE);
             write_u32(out, ty);
@@ -3776,6 +3871,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
     for _ in 0..export_count {
         let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
         let name = cur.string()?;
+        let source = cur.flag()?;
         let def = cur.u32()?;
         let ctor = cur.u32()?;
         let constant = match cur.u8()? {
@@ -3802,6 +3898,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
             exports.push(Export {
                 kind,
                 name,
+                source,
                 def,
                 ctor,
                 constant,
@@ -3827,6 +3924,7 @@ fn decode_exports(bytes: &[u8], module: &mut Module) -> Result<(), DecodeError> 
         exports.push(Export {
             kind,
             name,
+            source,
             def,
             ctor,
             constant,
@@ -4141,6 +4239,26 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
             methods,
         });
     }
+    let reflection_count = cur.len()?;
+    let mut reflections = decode_vec(reflection_count)?;
+    for _ in 0..reflection_count {
+        let name = cur.string()?;
+        let declaration_count = cur.len()?;
+        let mut declarations = decode_vec(declaration_count)?;
+        for _ in 0..declaration_count {
+            let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
+            let name = cur.string()?;
+            let def = cur.u32()?;
+            let callable = cur.u32()?;
+            declarations.push(ReflectionDeclaration {
+                kind,
+                name,
+                def,
+                callable,
+            });
+        }
+        reflections.push(ReflectionModule { name, declarations });
+    }
     let func_count = cur.len()?;
     let mut funcs = decode_vec(func_count)?;
     for _ in 0..func_count {
@@ -4206,6 +4324,33 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
     if class_bounds.len() != classes.len() || func_bounds.len() != funcs.len() {
         return Err(DecodeError::BadLength);
     }
+    for reflection in &reflections {
+        for declaration in &reflection.declarations {
+            let valid = match declaration.kind {
+                ExportKind::Function => {
+                    (declaration.def as usize) < funcs.len()
+                        && declaration.callable == declaration.def
+                }
+                ExportKind::Class | ExportKind::Enum => {
+                    (declaration.def as usize) < classes.len()
+                        && (declaration.callable == NO_REFLECTION_DEF
+                            || (declaration.callable as usize) < funcs.len())
+                }
+                ExportKind::Interface => {
+                    (declaration.def as usize) < interfaces.len()
+                        && declaration.callable == NO_REFLECTION_DEF
+                }
+                ExportKind::Constant => {
+                    declaration.def == NO_REFLECTION_DEF
+                        && declaration.callable == NO_REFLECTION_DEF
+                }
+                ExportKind::EnumCase => false,
+            };
+            if !valid {
+                return Err(DecodeError::BadExport);
+            }
+        }
+    }
     let entry = cur.u32()?;
     if cur.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);
@@ -4259,6 +4404,7 @@ fn decode_semantic(bytes: &[u8]) -> Result<Module, DecodeError> {
         imports,
         slots,
         core_roles,
+        reflections,
         classes,
         funcs,
         entry,
@@ -4444,6 +4590,14 @@ fn decode_instr(cur: &mut Cursor<'_>) -> Result<Instr, DecodeError> {
             EXT_BB_TRUNCATE => Instr::Native(NativeInstr::BbTruncate),
             EXT_BYTES_READ_U32_BE => Instr::Native(NativeInstr::BytesReadU32Be),
             EXT_BYTES_READ_U32_LE => Instr::Native(NativeInstr::BytesReadU32Le),
+            EXT_MODULE_CODE => Instr::Extended(ExtendedInstr::ModuleCode { module: cur.u32()? }),
+            EXT_REFLECTION_DECLARATIONS => Instr::Extended(ExtendedInstr::ReflectionDeclarations),
+            EXT_REFLECTION_MEMBERS => Instr::Extended(ExtendedInstr::ReflectionMembers),
+            EXT_REFLECTION_NAME => Instr::Extended(ExtendedInstr::ReflectionName),
+            EXT_REFLECTION_DECLARATION_KIND => {
+                Instr::Extended(ExtendedInstr::ReflectionDeclarationKind)
+            }
+            EXT_REFLECTION_MEMBER_KIND => Instr::Extended(ExtendedInstr::ReflectionMemberKind),
             _ => return Err(DecodeError::BadOpcode(OP_EXTENSION)),
         },
         OP_BYTES_ENDS_WITH => Instr::Native(NativeInstr::BytesEndsWith),
@@ -4757,6 +4911,23 @@ mod tests {
             conformances: vec![],
             class_bounds: vec![vec![], vec![]],
             func_bounds: vec![vec![], vec![]],
+            reflections: vec![ReflectionModule {
+                name: "sample".to_string(),
+                declarations: vec![
+                    ReflectionDeclaration {
+                        kind: ExportKind::Function,
+                        name: "main".to_string(),
+                        def: 0,
+                        callable: 0,
+                    },
+                    ReflectionDeclaration {
+                        kind: ExportKind::Class,
+                        name: "Counter".to_string(),
+                        def: 0,
+                        callable: NO_REFLECTION_DEF,
+                    },
+                ],
+            }],
             classes: vec![
                 BcClass {
                     name: "Counter".to_string(),
@@ -4861,6 +5032,7 @@ mod tests {
         for _ in 0..CORE_ROLE_COUNT {
             bytes.extend_from_slice(&NO_ROLE.to_le_bytes());
         }
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         let count = MAX_DECODE_VECTOR_BYTES / std::mem::size_of::<Func>() + 1;
         bytes.extend_from_slice(&(count as u32).to_le_bytes());
@@ -5216,6 +5388,12 @@ mod tests {
             Instr::Extended(ExtendedInstr::SyntaxToTree),
             Instr::Extended(ExtendedInstr::FunctionCode { func: 0 }),
             Instr::Extended(ExtendedInstr::ClassCode { class: 0 }),
+            Instr::Extended(ExtendedInstr::ModuleCode { module: 0 }),
+            Instr::Extended(ExtendedInstr::ReflectionDeclarations),
+            Instr::Extended(ExtendedInstr::ReflectionMembers),
+            Instr::Extended(ExtendedInstr::ReflectionName),
+            Instr::Extended(ExtendedInstr::ReflectionDeclarationKind),
+            Instr::Extended(ExtendedInstr::ReflectionMemberKind),
             Instr::Extended(ExtendedInstr::CodeSource { ty: 0 }),
             Instr::Extended(ExtendedInstr::CodeDefinition),
             Instr::Extended(ExtendedInstr::FaultSite { ty: 0 }),
@@ -5391,6 +5569,7 @@ mod tests {
             conformances: vec![],
             class_bounds: vec![],
             func_bounds: vec![],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![],
             imports: vec![],
@@ -5472,18 +5651,19 @@ mod tests {
     }
 
     #[test]
-    fn names_live_in_the_export_section_only() {
-        // The semantic region must not contain the definition names.
+    fn only_reflected_names_live_in_the_semantic_region() {
         let module = sample_module();
         let bytes = encode(&module);
         let at = SECTION_TABLE_AT;
         let sem_at = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
         let sem_len = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         let semantic = &bytes[sem_at..sem_at + sem_len];
-        for name in ["Counter", "Box", "main"] {
+        for name in ["sample", "Counter", "main"] {
             let found = semantic.windows(name.len()).any(|w| w == name.as_bytes());
-            assert!(!found, "the semantic region contains the name {name}");
+            assert!(found, "the semantic region omits the reflected name {name}");
         }
+        let found = semantic.windows(3).any(|window| window == b"Box");
+        assert!(!found, "the semantic region contains an unreflected name");
     }
 
     #[test]

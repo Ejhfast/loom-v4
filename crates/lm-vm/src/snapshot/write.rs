@@ -1551,6 +1551,12 @@ fn relocate_snapshot_code(
         }
     }
     for image in state.images {
+        let source_runtime = source_code.namespace(image.namespace).ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a VM image has no source code namespace".to_string(),
+            )
+        })?;
         if let Some(maps) = namespace_maps {
             let namespace = image.namespace as usize;
             let namespace_map = maps.get(namespace).ok_or_else(|| {
@@ -1571,10 +1577,16 @@ fn relocate_snapshot_code(
             relocate_slot_target(map, target)?;
         }
         for entry in &mut image.objects {
-            relocate_object_code(map, &mut entry.object)?;
+            relocate_object_code(map, source_runtime.core_layout(), &mut entry.object)?;
         }
     }
     for machine in state.machines {
+        let source_runtime = source_code.namespace(machine.namespace).ok_or_else(|| {
+            SnapshotFail::Fault(
+                FaultCode::MalformedState,
+                "a machine has no source code namespace".to_string(),
+            )
+        })?;
         machine.body_func = machine
             .body_func
             .map(|function| relocate_index(map.function(function), "body function"))
@@ -1586,17 +1598,11 @@ fn relocate_snapshot_code(
             frame.func = relocate_index(map.function(frame.func), "frame function")?;
         }
         for entry in &mut machine.objects {
-            relocate_object_code(map, &mut entry.object)?;
+            relocate_object_code(map, source_runtime.core_layout(), &mut entry.object)?;
         }
         if let Some(ImageTerminal::Fault(fault)) = &mut machine.terminal {
             relocate_fault_trace(map, &mut fault.trace)?;
         }
-        let source_runtime = source_code.namespace(machine.namespace).ok_or_else(|| {
-            SnapshotFail::Fault(
-                FaultCode::MalformedState,
-                "a machine has no source code namespace".to_string(),
-            )
-        })?;
         let target = target_code.namespace(machine.namespace).ok_or_else(|| {
             SnapshotFail::Fault(
                 FaultCode::MalformedState,
@@ -1744,9 +1750,14 @@ fn relocate_slot_target(
     Ok(())
 }
 
-fn relocate_object_code(map: &CodeRelocation, object: &mut Object) -> Result<(), SnapshotFail> {
+fn relocate_object_code(
+    map: &CodeRelocation,
+    core: lm_bytecode::corepin::CoreLayout,
+    object: &mut Object,
+) -> Result<(), SnapshotFail> {
     match object {
-        Object::Instance { class, .. } => {
+        Object::Instance { class, fields, .. } => {
+            relocate_reflection_fields(map, core, *class, fields)?;
             *class = relocate_index(map.class(*class), "object class")?;
         }
         Object::Closure { func, .. } => {
@@ -1805,6 +1816,76 @@ fn relocate_object_code(map: &CodeRelocation, object: &mut Object) -> Result<(),
         | Object::DynValue { .. }
         | Object::NativeRegex(_)
         | Object::NativeRegexMatch(_) => {}
+    }
+    Ok(())
+}
+
+fn relocate_reflection_fields(
+    map: &CodeRelocation,
+    core: lm_bytecode::corepin::CoreLayout,
+    class: u32,
+    fields: &mut [Value],
+) -> Result<(), SnapshotFail> {
+    let relocate_field =
+        |fields: &mut [Value],
+         index: usize,
+         name: &str,
+         lookup: fn(&CodeRelocation, u32) -> Option<u32>| {
+            let Some(Value::Int(field)) = fields.get_mut(index) else {
+                return Err(SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    format!("a {name} descriptor has invalid fields"),
+                ));
+            };
+            let source = u32::try_from(*field).map_err(|_| {
+                SnapshotFail::Fault(
+                    FaultCode::MalformedState,
+                    format!("a {name} descriptor has an invalid index"),
+                )
+            })?;
+            let target = relocate_index(lookup(map, source), name)?;
+            *field = i64::from(target);
+            Ok(())
+        };
+    if Some(class) == core.module_code {
+        if fields.len() != 1 {
+            return relocate_field(
+                fields,
+                usize::MAX,
+                "module reflection",
+                CodeRelocation::reflection,
+            );
+        }
+        return relocate_field(fields, 0, "module reflection", CodeRelocation::reflection);
+    }
+    if Some(class) == core.declaration_code {
+        if fields.len() != 2 {
+            return relocate_field(
+                fields,
+                usize::MAX,
+                "declaration reflection",
+                CodeRelocation::reflection,
+            );
+        }
+        return relocate_field(
+            fields,
+            0,
+            "declaration reflection",
+            CodeRelocation::reflection,
+        );
+    }
+    if Some(class) == core.member_code {
+        if fields.len() != 3 {
+            return relocate_field(
+                fields,
+                usize::MAX,
+                "member reflection",
+                CodeRelocation::function,
+            );
+        }
+        relocate_field(fields, 0, "member owner", CodeRelocation::class)?;
+        relocate_field(fields, 1, "member selector", CodeRelocation::selector)?;
+        relocate_field(fields, 2, "member function", CodeRelocation::function)?;
     }
     Ok(())
 }

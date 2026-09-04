@@ -89,6 +89,12 @@ impl<'o> FnChecker<'o> {
                 recv.span,
             ));
         };
+        if matches!(
+            ctx.classes[class as usize].native_repr,
+            Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+        ) {
+            return Err(unknown_field(ctx, class, name, name_span));
+        }
         let fidx = ctx
             .find_field(class, name)
             .ok_or_else(|| unknown_field(ctx, class, name, name_span))?;
@@ -383,6 +389,9 @@ impl<'o> FnChecker<'o> {
                         | NativeRepr::CodeInstance
                         | NativeRepr::Slot
                         | NativeRepr::ClassBinding
+                        | NativeRepr::ModuleCode
+                        | NativeRepr::DeclarationCode
+                        | NativeRepr::MemberCode
                 )
             ),
             Type::Inst(class, _) => {

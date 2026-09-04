@@ -808,6 +808,9 @@ impl<'o> FnChecker<'o> {
                 "ClassDef",
                 "ClassBinding",
                 "CodeError",
+                "ModuleCode",
+                "DeclarationCode",
+                "MemberCode",
             ]
             .into_iter()
             .find(|name| ctx.core_types.get(*name) == Some(&class.0)),
@@ -889,9 +892,68 @@ impl<'o> FnChecker<'o> {
         args: &[ast::Expr],
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
-        let code_error = Self::core_class(ctx, "CodeError");
-        let result = |ctx: &mut Ctx, ok| Self::core_inst(ctx, "Result", vec![ok, code_error]);
+        let result = |ctx: &mut Ctx, ok| {
+            let code_error = Self::core_class(ctx, "CodeError");
+            Self::core_inst(ctx, "Result", vec![ok, code_error])
+        };
         match (class, name) {
+            ("ModuleCode", "declarations") => {
+                Self::expect_no_args(name, args, span)?;
+                let item = Self::core_class(ctx, "DeclarationCode");
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: ctx.store.intern(Type::List(item)),
+                    mutable: true,
+                    kind: HExprKind::ReflectionDeclarations {
+                        module: Box::new(recv_h),
+                    },
+                })
+            }
+            ("DeclarationCode", "members") => {
+                Self::expect_no_args(name, args, span)?;
+                let item = Self::core_class(ctx, "MemberCode");
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: ctx.store.intern(Type::List(item)),
+                    mutable: true,
+                    kind: HExprKind::ReflectionMembers {
+                        declaration: Box::new(recv_h),
+                    },
+                })
+            }
+            ("ModuleCode" | "DeclarationCode" | "MemberCode", "name") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::ReflectionName {
+                        descriptor: Box::new(recv_h),
+                    },
+                })
+            }
+            ("DeclarationCode", "kind") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::ReflectionDeclarationKind {
+                        declaration: Box::new(recv_h),
+                    },
+                })
+            }
+            ("MemberCode", "kind") => {
+                Self::expect_no_args(name, args, span)?;
+                Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty: STRING,
+                    mutable: true,
+                    kind: HExprKind::ReflectionMemberKind {
+                        member: Box::new(recv_h),
+                    },
+                })
+            }
             ("FunctionCode", "source") | ("ClassCode", "source") => {
                 Self::expect_no_args(name, args, span)?;
                 let element = Self::core_class(ctx, "DefinitionSource");

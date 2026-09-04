@@ -52,6 +52,17 @@ struct PreparedSnapshotCode {
     namespaces: Vec<CodeRelocation>,
 }
 
+/// Relocation maps for one restored object table.
+#[derive(Clone, Copy)]
+struct ObjectRestoreMaps<'a> {
+    ids: &'a [VmId],
+    image_keys: &'a [VmImageKey],
+    env_map: &'a [TypeEnvId],
+    type_map: &'a [u32],
+    code: &'a CodeRelocation,
+    source_core: lm_bytecode::corepin::CoreLayout,
+}
+
 /// One prepared full VM restore and its reserved registry entries.
 pub(crate) struct VmRestorePlan {
     restore: RestorePlan,
@@ -382,14 +393,21 @@ impl World {
             machine.namespace = *namespace_ids
                 .get(source.namespace as usize)
                 .ok_or(RestoreFail::IncompatibleImage)?;
+            let source_runtime = admitted
+                .code()
+                .namespace(source.namespace)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let refs = restore_heap(
                 &mut machine,
                 source,
-                &ids,
-                &prepared_images.keys,
-                env_map,
-                type_map,
-                &code_map,
+                ObjectRestoreMaps {
+                    ids: &ids,
+                    image_keys: &prepared_images.keys,
+                    env_map,
+                    type_map,
+                    code: &code_map,
+                    source_core: source_runtime.core_layout(),
+                },
             )?;
             let literal_layout = if code_map.is_identity() {
                 None
@@ -628,15 +646,22 @@ impl World {
             let namespace_map = namespace_maps
                 .get(source.namespace as usize)
                 .ok_or(RestoreFail::IncompatibleImage)?;
+            let source_runtime = admitted
+                .code()
+                .namespace(source.namespace)
+                .ok_or(RestoreFail::IncompatibleImage)?;
             let mut heap = self.empty_image_heap(config);
             let refs = restore_objects(
                 &mut heap,
                 &source.objects,
-                ids,
-                &keys,
-                env_map,
-                type_map,
-                code_map,
+                ObjectRestoreMaps {
+                    ids,
+                    image_keys: &keys,
+                    env_map,
+                    type_map,
+                    code: code_map,
+                    source_core: source_runtime.core_layout(),
+                },
             )?;
             let target_slot_count = self.code_for_namespace(namespace).slots.len();
             let mut slots = try_vec(target_slot_count)?;
@@ -890,32 +915,16 @@ fn check_effective_limits(
 fn restore_heap(
     machine: &mut Machine,
     source: &ImageMachine,
-    ids: &[VmId],
-    image_keys: &[VmImageKey],
-    env_map: &[TypeEnvId],
-    type_map: &[u32],
-    code_map: &CodeRelocation,
+    maps: ObjectRestoreMaps<'_>,
 ) -> Result<Vec<ObjRef>, RestoreFail> {
-    restore_objects(
-        &mut machine.vm.heap,
-        &source.objects,
-        ids,
-        image_keys,
-        env_map,
-        type_map,
-        code_map,
-    )
+    restore_objects(&mut machine.vm.heap, &source.objects, maps)
 }
 
 /// Restore one canonical object table into one empty heap.
 fn restore_objects(
     heap: &mut Heap,
     objects: &[super::ImageObject],
-    ids: &[VmId],
-    image_keys: &[VmImageKey],
-    env_map: &[TypeEnvId],
-    type_map: &[u32],
-    code_map: &CodeRelocation,
+    maps: ObjectRestoreMaps<'_>,
 ) -> Result<Vec<ObjRef>, RestoreFail> {
     let mut bytes = 0usize;
     for entry in objects {
@@ -939,7 +948,7 @@ fn restore_objects(
             .object
             .try_clone_remapped(|child| refs[child.slot as usize])
             .map_err(|_| RestoreFail::LimitExceeded)?;
-        relocate_metadata(&mut object, ids, image_keys, env_map, type_map, code_map)?;
+        relocate_metadata(&mut object, maps)?;
         let reference = heap
             .try_alloc(object)
             .map_err(|_| RestoreFail::LimitExceeded)?;
@@ -1363,14 +1372,15 @@ fn clamp_image(source: &crate::snapshot::ImageLimits, ceiling: VmConfig) -> VmCo
 }
 
 /// Relocate the world-local metadata of one restored object.
-fn relocate_metadata(
-    object: &mut Object,
-    ids: &[VmId],
-    image_keys: &[VmImageKey],
-    env_map: &[TypeEnvId],
-    type_map: &[u32],
-    code_map: &CodeRelocation,
-) -> Result<(), RestoreFail> {
+fn relocate_metadata(object: &mut Object, maps: ObjectRestoreMaps<'_>) -> Result<(), RestoreFail> {
+    let ObjectRestoreMaps {
+        ids,
+        image_keys,
+        env_map,
+        type_map,
+        code: code_map,
+        source_core,
+    } = maps;
     let code_is_identity = code_map.is_identity();
     let remap = |value: &mut Value| {
         if let Value::EmptyCase { ty, .. } = value {
@@ -1399,8 +1409,9 @@ fn relocate_metadata(
         _ => {}
     }
     match object {
-        Object::Instance { class, env, .. } => {
+        Object::Instance { class, fields, env } => {
             if !code_is_identity {
+                relocate_reflection_fields(code_map, source_core, *class, fields)?;
                 *class = code_map
                     .class(*class)
                     .ok_or(RestoreFail::IncompatibleImage)?;
@@ -1481,6 +1492,45 @@ fn relocate_metadata(
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn relocate_reflection_fields(
+    map: &CodeRelocation,
+    core: lm_bytecode::corepin::CoreLayout,
+    class: u32,
+    fields: &mut [Value],
+) -> Result<(), RestoreFail> {
+    let relocate_field =
+        |fields: &mut [Value], index: usize, lookup: fn(&CodeRelocation, u32) -> Option<u32>| {
+            let Some(Value::Int(field)) = fields.get_mut(index) else {
+                return Err(RestoreFail::IncompatibleImage);
+            };
+            let source = u32::try_from(*field).map_err(|_| RestoreFail::IncompatibleImage)?;
+            let target = lookup(map, source).ok_or(RestoreFail::IncompatibleImage)?;
+            *field = i64::from(target);
+            Ok(())
+        };
+    if Some(class) == core.module_code {
+        if fields.len() != 1 {
+            return Err(RestoreFail::IncompatibleImage);
+        }
+        return relocate_field(fields, 0, CodeRelocation::reflection);
+    }
+    if Some(class) == core.declaration_code {
+        if fields.len() != 2 {
+            return Err(RestoreFail::IncompatibleImage);
+        }
+        return relocate_field(fields, 0, CodeRelocation::reflection);
+    }
+    if Some(class) == core.member_code {
+        if fields.len() != 3 {
+            return Err(RestoreFail::IncompatibleImage);
+        }
+        relocate_field(fields, 0, CodeRelocation::class)?;
+        relocate_field(fields, 1, CodeRelocation::selector)?;
+        relocate_field(fields, 2, CodeRelocation::function)?;
     }
     Ok(())
 }

@@ -59,6 +59,7 @@ pub fn compile_verifier_fixture_text(
         core_roles: *namespace.core_roles(),
         classes: tables.classes.to_vec(),
         funcs: tables.funcs.to_vec(),
+        reflections: tables.reflections.to_vec(),
         entry: namespace.entry(),
         exports: namespace.exports().to_vec(),
         bindings: namespace.bindings().to_vec(),

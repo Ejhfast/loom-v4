@@ -147,6 +147,9 @@ impl<'o> FnChecker<'o> {
                             | NativeRepr::FunctionBinding
                             | NativeRepr::ClassBinding
                             | NativeRepr::DynValue
+                            | NativeRepr::ModuleCode
+                            | NativeRepr::DeclarationCode
+                            | NativeRepr::MemberCode
                     )
                 ) {
                     return Err(Diagnostic::new(
@@ -322,21 +325,33 @@ impl<'o> FnChecker<'o> {
                 span,
             ));
         }
-        let ExprKind::Name(name) = &args[0].kind else {
+        let Some((name, root)) = qualified_expr_name(&args[0]) else {
             return Err(Diagnostic::new(
                 "E1026",
-                "`codeof` needs a named function or class",
+                "`codeof` needs a definition path or a module path",
                 args[0].span,
             ));
         };
-        if self.lookup_slot(name).is_some() {
+        if self.lookup_slot(root).is_some() {
             return Err(Diagnostic::new(
                 "E1026",
-                "`codeof` cannot reify a local function value",
+                "`codeof` cannot reify a local value",
                 args[0].span,
             ));
         }
-        if let Some(func) = self.module_func(ctx, name) {
+        if name == root {
+            if let Some(UseBinding::Module(path)) = self.use_binding(ctx, root)? {
+                let module = ctx.reflection_module(&path, args[0].span)?;
+                let ty = Self::core_class(ctx, "ModuleCode");
+                return Ok(HExpr {
+                    flow: Flow::Normal,
+                    ty,
+                    mutable: false,
+                    kind: HExprKind::ModuleCode { module },
+                });
+            }
+        }
+        if let Some(func) = self.module_func(ctx, &name) {
             let sig = &ctx.sigs[func as usize];
             if !sig.type_params.is_empty() || !sig.effect_params.is_empty() {
                 return Err(Diagnostic::new(
@@ -366,7 +381,7 @@ impl<'o> FnChecker<'o> {
                 kind: HExprKind::FunctionCode { func },
             });
         }
-        if let Some(class) = ctx.lookup_type(name, &self.env) {
+        if let Some(class) = ctx.lookup_type(&name, &self.env) {
             ctx.reified_classes.insert(class);
             let ty = Self::core_class(ctx, "ClassCode");
             return Ok(HExpr {
@@ -378,7 +393,7 @@ impl<'o> FnChecker<'o> {
         }
         Err(Diagnostic::new(
             "E1001",
-            format!("unknown definition `{name}`"),
+            format!("unknown definition or module `{name}`"),
             args[0].span,
         ))
     }

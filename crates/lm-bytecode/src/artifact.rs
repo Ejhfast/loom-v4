@@ -555,6 +555,7 @@ mod tests {
             imports: Vec::new(),
             slots: Vec::new(),
             core_roles: [NO_ROLE; crate::CORE_ROLE_COUNT],
+            reflections: Vec::new(),
             classes: Vec::new(),
             funcs: vec![Func {
                 name: "entry".to_string(),
@@ -703,6 +704,7 @@ mod tests {
             def: 0,
             ctor: crate::NO_CTOR,
             constant: None,
+            source: true,
         });
         let mut second = first.clone();
         second.exports[0].def = 1;
@@ -826,6 +828,7 @@ mod tests {
             def: 0,
             ctor: crate::NO_CTOR,
             constant: None,
+            source: true,
         });
         let unit = LinkUnit::from_module("test.main", module, Vec::new()).unwrap();
         let module_bytes = crate::encode(unit.module());

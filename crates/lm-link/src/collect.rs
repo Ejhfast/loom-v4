@@ -5,14 +5,14 @@
 //! It compacts each table in its original order.
 
 use crate::reloc_tables::{
-    reloc_bounds, reloc_class, reloc_conformance, reloc_func, reloc_interface, reloc_row,
-    reloc_slot, reloc_type, Reloc,
+    reloc_bounds, reloc_class, reloc_conformance, reloc_func, reloc_interface, reloc_reflection,
+    reloc_row, reloc_slot, reloc_type, Reloc,
 };
 use lm_bytecode::debug::{DebugCodeOrigin, DebugDefinition, DebugFunction, DebugInfo};
 use lm_bytecode::{
     BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceUse, BcRow, BcType, Export,
     ExtendedInstr, Func, Import, ImportKind, Instr, Module, SlotContract, SlotSpec, SlotTarget,
-    TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_ROLE,
+    TypeApp, NO_APP, NO_CLASS, NO_CTOR, NO_FUNC, NO_REFLECTION_DEF, NO_ROLE,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -27,6 +27,7 @@ struct Offsets {
     classes: usize,
     funcs: usize,
     slots: usize,
+    reflections: usize,
     total: usize,
 }
 
@@ -41,7 +42,8 @@ impl Offsets {
         let classes = interfaces + module.interfaces.len();
         let funcs = classes + module.classes.len();
         let slots = funcs + module.funcs.len();
-        let total = slots + module.slots.len();
+        let reflections = slots + module.slots.len();
+        let total = reflections + module.reflections.len();
         Offsets {
             strings,
             bytes,
@@ -52,6 +54,7 @@ impl Offsets {
             classes,
             funcs,
             slots,
+            reflections,
             total,
         }
     }
@@ -94,6 +97,10 @@ impl Offsets {
 
     fn slot(self, index: u32) -> u32 {
         Self::node(self.slots, index)
+    }
+
+    fn reflection(self, index: u32) -> u32 {
+        Self::node(self.reflections, index)
     }
 }
 
@@ -520,6 +527,27 @@ fn dependency_graph(module: &Module, offsets: Offsets) -> Vec<Vec<u32>> {
                 graph[offsets.func(constructor) as usize].push(offsets.slot(index as u32));
             }
             None => {}
+        }
+    }
+    for (index, reflection) in module.reflections.iter().enumerate() {
+        let edges = &mut graph[offsets.reflection(index as u32) as usize];
+        for declaration in &reflection.declarations {
+            match declaration.kind {
+                lm_bytecode::ExportKind::Function => {
+                    edges.push(offsets.func(declaration.def));
+                }
+                lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
+                    edges.push(offsets.class(declaration.def));
+                }
+                lm_bytecode::ExportKind::Interface => {
+                    edges.push(offsets.interface(declaration.def));
+                }
+                lm_bytecode::ExportKind::Constant => {}
+                lm_bytecode::ExportKind::EnumCase => unreachable!("the verifier rejects cases"),
+            }
+            if declaration.callable != NO_REFLECTION_DEF {
+                edges.push(offsets.func(declaration.callable));
+            }
         }
     }
     for roles in lm_bytecode::corepin::ROLE_FAMILIES {
@@ -1191,6 +1219,37 @@ fn extended_edges(
                 edges,
             );
         }
+        ExtendedInstr::ModuleCode { module: reflection } => {
+            edges.push(offsets.reflection(*reflection));
+            core_role_edge(
+                module,
+                offsets,
+                lm_bytecode::corepin::ROLE_MODULE_CODE,
+                edges,
+            );
+        }
+        ExtendedInstr::ReflectionDeclarations => role_edges(
+            module,
+            offsets,
+            &["ModuleCode", "DeclarationCode", "List"],
+            edges,
+        ),
+        ExtendedInstr::ReflectionMembers => role_edges(
+            module,
+            offsets,
+            &["DeclarationCode", "MemberCode", "List"],
+            edges,
+        ),
+        ExtendedInstr::ReflectionName => role_edges(
+            module,
+            offsets,
+            &["ModuleCode", "DeclarationCode", "MemberCode"],
+            edges,
+        ),
+        ExtendedInstr::ReflectionDeclarationKind => {
+            role_edges(module, offsets, &["DeclarationCode"], edges)
+        }
+        ExtendedInstr::ReflectionMemberKind => role_edges(module, offsets, &["MemberCode"], edges),
         ExtendedInstr::OptionSome { ty }
         | ExtendedInstr::OptionNone { ty }
         | ExtendedInstr::OptionPayload { ty }
@@ -1364,6 +1423,7 @@ impl Reloc {
             classes: table_reloc(module.classes.len(), offsets.classes, live),
             funcs: table_reloc(module.funcs.len(), offsets.funcs, live),
             slots: table_reloc(module.slots.len(), offsets.slots, live),
+            reflections: table_reloc(module.reflections.len(), offsets.reflections, live),
         }
     }
 }
@@ -1431,6 +1491,9 @@ fn relocate_module(
         .map(|item| reloc_conformance(item, reloc))
         .collect();
     let slots = retain_table(&module.slots, &reloc.slots, |slot| reloc_slot(slot, reloc));
+    let reflections = retain_table(&module.reflections, &reloc.reflections, |reflection| {
+        reloc_reflection(reflection, reloc)
+    });
     let imports = if keep_imports {
         module
             .imports
@@ -1498,6 +1561,7 @@ fn relocate_module(
         imports,
         slots,
         core_roles,
+        reflections,
         classes,
         funcs,
         entry,
@@ -1564,6 +1628,7 @@ fn reloc_export(source: &Export, reloc: &Reloc) -> Result<Export, String> {
         return Ok(Export {
             kind: source.kind,
             name: source.name.clone(),
+            source: source.source,
             def: source.def,
             ctor: source.ctor,
             constant: Some(lm_bytecode::Constant {
@@ -1601,6 +1666,7 @@ fn reloc_export(source: &Export, reloc: &Reloc) -> Result<Export, String> {
     Ok(Export {
         kind: source.kind,
         name: source.name.clone(),
+        source: source.source,
         def,
         ctor,
         constant: source.constant.clone(),
@@ -1727,6 +1793,7 @@ mod tests {
             imports: Vec::new(),
             slots: Vec::new(),
             core_roles: [NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: Vec::new(),
             classes: Vec::new(),
             funcs,
             entry,

@@ -1008,6 +1008,35 @@ pub(crate) fn verify_core_roles(module: &Module) -> Result<(), VerifyError> {
             }
         }
     }
+    for (role, name, field_count) in [
+        (lm_bytecode::corepin::ROLE_MODULE_CODE, "ModuleCode", 1),
+        (
+            lm_bytecode::corepin::ROLE_DECLARATION_CODE,
+            "DeclarationCode",
+            2,
+        ),
+        (lm_bytecode::corepin::ROLE_MEMBER_CODE, "MemberCode", 3),
+    ] {
+        let Some(idx) = slot(role) else { continue };
+        let class = &module.classes[idx as usize];
+        let integer_fields = class
+            .fields
+            .iter()
+            .all(|(_, ty)| module.types.get(*ty as usize) == Some(&BcType::Int));
+        if class.kind != BcClassKind::Normal
+            || !class.is_final
+            || !class.is_frozen
+            || class.type_params != 0
+            || class.parent().is_some()
+            || !class.parent_args.is_empty()
+            || class.fields.len() != field_count
+            || !integer_fields
+        {
+            return Err(terr(format!(
+                "the {name} role does not name its frozen descriptor class"
+            )));
+        }
+    }
     let native_roles = [
         (lm_bytecode::corepin::ROLE_INT, "Int"),
         (lm_bytecode::corepin::ROLE_FLOAT, "Float"),

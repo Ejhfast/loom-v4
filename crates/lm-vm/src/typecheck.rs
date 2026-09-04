@@ -821,6 +821,7 @@ mod tests {
             imports: Vec::new(),
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes,
             funcs,
             entry,

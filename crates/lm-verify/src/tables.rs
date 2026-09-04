@@ -4,6 +4,7 @@
 //! context, the error type, and the entry points.
 
 use super::*;
+use lm_bytecode::ExportKind;
 
 /// Validate the type, selector, application, class, and function
 /// tables.
@@ -227,6 +228,26 @@ pub(crate) fn verify_tables(
             class.get_or_insert(binding.class);
         }
     }
+    for constructor in module
+        .imports
+        .iter()
+        .filter(|import| import.kind == lm_bytecode::ImportKind::Ctor)
+    {
+        let class = module.imports.iter().find(|import| {
+            import.kind == lm_bytecode::ImportKind::Class
+                && import.module == constructor.module
+                && import.name == constructor.name
+                && import.hash == constructor.hash
+        });
+        let Some(class) = class else { continue };
+        if class.def as usize >= module.classes.len() {
+            continue;
+        }
+        class_constructors[class.def as usize].push(constructor.def);
+        if let Some(slot) = constructor_classes.get_mut(constructor.def as usize) {
+            slot.get_or_insert(class.def);
+        }
+    }
     // Bound the nesting depth of the type table. A type child names an
     // earlier entry, so one forward pass gives the depth of each entry.
     let mut depth: Vec<u32> = Vec::with_capacity(module.types.len());
@@ -314,10 +335,66 @@ pub(crate) fn verify_tables(
     verify_bindings(&ctx)?;
     verify_classes(&ctx)?;
     verify_conformances(&ctx, &interface_self)?;
+    verify_reflections(&ctx)?;
     verify_map_key_types(&ctx)?;
     verify_signatures(&ctx)?;
     verify_slots(&ctx)?;
     Ok(ctx)
+}
+
+/// Validate exact source module surfaces used by reflection.
+fn verify_reflections(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
+    let module = ctx.module;
+    let mut module_names = HashSet::new();
+    for (module_index, reflection) in module.reflections.iter().enumerate() {
+        if !module_names.insert(reflection.name.as_str()) {
+            return Err(terr(format!(
+                "reflection module {module_index} repeats module `{}`",
+                reflection.name
+            )));
+        }
+        let mut declaration_names = HashSet::new();
+        for (declaration_index, declaration) in reflection.declarations.iter().enumerate() {
+            let subject =
+                || format!("reflection module {module_index}, declaration {declaration_index}");
+            if !declaration_names.insert(declaration.name.as_str()) {
+                return Err(terr(format!(
+                    "{} repeats declaration `{}`",
+                    subject(),
+                    declaration.name
+                )));
+            }
+            let no_def = declaration.def == lm_bytecode::NO_REFLECTION_DEF;
+            let no_callable = declaration.callable == lm_bytecode::NO_REFLECTION_DEF;
+            let valid = match declaration.kind {
+                ExportKind::Function => {
+                    module.funcs.get(declaration.def as usize).is_some()
+                        && declaration.callable == declaration.def
+                }
+                ExportKind::Class => {
+                    module.classes.get(declaration.def as usize).is_some()
+                        && module.funcs.get(declaration.callable as usize).is_some()
+                        && ctx.constructor_class(declaration.callable) == Some(declaration.def)
+                }
+                ExportKind::Enum => {
+                    module
+                        .classes
+                        .get(declaration.def as usize)
+                        .is_some_and(|class| class.kind == BcClassKind::Abstract)
+                        && no_callable
+                }
+                ExportKind::Interface => {
+                    module.interfaces.get(declaration.def as usize).is_some() && no_callable
+                }
+                ExportKind::Constant => no_def && no_callable,
+                ExportKind::EnumCase => false,
+            };
+            if !valid {
+                return Err(terr(format!("{} has invalid targets", subject())));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject one concrete map key that cannot implement `Hashable`.
@@ -1133,7 +1210,7 @@ fn verify_classes(ctx: &Ctx<'_>) -> Result<(), VerifyError> {
             if class.parent().is_some() {
                 return Err(cerr("a frozen class cannot declare a parent".to_string()));
             }
-            if !extern_classes[cidx] {
+            if !extern_classes[cidx] && !ctx.is_reflection_descriptor_class(cidx as u32) {
                 let constructors = &ctx.class_constructors[cidx];
                 if constructors.len() != 1 {
                     return Err(cerr(

@@ -77,7 +77,7 @@ pub const CORE_SOURCE: &str = concat!(
 );
 
 /// The type names the prelude places into unqualified scope.
-pub const PRELUDE_TYPES: [&str; 145] = [
+pub const PRELUDE_TYPES: [&str; 148] = [
     "Option",
     "Result",
     "Ordering",
@@ -124,6 +124,9 @@ pub const PRELUDE_TYPES: [&str; 145] = [
     "VerifiedModule",
     "FunctionCode",
     "ClassCode",
+    "ModuleCode",
+    "DeclarationCode",
+    "MemberCode",
     "DefinitionIdentity",
     "DefinitionSpec",
     "DefinitionSource",
@@ -292,6 +295,9 @@ pub(crate) fn core_native_repr(name: &str) -> Option<NativeRepr> {
         "FunctionBinding" => Some(NativeRepr::FunctionBinding),
         "ClassBinding" => Some(NativeRepr::ClassBinding),
         "DynValue" => Some(NativeRepr::DynValue),
+        "ModuleCode" => Some(NativeRepr::ModuleCode),
+        "DeclarationCode" => Some(NativeRepr::DeclarationCode),
+        "MemberCode" => Some(NativeRepr::MemberCode),
         "Regex" => Some(NativeRepr::Regex),
         "RegexMatch" => Some(NativeRepr::RegexMatch),
         name => tuple_core_arity(name).map(|arity| NativeRepr::Tuple(arity as u8)),
@@ -983,6 +989,12 @@ pub(crate) struct Ctx {
     pub(crate) reified_functions: BTreeSet<u32>,
     /// Local classes that one expression reifies.
     pub(crate) reified_classes: BTreeSet<u32>,
+    /// Exact imported module surfaces used by `codeof` expressions.
+    pub(crate) reflections: Vec<HirReflectionModule>,
+    /// Reflection table indices by canonical module path.
+    pub(crate) reflection_indices: HashMap<String, u32>,
+    /// The visible interfaces that supply source declaration metadata.
+    pub(crate) import_env: crate::import::ImportEnv,
     pub(crate) core: CoreIds,
     /// The import slots the module needs, in slot order.
     pub(crate) imports: Vec<HirImport>,
@@ -1099,6 +1111,90 @@ impl Ctx {
             }
         }
         lm_bytecode::qualified_key(module_path, &info.name)
+    }
+
+    /// Intern one exact imported source module surface.
+    pub(crate) fn reflection_module(&mut self, path: &str, span: Span) -> Result<u32, Diagnostic> {
+        if let Some(index) = self.reflection_indices.get(path) {
+            return Ok(*index);
+        }
+        let interface = self.import_env.module(path).cloned().ok_or_else(|| {
+            Diagnostic::new(
+                "E1052",
+                format!("the module `{path}` is not visible here"),
+                span,
+            )
+        })?;
+        let mut declarations = Vec::new();
+        for export in interface.exports.into_iter().filter(|export| export.source) {
+            let (def, callable) = match export.kind {
+                lm_bytecode::ExportKind::Function => {
+                    let function = self.imports.iter().find_map(|import| {
+                        (import.module == path
+                            && import.name == export.name
+                            && import.kind == lm_bytecode::ImportKind::Func)
+                            .then_some(import.def)
+                    });
+                    let Some(HirImportDef::Func(function)) = function else {
+                        return Err(Diagnostic::new(
+                            "E1052",
+                            format!("the function `{path}.{}` is not materialized", export.name),
+                            span,
+                        ));
+                    };
+                    (Some(HirReflectionDef::Function(function)), Some(function))
+                }
+                lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
+                    let class = self.imports.iter().find_map(|import| {
+                        (import.module == path
+                            && import.name == export.name
+                            && import.kind == lm_bytecode::ImportKind::Class)
+                            .then_some(import.def)
+                    });
+                    let Some(HirImportDef::Class(class)) = class else {
+                        return Err(Diagnostic::new(
+                            "E1052",
+                            format!("the class `{path}.{}` is not materialized", export.name),
+                            span,
+                        ));
+                    };
+                    (Some(HirReflectionDef::Class(class)), None)
+                }
+                lm_bytecode::ExportKind::Interface => {
+                    let interface = self
+                        .interfaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, item)| {
+                            (item.origin.as_ref() == Some(&(path.to_string(), export.name.clone())))
+                                .then_some(index as u32)
+                        });
+                    let Some(interface) = interface else {
+                        return Err(Diagnostic::new(
+                            "E1052",
+                            format!("the interface `{path}.{}` is not materialized", export.name),
+                            span,
+                        ));
+                    };
+                    (Some(HirReflectionDef::Interface(interface)), None)
+                }
+                lm_bytecode::ExportKind::Constant => (None, None),
+                lm_bytecode::ExportKind::EnumCase => continue,
+            };
+            declarations.push(HirReflectionDeclaration {
+                kind: export.kind,
+                name: export.name,
+                def,
+                callable,
+            });
+        }
+        let index = self.reflections.len() as u32;
+        self.reflections.push(HirReflectionModule {
+            name: path.to_string(),
+            declarations,
+        });
+        self.reflection_indices.insert(path.to_string(), index);
+        Ok(index)
     }
 
     /// Read one constant and record its exact provider pin.
@@ -2767,6 +2863,9 @@ fn check_module_with_core_adjustment(
         used_constant_pins: HashSet::new(),
         reified_functions: BTreeSet::new(),
         reified_classes: BTreeSet::new(),
+        reflections: Vec::new(),
+        reflection_indices: HashMap::new(),
+        import_env: options.imports.clone(),
         core: CoreIds {
             option_class: 0,
             some_class: 0,
@@ -3208,7 +3307,7 @@ fn collect_exports(
     _module_path: &str,
     is_core: bool,
 ) -> Result<Vec<HirExport>, Diagnostic> {
-    let mut out: Vec<(lm_bytecode::ExportKind, String, u32)> = Vec::new();
+    let mut out: Vec<(lm_bytecode::ExportKind, String, u32, bool)> = Vec::new();
     let class_index = |name: &str| -> u32 {
         let types = if is_core {
             &ctx.core_types
@@ -3230,11 +3329,17 @@ fn collect_exports(
             lm_bytecode::ExportKind::Interface,
             interface.name.clone(),
             interface_index,
+            true,
         ));
         let info = &ctx.interfaces[interface_index as usize];
         for method in &info.methods {
             if let (Some(binding), Some(func)) = (&method.default_binding, method.default_func) {
-                out.push((lm_bytecode::ExportKind::Function, binding.clone(), func));
+                out.push((
+                    lm_bytecode::ExportKind::Function,
+                    binding.clone(),
+                    func,
+                    false,
+                ));
             }
         }
     }
@@ -3243,17 +3348,23 @@ fn collect_exports(
             lm_bytecode::ExportKind::Class,
             class.name.clone(),
             class_index(&class.name),
+            true,
         ));
     }
     for enum_def in &module.enums {
         let parent = class_index(&enum_def.name);
-        out.push((lm_bytecode::ExportKind::Enum, enum_def.name.clone(), parent));
+        out.push((
+            lm_bytecode::ExportKind::Enum,
+            enum_def.name.clone(),
+            parent,
+            true,
+        ));
         for arm in &enum_def.arms {
             let full = format!("{}.{}", enum_def.name, arm.name);
             let idx = ctx
                 .find_arm(parent, &arm.name)
                 .expect("every declared arm registers");
-            out.push((lm_bytecode::ExportKind::EnumCase, full, idx));
+            out.push((lm_bytecode::ExportKind::EnumCase, full, idx, false));
         }
     }
     for func in &module.funcs {
@@ -3266,11 +3377,17 @@ fn collect_exports(
             lm_bytecode::ExportKind::Function,
             func.name.clone(),
             functions[&func.name],
+            true,
         ));
     }
     Ok(out
         .into_iter()
-        .map(|(kind, name, def)| HirExport { kind, name, def })
+        .map(|(kind, name, def, source)| HirExport {
+            kind,
+            name,
+            source,
+            def,
+        })
         .collect())
 }
 
@@ -3303,6 +3420,7 @@ fn collect_core_exports(ctx: &Ctx, module: &ast::Module) -> Result<Vec<HirExport
         exports.push(HirExport {
             kind: lm_bytecode::ExportKind::Function,
             name: format!("$internal.function.{current}"),
+            source: false,
             def: index,
         });
     }
@@ -3627,6 +3745,7 @@ fn assemble(
     }
     let reified_functions = ctx.reified_functions;
     let reified_classes = ctx.reified_classes;
+    let reflections = ctx.reflections;
     let funcs: Vec<HirFunc> = ctx
         .funcs
         .into_iter()
@@ -3725,6 +3844,7 @@ fn assemble(
         bindings,
         reified_functions,
         reified_classes,
+        reflections,
     })
 }
 
@@ -5330,10 +5450,14 @@ fn resolve_class(
         Some(_) => type_names.is_empty(),
         None => true,
     };
+    let reflection_descriptor = matches!(
+        native_repr,
+        Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+    );
     let valid_native_shape = native_repr.is_none()
         || valid_native_layout
             && valid_native_arity
-            && class.fields.is_empty()
+            && (reflection_descriptor || class.fields.is_empty())
             && !class.methods.iter().any(|method| method.name == "init");
     if !valid_native_shape {
         return Err(Diagnostic::new(

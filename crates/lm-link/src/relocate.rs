@@ -3,8 +3,8 @@
 use crate::arena::{CodeNamespace, Merged, NamespaceBuild};
 use crate::env::{fail, LinkError};
 use crate::reloc_tables::{
-    reloc_bounds, reloc_class, reloc_conformance, reloc_func, reloc_interface, reloc_row,
-    reloc_slot_contract, reloc_slot_target, reloc_type, Reloc,
+    reloc_bounds, reloc_class, reloc_conformance, reloc_func, reloc_interface, reloc_reflection,
+    reloc_row, reloc_slot_contract, reloc_slot_target, reloc_type, Reloc,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -55,6 +55,7 @@ pub(crate) fn relocated_exports(module: &Module, reloc: &Reloc) -> Result<Vec<Ex
             Ok(Export {
                 kind: export.kind,
                 name: export.name.clone(),
+                source: export.source,
                 def,
                 ctor,
                 constant: export.constant.clone(),
@@ -365,6 +366,7 @@ fn relocate(
         interfaces,
         funcs: vec![u32::MAX; module.funcs.len()],
         slots: Vec::with_capacity(module.slots.len()),
+        reflections: Vec::with_capacity(module.reflections.len()),
     };
     // The function map resolves each imported declaration to one
     // provider definition. Each local function gets one arena entry.
@@ -434,6 +436,11 @@ fn relocate(
             }
         };
         reloc.slots.push(merged_slot);
+    }
+    for source in &module.reflections {
+        let index = merged.reflections.len() as u32;
+        merged.reflections.push(reloc_reflection(source, &reloc));
+        reloc.reflections.push(index);
     }
     // Fill the created definitions, and prove that every shared one
     // really is the definition its hash claims.

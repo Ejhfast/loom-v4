@@ -19,6 +19,7 @@ fn importing_module(pin: [u8; 32]) -> Module {
         class_bounds: vec![],
         func_bounds: vec![vec![], vec![]],
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+        reflections: vec![],
         imports: vec![Import {
             module: "dep.math".to_string(),
             name: "add".to_string(),
@@ -102,6 +103,7 @@ fn the_container_round_trips_imports_and_exports() {
         def: 1,
         ctor: lm_bytecode::NO_CTOR,
         constant: None,
+        source: true,
     });
     let bytes = lm_bytecode::encode(&module);
     let back = lm_bytecode::decode(&bytes).expect("decodes");

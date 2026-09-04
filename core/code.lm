@@ -12,6 +12,22 @@ end
 final class ClassCode
 end
 
+# Opaque descriptors for exact source definitions.
+frozen class ModuleCode
+  _module: Int = 0
+end
+
+frozen class DeclarationCode
+  _module: Int = 0
+  _declaration: Int = 0
+end
+
+frozen class MemberCode
+  _owner: Int = 0
+  _selector: Int = 0
+  _function: Int = 0
+end
+
 final class DefinitionIdentity
   module_name: String
   qualified_key: String

@@ -904,6 +904,12 @@ impl<'o> FnChecker<'o> {
                 recv.span,
             ));
         };
+        if matches!(
+            ctx.classes[class as usize].native_repr,
+            Some(NativeRepr::ModuleCode | NativeRepr::DeclarationCode | NativeRepr::MemberCode)
+        ) {
+            return Err(unknown_field(ctx, class, field, field_span));
+        }
         let fidx = ctx
             .find_field(class, field)
             .ok_or_else(|| unknown_field(ctx, class, field, field_span))?;

@@ -294,10 +294,16 @@ pub struct CoreLayout {
     pub regex: Option<u32>,
     /// The core method table of regular-expression matches.
     pub regex_match: Option<u32>,
+    /// The opaque descriptor of one verified module.
+    pub module_code: Option<u32>,
+    /// The opaque descriptor of one module declaration.
+    pub declaration_code: Option<u32>,
+    /// The opaque descriptor of one class member.
+    pub member_code: Option<u32>,
 }
 
 /// The labels of the pinned core definitions, in pin-file order.
-pub const PINNED_LABELS: [&str; 258] = [
+pub const PINNED_LABELS: [&str; 261] = [
     "Option",
     "Option.Some",
     "Option.None",
@@ -556,6 +562,9 @@ pub const PINNED_LABELS: [&str; 258] = [
     "Regex",
     "RegexMatch",
     "Path",
+    "ModuleCode",
+    "DeclarationCode",
+    "MemberCode",
 ];
 
 /// The core role of immediate integer values.
@@ -813,6 +822,12 @@ pub const ROLE_REGEX: usize = 255;
 pub const ROLE_REGEX_MATCH: usize = 256;
 /// The core role of portable filesystem paths.
 pub const ROLE_PATH: usize = 257;
+/// The core role of verified module descriptors.
+pub const ROLE_MODULE_CODE: usize = 258;
+/// The core role of declaration descriptors.
+pub const ROLE_DECLARATION_CODE: usize = 259;
+/// The core role of member descriptors.
+pub const ROLE_MEMBER_CODE: usize = 260;
 
 /// The tuple carrier role for one supported arity.
 pub fn tuple_role(arity: usize) -> Option<usize> {
@@ -1122,6 +1137,9 @@ fn slot_mut<'a>(layout: &'a mut CoreLayout, label: &str) -> &'a mut Option<u32> 
         "Regex" => &mut layout.regex,
         "RegexMatch" => &mut layout.regex_match,
         "Path" => &mut layout.path,
+        "ModuleCode" => &mut layout.module_code,
+        "DeclarationCode" => &mut layout.declaration_code,
+        "MemberCode" => &mut layout.member_code,
         _ => unreachable!("only known labels enter the map"),
     }
 }

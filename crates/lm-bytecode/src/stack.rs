@@ -367,11 +367,18 @@ fn extended_stack_effect(
         ExtendedInstr::MapPutText { discard: true, .. } => (3, 0),
         ExtendedInstr::MapInternTextRange => (4, 1),
         ExtendedInstr::MakeCallback { captures, .. } => (captures as usize, 1),
-        ExtendedInstr::FunctionCode { .. } | ExtendedInstr::ClassCode { .. } => (0, 1),
+        ExtendedInstr::FunctionCode { .. }
+        | ExtendedInstr::ClassCode { .. }
+        | ExtendedInstr::ModuleCode { .. } => (0, 1),
         ExtendedInstr::CodeSource { .. }
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::FaultSite { .. }
         | ExtendedInstr::FaultTrace { .. }
+        | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionMembers
+        | ExtendedInstr::ReflectionName
+        | ExtendedInstr::ReflectionDeclarationKind
+        | ExtendedInstr::ReflectionMemberKind
         | ExtendedInstr::SendSlot { .. }
         | ExtendedInstr::SyntaxTreeRoot
         | ExtendedInstr::SyntaxKind

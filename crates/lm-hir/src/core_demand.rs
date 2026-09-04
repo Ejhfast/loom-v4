@@ -336,6 +336,7 @@ impl CoreDemand {
                 if name == "codeof" {
                     self.name("FunctionCode");
                     self.name("ClassCode");
+                    self.name("ModuleCode");
                 }
                 if let Some((group, member)) = self.sys_members.get(name).cloned() {
                     self.add_sys_member(bundle, &group, &member);
@@ -645,6 +646,9 @@ impl CoreDemand {
                 self.add_names(&["CodeError", "Result", "FunctionCode"])
             }
             "class_code" => self.add_names(&["CodeError", "Result", "ClassCode"]),
+            "declarations" => self.add_names(&["List", "DeclarationCode"]),
+            "members" => self.add_names(&["List", "MemberCode"]),
+            "name" | "kind" => self.add_names(&["String"]),
             "dynamic_entry" => self.add_names(&["CodeError", "Result", "DynValue", "FunctionDef"]),
             "entry" | "function" | "entry_binding" | "function_binding" => {
                 self.add_names(&["CodeError", "Result", "FunctionDef", "FunctionBinding"])

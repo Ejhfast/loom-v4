@@ -921,6 +921,7 @@ mod execution;
 mod heap;
 pub(crate) use heap::BorrowedStringKey;
 mod interpreter;
+mod reflection;
 mod regex;
 pub(crate) use regex::{build_regex_match, regex_group_text};
 mod stack;

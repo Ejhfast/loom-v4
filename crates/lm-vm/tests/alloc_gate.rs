@@ -80,6 +80,7 @@ fn loop_module() -> Module {
         imports: vec![],
         slots: vec![],
         core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+        reflections: vec![],
         entry: 0,
         exports: vec![],
         bindings: vec![],

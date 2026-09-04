@@ -56,7 +56,8 @@
 
 use crate::hash::hash256;
 use crate::{
-    BcClassKind, BcRow, BcType, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT, VERSION,
+    BcClassKind, BcRow, BcType, ExportKind, ExtendedInstr, Instr, Module, NativeInstr, NO_PARENT,
+    NO_REFLECTION_DEF, VERSION,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -67,7 +68,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 /// semantics, the canonical identity encoding, the hash domains, or
 /// the lowering ABI. The operation manifest is covered separately by
 /// `lm_abi::manifest_digest()`, which every definition hash includes.
-pub const COMPILER_ABI_VERSION: u32 = 56;
+pub const COMPILER_ABI_VERSION: u32 = 57;
 
 /// The refinement work budget of one component.
 ///
@@ -767,6 +768,34 @@ fn preflight(module: &Module, bundle: &lm_abi::AbiBundle) -> Result<(), Identity
             }
         }
     }
+    for (module_index, reflection) in module.reflections.iter().enumerate() {
+        for (declaration_index, declaration) in reflection.declarations.iter().enumerate() {
+            let valid = match declaration.kind {
+                ExportKind::Function => {
+                    (declaration.def as usize) < s.funcs && declaration.callable == declaration.def
+                }
+                ExportKind::Class | ExportKind::Enum => {
+                    (declaration.def as usize) < s.classes
+                        && (declaration.callable == NO_REFLECTION_DEF
+                            || (declaration.callable as usize) < s.funcs)
+                }
+                ExportKind::Interface => {
+                    (declaration.def as usize) < module.interfaces.len()
+                        && declaration.callable == NO_REFLECTION_DEF
+                }
+                ExportKind::Constant => {
+                    declaration.def == NO_REFLECTION_DEF
+                        && declaration.callable == NO_REFLECTION_DEF
+                }
+                ExportKind::EnumCase => false,
+            };
+            if !valid {
+                return Err(fail(format!(
+                    "reflection module {module_index}: declaration {declaration_index} is invalid"
+                )));
+            }
+        }
+    }
     if module.entry as usize >= s.funcs {
         return Err(fail("the entry index is out of range"));
     }
@@ -1143,6 +1172,11 @@ fn preflight_extended(
                 return Err(bad("class code target"));
             }
         }
+        ExtendedInstr::ModuleCode { module: reflection } => {
+            if *reflection as usize >= module.reflections.len() {
+                return Err(bad("reflection module"));
+            }
+        }
         ExtendedInstr::OptionSome { ty }
         | ExtendedInstr::OptionNone { ty }
         | ExtendedInstr::OptionPayload { ty }
@@ -1168,6 +1202,11 @@ fn preflight_extended(
             }
         }
         ExtendedInstr::AsCallback
+        | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionMembers
+        | ExtendedInstr::ReflectionName
+        | ExtendedInstr::ReflectionDeclarationKind
+        | ExtendedInstr::ReflectionMemberKind
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
@@ -1460,6 +1499,29 @@ impl Graph {
                                 list.push(s.func_node(*func));
                                 called[*func as usize] = true;
                             }
+                            ExtendedInstr::ModuleCode { module: reflection } => {
+                                for declaration in
+                                    &module.reflections[*reflection as usize].declarations
+                                {
+                                    match declaration.kind {
+                                        ExportKind::Function => {
+                                            list.push(s.func_node(declaration.def));
+                                            called[declaration.def as usize] = true;
+                                        }
+                                        ExportKind::Class | ExportKind::Enum => {
+                                            list.push(s.class_node(declaration.def));
+                                            if declaration.callable != NO_REFLECTION_DEF {
+                                                list.push(s.func_node(declaration.callable));
+                                                called[declaration.callable as usize] = true;
+                                            }
+                                        }
+                                        ExportKind::Interface | ExportKind::Constant => {}
+                                        ExportKind::EnumCase => {
+                                            unreachable!("preflight rejects reflected enum cases")
+                                        }
+                                    }
+                                }
+                            }
                             ExtendedInstr::OptionSome { ty }
                             | ExtendedInstr::OptionNone { ty }
                             | ExtendedInstr::OptionPayload { ty }
@@ -1693,6 +1755,15 @@ impl<'a> Resolver<'a> {
     /// so it never reads a class hash and never makes a cycle.
     fn class_key(&self, c: u32) -> &str {
         &self.module.classes[c as usize].key
+    }
+
+    fn class_ident(&self, c: u32) -> IdentRef {
+        let node = self.graph.space.class_node(c);
+        if self.in_comp(node) {
+            self.member_ref(node)
+        } else {
+            IdentRef::Hash(self.state.class_hash[c as usize].expect("class hash scheduled"))
+        }
     }
 
     fn interface_key(&self, interface: u32) -> &str {
@@ -2414,6 +2485,12 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::RegexCaptures { .. } => 0x111,
             ExtendedInstr::RegexMatchGroup { .. } => 0x112,
             ExtendedInstr::RegexMatchNamed { .. } => 0x113,
+            ExtendedInstr::ModuleCode { .. } => 0x11a,
+            ExtendedInstr::ReflectionDeclarations => 0x11b,
+            ExtendedInstr::ReflectionMembers => 0x11c,
+            ExtendedInstr::ReflectionName => 0x11d,
+            ExtendedInstr::ReflectionDeclarationKind => 0x11e,
+            ExtendedInstr::ReflectionMemberKind => 0x11f,
         }
     }
 
@@ -2766,6 +2843,9 @@ impl<'a> Resolver<'a> {
             ExtendedInstr::ClassCode { class } => {
                 write_str(out, self.class_key(*class));
             }
+            ExtendedInstr::ModuleCode { module } => {
+                self.reflection_module_bytes(out, *module);
+            }
             ExtendedInstr::OptionSome { ty }
             | ExtendedInstr::OptionNone { ty }
             | ExtendedInstr::OptionPayload { ty }
@@ -2787,6 +2867,11 @@ impl<'a> Resolver<'a> {
                 out.push(u8::from(*discard));
             }
             ExtendedInstr::AsCallback
+            | ExtendedInstr::ReflectionDeclarations
+            | ExtendedInstr::ReflectionMembers
+            | ExtendedInstr::ReflectionName
+            | ExtendedInstr::ReflectionDeclarationKind
+            | ExtendedInstr::ReflectionMemberKind
             | ExtendedInstr::CodeDefinition
             | ExtendedInstr::MapInternTextRange
             | ExtendedInstr::ListEpoch
@@ -2841,6 +2926,42 @@ impl<'a> Resolver<'a> {
             }
             ExtendedInstr::LoadSlot { slot } | ExtendedInstr::SendSlot { slot } => {
                 self.slot_contract_bytes(out, *slot, false);
+            }
+        }
+    }
+
+    fn reflection_module_bytes(&self, out: &mut Vec<u8>, module: u32) {
+        let reflection = &self.module.reflections[module as usize];
+        write_str(out, &reflection.name);
+        out.extend_from_slice(&(reflection.declarations.len() as u32).to_le_bytes());
+        for declaration in &reflection.declarations {
+            out.push(declaration.kind.tag());
+            write_str(out, &declaration.name);
+            match declaration.kind {
+                ExportKind::Function => {
+                    write_ident(out, &self.func_ident(declaration.def));
+                }
+                ExportKind::Class | ExportKind::Enum => {
+                    write_str(out, self.class_key(declaration.def));
+                    write_ident(out, &self.class_ident(declaration.def));
+                    if declaration.callable == NO_REFLECTION_DEF {
+                        out.push(0);
+                    } else {
+                        out.push(1);
+                        write_ident(out, &self.func_ident(declaration.callable));
+                    }
+                }
+                ExportKind::Interface => {
+                    let digest = match self.interface_hashes {
+                        Some(hashes) => hashes[declaration.def as usize],
+                        None => self.interface_digest(declaration.def),
+                    };
+                    out.extend_from_slice(&digest);
+                }
+                ExportKind::Constant => {}
+                ExportKind::EnumCase => {
+                    unreachable!("preflight rejects reflected enum cases")
+                }
             }
         }
     }
@@ -3591,6 +3712,31 @@ pub fn module_identity_with_bundle(
         out.extend_from_slice(&(slot.len() as u32).to_le_bytes());
         out.extend_from_slice(&slot);
     }
+    let mut reflections: Vec<Vec<u8>> = (0..module.reflections.len())
+        .map(|index| {
+            let mut bytes = Vec::new();
+            resolver.reflection_module_bytes(&mut bytes, index as u32);
+            bytes
+        })
+        .collect();
+    reflections.sort();
+    out.extend_from_slice(&(reflections.len() as u32).to_le_bytes());
+    for reflection in reflections {
+        out.extend_from_slice(&(reflection.len() as u32).to_le_bytes());
+        out.extend_from_slice(&reflection);
+    }
+    let mut source_markers: Vec<(u8, &str, bool)> = module
+        .exports
+        .iter()
+        .map(|export| (export.kind.tag(), export.name.as_str(), export.source))
+        .collect();
+    source_markers.sort();
+    out.extend_from_slice(&(source_markers.len() as u32).to_le_bytes());
+    for (kind, name, source) in source_markers {
+        out.push(kind);
+        write_str(&mut out, name);
+        out.push(u8::from(source));
+    }
     let mut exports: Vec<(u8, &str, [u8; 32])> = Vec::new();
     for (c, class) in module.classes.iter().enumerate() {
         exports.push((0, &class.name, class_hashes[c]));
@@ -3811,6 +3957,7 @@ mod slot_tests {
                 initial: Some(SlotTarget::Function(1)),
             }],
             core_roles: [NO_ROLE; crate::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![
                 Func {

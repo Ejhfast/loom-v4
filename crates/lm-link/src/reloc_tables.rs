@@ -3,8 +3,8 @@
 use crate::env::{fail, LinkError};
 use lm_bytecode::{
     BcAssociated, BcCallableContract, BcClass, BcConformance, BcInterface, BcInterfaceMethod,
-    BcInterfaceUse, BcRow, BcType, CodeTables, ExtendedInstr, Func, Instr, SlotContract, SlotSpec,
-    SlotTarget, NO_PARENT,
+    BcInterfaceUse, BcRow, BcType, CodeTables, ExtendedInstr, Func, Instr, ReflectionDeclaration,
+    ReflectionModule, SlotContract, SlotSpec, SlotTarget, NO_PARENT, NO_REFLECTION_DEF,
 };
 
 /// One module's table relocation maps.
@@ -19,6 +19,7 @@ pub(crate) struct Reloc {
     pub(crate) interfaces: Vec<u32>,
     pub(crate) funcs: Vec<u32>,
     pub(crate) slots: Vec<u32>,
+    pub(crate) reflections: Vec<u32>,
 }
 
 pub(crate) fn reloc_row(row: &[BcRow]) -> Vec<BcRow> {
@@ -156,6 +157,40 @@ pub(crate) fn reloc_slot_target(source: SlotTarget, reloc: &Reloc) -> SlotTarget
     }
 }
 
+pub(crate) fn reloc_reflection(source: &ReflectionModule, reloc: &Reloc) -> ReflectionModule {
+    ReflectionModule {
+        name: source.name.clone(),
+        declarations: source
+            .declarations
+            .iter()
+            .map(|declaration| {
+                let def = match declaration.kind {
+                    lm_bytecode::ExportKind::Function => reloc.funcs[declaration.def as usize],
+                    lm_bytecode::ExportKind::Class | lm_bytecode::ExportKind::Enum => {
+                        reloc.classes[declaration.def as usize]
+                    }
+                    lm_bytecode::ExportKind::Interface => {
+                        reloc.interfaces[declaration.def as usize]
+                    }
+                    lm_bytecode::ExportKind::Constant => NO_REFLECTION_DEF,
+                    lm_bytecode::ExportKind::EnumCase => unreachable!("the verifier rejects cases"),
+                };
+                let callable = if declaration.callable == NO_REFLECTION_DEF {
+                    NO_REFLECTION_DEF
+                } else {
+                    reloc.funcs[declaration.callable as usize]
+                };
+                ReflectionDeclaration {
+                    kind: declaration.kind,
+                    name: declaration.name.clone(),
+                    def,
+                    callable,
+                }
+            })
+            .collect(),
+    }
+}
+
 pub(crate) fn reloc_interface(source: &BcInterface, reloc: &Reloc) -> BcInterface {
     BcInterface {
         name: source.name.clone(),
@@ -260,6 +295,10 @@ impl UnitRelocation {
     pub fn slots(&self) -> &[u32] {
         &self.0.slots
     }
+
+    pub fn reflections(&self) -> &[u32] {
+        &self.0.reflections
+    }
 }
 
 /// Exact dense-index maps between two publications of one graph.
@@ -275,6 +314,7 @@ pub struct CodeRelocation {
     interfaces: Vec<Option<u32>>,
     functions: Vec<Option<u32>>,
     slots: Vec<Option<u32>>,
+    reflections: Vec<Option<u32>>,
 }
 
 impl CodeRelocation {
@@ -290,6 +330,7 @@ impl CodeRelocation {
             interfaces: vec![None; source.interfaces.len()],
             functions: vec![None; source.funcs.len()],
             slots: vec![None; source.slots.len()],
+            reflections: vec![None; source.reflections.len()],
         }
     }
 
@@ -306,6 +347,7 @@ impl CodeRelocation {
             interfaces: Vec::new(),
             functions: Vec::new(),
             slots: Vec::new(),
+            reflections: Vec::new(),
         }
     }
 
@@ -364,6 +406,12 @@ impl CodeRelocation {
             "function",
         )?;
         merge_index_map(&mut self.slots, source.slots(), target.slots(), "slot")?;
+        merge_index_map(
+            &mut self.reflections,
+            source.reflections(),
+            target.reflections(),
+            "reflection module",
+        )?;
         Ok(())
     }
 
@@ -388,6 +436,11 @@ impl CodeRelocation {
         merge_optional_map(&mut self.interfaces, &other.interfaces, "interface")?;
         merge_optional_map(&mut self.functions, &other.functions, "function")?;
         merge_optional_map(&mut self.slots, &other.slots, "slot")?;
+        merge_optional_map(
+            &mut self.reflections,
+            &other.reflections,
+            "reflection module",
+        )?;
         Ok(())
     }
 
@@ -461,6 +514,14 @@ impl CodeRelocation {
             return Some(source);
         }
         map_index(&self.slots, source)
+    }
+
+    #[inline]
+    pub fn reflection(&self, source: u32) -> Option<u32> {
+        if self.identity {
+            return Some(source);
+        }
+        map_index(&self.reflections, source)
     }
 }
 
@@ -833,6 +894,9 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
         ExtendedInstr::ClassCode { class } => ExtendedInstr::ClassCode {
             class: reloc.classes[*class as usize],
         },
+        ExtendedInstr::ModuleCode { module } => ExtendedInstr::ModuleCode {
+            module: reloc.reflections[*module as usize],
+        },
         ExtendedInstr::CodeSource { ty } => ExtendedInstr::CodeSource {
             ty: reloc.types[*ty as usize],
         },
@@ -907,6 +971,11 @@ pub(crate) fn reloc_extended(instr: &ExtendedInstr, reloc: &Reloc) -> ExtendedIn
             slot: reloc.slots[*slot as usize],
         },
         ExtendedInstr::AsCallback
+        | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionMembers
+        | ExtendedInstr::ReflectionName
+        | ExtendedInstr::ReflectionDeclarationKind
+        | ExtendedInstr::ReflectionMemberKind
         | ExtendedInstr::MapInternTextRange
         | ExtendedInstr::ListEpoch
         | ExtendedInstr::ListIterLen

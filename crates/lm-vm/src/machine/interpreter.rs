@@ -257,6 +257,24 @@ impl Machine {
                     origin: self.current_code_origin(module),
                 });
             }
+            ExtendedInstr::ModuleCode { module: reflection } => {
+                self.exec_module_code(module, reflection)?;
+            }
+            ExtendedInstr::ReflectionDeclarations => {
+                self.exec_reflection_declarations(module)?;
+            }
+            ExtendedInstr::ReflectionMembers => {
+                self.exec_reflection_members(module)?;
+            }
+            ExtendedInstr::ReflectionName => {
+                self.exec_reflection_name(module)?;
+            }
+            ExtendedInstr::ReflectionDeclarationKind => {
+                self.exec_reflection_declaration_kind(module)?;
+            }
+            ExtendedInstr::ReflectionMemberKind => {
+                self.exec_reflection_member_kind(module)?;
+            }
             ExtendedInstr::CodeSource { ty } => {
                 self.exec_code_source(module, envs, ty)?;
             }

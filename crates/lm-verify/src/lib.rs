@@ -559,6 +559,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],
@@ -634,6 +635,7 @@ mod tests {
                 ty: TY_INT,
                 value: lm_bytecode::ConstValue::String("wrong".to_string()),
             }),
+            source: true,
         });
         let error = verify_module(&module).expect_err("the wrong constant value must reject");
         assert!(
@@ -655,6 +657,7 @@ mod tests {
             def: lm_bytecode::NO_CTOR,
             ctor: lm_bytecode::NO_CTOR,
             constant: Some(lm_bytecode::Constant { ty: TY_INT, value }),
+            source: true,
         });
         let error = verify_module(&module).expect_err("the deep value must reject");
         assert!(error.message.contains("export table 0"), "{error}");
@@ -711,6 +714,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],
@@ -786,6 +790,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],
@@ -1850,6 +1855,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],

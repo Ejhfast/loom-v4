@@ -144,10 +144,23 @@ impl<'m> Ctx<'m> {
             self.core.function_def,
             self.core.class_def,
             self.core.dyn_value,
+            self.core.module_code,
+            self.core.declaration_code,
+            self.core.member_code,
         ]
         .into_iter()
         .chain(self.core.tuples)
         .any(|candidate| candidate == Some(class))
+    }
+
+    /// True when one class is an opaque reflection descriptor.
+    pub(crate) fn is_reflection_descriptor_class(&self, class: u32) -> bool {
+        [
+            self.core.module_code,
+            self.core.declaration_code,
+            self.core.member_code,
+        ]
+        .contains(&Some(class))
     }
 
     /// Return the canonical self type of one class.

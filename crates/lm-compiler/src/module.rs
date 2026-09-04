@@ -950,6 +950,7 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::Bool(_)
         | HExprKind::Local(_)
         | HExprKind::Capture(_)
+        | HExprKind::ModuleCode { .. }
         | HExprKind::OpConst(_) => {}
         HExprKind::Not(value)
         | HExprKind::Neg(value)
@@ -959,6 +960,11 @@ fn collect_dependency_expr(expr: &HExpr, out: &mut DependencyReferences) {
         | HExprKind::CastType { value, .. }
         | HExprKind::CodeSource { code: value, .. }
         | HExprKind::CodeDefinition { code: value }
+        | HExprKind::ReflectionDeclarations { module: value }
+        | HExprKind::ReflectionMembers { declaration: value }
+        | HExprKind::ReflectionName { descriptor: value }
+        | HExprKind::ReflectionDeclarationKind { declaration: value }
+        | HExprKind::ReflectionMemberKind { member: value }
         | HExprKind::CallArgs { call: value }
         | HExprKind::FaultCodeGet { fault: value }
         | HExprKind::FaultSiteGet { fault: value }

@@ -14,7 +14,8 @@ use lm_bytecode::artifact::{Artifact, ArtifactId, LinkUnit, CORE_MODULE_PATH};
 use lm_bytecode::identity::ModuleIdentity;
 use lm_bytecode::{
     BcClass, BcClassKind, BcConformance, BcInterface, BcInterfaceUse, BcRow, BcType, CodeTable,
-    CodeTables, Export, Func, FuncBinding, Module, SlotSpec, SlotTarget, TypeApp, NO_CLASS,
+    CodeTables, Export, Func, FuncBinding, Module, ReflectionModule, SlotSpec, SlotTarget, TypeApp,
+    NO_CLASS,
 };
 
 /// One resolved code namespace.
@@ -371,6 +372,7 @@ pub(crate) fn prepare_definition_export(
                             .key
                             .rsplit_once('.')
                             .map_or(binding.key.clone(), |(_, name)| name.to_string()),
+                        source: false,
                         def: function,
                         ctor: lm_bytecode::NO_CTOR,
                         constant: None,
@@ -411,6 +413,7 @@ pub(crate) fn prepare_definition_export(
                 .unwrap_or_else(|| Export {
                     kind,
                     name: class_def.name.clone(),
+                    source: false,
                     def: class,
                     ctor: constructor,
                     constant: None,
@@ -849,6 +852,7 @@ fn merged_matches_namespace(merged: &Merged, namespace: &CodeNamespace) -> bool 
         && merged.funcs.len() == tables.funcs.len()
         && merged.func_bounds.len() == tables.func_bounds.len()
         && merged.slots.len() == tables.slots.len()
+        && merged.reflections.len() == tables.reflections.len()
         && merged.dispatch.len() == namespace.dispatch.len()
 }
 
@@ -893,6 +897,8 @@ pub(crate) struct Merged {
     /// Late-bound slot contracts, merged by stable key and contract.
     pub(crate) slots: CodeTable<SlotSpec>,
     pub(crate) slot_by_contract: Arc<HashMap<SlotContractKey, u32>>,
+    /// Exact source module surfaces used by reflection.
+    pub(crate) reflections: CodeTable<ReflectionModule>,
     /// Optional source data after table relocation.
     pub(crate) debug: Arc<lm_bytecode::debug::DebugInfo>,
     /// One permanent relocation for each exact unit.
@@ -1084,6 +1090,7 @@ pub(crate) fn tables_of(merged: &Merged) -> CodeTables {
         selectors: merged.selectors.clone(),
         apps: merged.apps.clone(),
         slots: merged.slots.clone(),
+        reflections: merged.reflections.clone(),
         classes: merged.classes.clone(),
         class_bounds: merged.class_bounds.clone(),
         interfaces: merged.interfaces.clone(),

@@ -12,8 +12,8 @@ use crate::hir::*;
 use lm_bytecode::{
     stack_effect, BcAssociated, BcCallableContract, BcClass, BcClassKind, BcConformance,
     BcConformancePremise, BcInterface, BcInterfaceMethod, BcInterfaceUse, BcRow, BcType,
-    ExtendedInstr, Func, Instr, Module, SlotContract, SlotSpec, SlotTarget, StackEffectTables,
-    TypeApp, NO_APP, NO_PARENT,
+    ExtendedInstr, Func, Instr, Module, ReflectionDeclaration, ReflectionModule, SlotContract,
+    SlotSpec, SlotTarget, StackEffectTables, TypeApp, NO_APP, NO_PARENT, NO_REFLECTION_DEF,
 };
 use lm_source::ast::BinOp;
 use lm_types::{
@@ -613,6 +613,7 @@ pub fn lower_module_with_linkage(
         .map(|e| lm_bytecode::Export {
             kind: e.kind,
             name: e.name.clone(),
+            source: e.source,
             def: e.def,
             ctor: if e.kind.is_class() {
                 new_base + e.def
@@ -626,6 +627,7 @@ pub fn lower_module_with_linkage(
         exports.push(lm_bytecode::Export {
             kind: lm_bytecode::ExportKind::Constant,
             name: constant.name.clone(),
+            source: true,
             def: lm_bytecode::NO_CTOR,
             ctor: lm_bytecode::NO_CTOR,
             constant: Some(lm_bytecode::Constant {
@@ -634,6 +636,41 @@ pub fn lower_module_with_linkage(
             }),
         });
     }
+    let reflections = hir
+        .reflections
+        .iter()
+        .map(|module| ReflectionModule {
+            name: module.name.clone(),
+            declarations: module
+                .declarations
+                .iter()
+                .map(|declaration| {
+                    let def = match declaration.def {
+                        Some(HirReflectionDef::Function(function)) => function,
+                        Some(HirReflectionDef::Class(class)) => class,
+                        Some(HirReflectionDef::Interface(interface)) => interface,
+                        None => NO_REFLECTION_DEF,
+                    };
+                    let callable = declaration.callable.unwrap_or_else(|| {
+                        if declaration.kind == lm_bytecode::ExportKind::Class {
+                            match declaration.def {
+                                Some(HirReflectionDef::Class(class)) => new_base + class,
+                                _ => NO_REFLECTION_DEF,
+                            }
+                        } else {
+                            NO_REFLECTION_DEF
+                        }
+                    });
+                    ReflectionDeclaration {
+                        kind: declaration.kind,
+                        name: declaration.name.clone(),
+                        def,
+                        callable,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
     // The generated constructor of a class takes a binding derived
     // from the qualified key of that class. The class structural hash
     // covers no constructor, because the constructor is a function
@@ -663,6 +700,7 @@ pub fn lower_module_with_linkage(
         imports,
         slots: Vec::new(),
         core_roles: hir.core_roles,
+        reflections,
         classes,
         funcs,
         entry: hir.entry as u32,
@@ -1841,6 +1879,42 @@ impl<'a, 'm> Lowerer<'a, 'm> {
             HExprKind::ClassCode { class } => {
                 self.m.bc_ty(expr.ty);
                 self.emit(extended(ExtendedInstr::ClassCode { class: *class }));
+            }
+            HExprKind::ModuleCode { module } => {
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ModuleCode { module: *module }));
+            }
+            HExprKind::ReflectionDeclarations { module } => {
+                if !self.lower_operand(module) {
+                    return;
+                }
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ReflectionDeclarations));
+            }
+            HExprKind::ReflectionMembers { declaration } => {
+                if !self.lower_operand(declaration) {
+                    return;
+                }
+                self.m.bc_ty(expr.ty);
+                self.emit(extended(ExtendedInstr::ReflectionMembers));
+            }
+            HExprKind::ReflectionName { descriptor } => {
+                if !self.lower_operand(descriptor) {
+                    return;
+                }
+                self.emit(extended(ExtendedInstr::ReflectionName));
+            }
+            HExprKind::ReflectionDeclarationKind { declaration } => {
+                if !self.lower_operand(declaration) {
+                    return;
+                }
+                self.emit(extended(ExtendedInstr::ReflectionDeclarationKind));
+            }
+            HExprKind::ReflectionMemberKind { member } => {
+                if !self.lower_operand(member) {
+                    return;
+                }
+                self.emit(extended(ExtendedInstr::ReflectionMemberKind));
             }
             HExprKind::CodeSource { code, .. } => {
                 if !self.lower_operand(code) {
@@ -3116,10 +3190,15 @@ fn shift_expr_in_place(expr: &mut HExpr, base: u32, max: &mut u32) {
         | HExprKind::Bool(_)
         | HExprKind::Capture(_)
         | HExprKind::FunctionCode { .. }
-        | HExprKind::ClassCode { .. } => {}
-        HExprKind::CodeSource { code, .. } | HExprKind::CodeDefinition { code } => {
-            shift_expr_in_place(code, base, max)
-        }
+        | HExprKind::ClassCode { .. }
+        | HExprKind::ModuleCode { .. } => {}
+        HExprKind::CodeSource { code, .. }
+        | HExprKind::CodeDefinition { code }
+        | HExprKind::ReflectionDeclarations { module: code }
+        | HExprKind::ReflectionMembers { declaration: code }
+        | HExprKind::ReflectionName { descriptor: code }
+        | HExprKind::ReflectionDeclarationKind { declaration: code }
+        | HExprKind::ReflectionMemberKind { member: code } => shift_expr_in_place(code, base, max),
         HExprKind::Not(inner) | HExprKind::Neg(inner) => shift_expr_in_place(inner, base, max),
         HExprKind::Binary { left, right, .. }
         | HExprKind::And(left, right)
@@ -3566,6 +3645,9 @@ fn lower_new_func(m: &mut ModLowerer<'_>, class: &HirClass, cidx: u32) -> Func {
                 | NativeRepr::FunctionBinding
                 | NativeRepr::ClassBinding
                 | NativeRepr::DynValue
+                | NativeRepr::ModuleCode
+                | NativeRepr::DeclarationCode
+                | NativeRepr::MemberCode
                 | NativeRepr::Regex
                 | NativeRepr::RegexMatch
         )
@@ -4316,6 +4398,12 @@ fn extended_instr_text(instr: &ExtendedInstr) -> String {
         }
         ExtendedInstr::FunctionCode { func } => format!("FunctionCode fn{func}"),
         ExtendedInstr::ClassCode { class } => format!("ClassCode class{class}"),
+        ExtendedInstr::ModuleCode { module } => format!("ModuleCode module{module}"),
+        ExtendedInstr::ReflectionDeclarations => "ReflectionDeclarations".to_string(),
+        ExtendedInstr::ReflectionMembers => "ReflectionMembers".to_string(),
+        ExtendedInstr::ReflectionName => "ReflectionName".to_string(),
+        ExtendedInstr::ReflectionDeclarationKind => "ReflectionDeclarationKind".to_string(),
+        ExtendedInstr::ReflectionMemberKind => "ReflectionMemberKind".to_string(),
         ExtendedInstr::CodeSource { ty } => format!("CodeSource ty{ty}"),
         ExtendedInstr::CodeDefinition => "CodeDefinition".to_string(),
         ExtendedInstr::FaultSite { ty } => format!("FaultSite ty{ty}"),

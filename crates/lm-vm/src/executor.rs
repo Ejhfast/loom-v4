@@ -1289,6 +1289,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -1372,6 +1373,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -1473,6 +1475,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -1577,6 +1580,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),
@@ -1650,6 +1654,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![],
             funcs: vec![Func {
                 name: "main".to_string(),

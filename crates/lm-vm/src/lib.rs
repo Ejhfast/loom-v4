@@ -241,6 +241,10 @@ impl lm_bytecode::CodeTableView for NamespaceRuntime {
         lm_bytecode::CodeTableRef::Chunks(&self.tables.slots)
     }
 
+    fn reflections(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::ReflectionModule> {
+        lm_bytecode::CodeTableRef::Chunks(&self.tables.reflections)
+    }
+
     fn funcs(&self) -> lm_bytecode::CodeTableRef<'_, lm_bytecode::Func> {
         lm_bytecode::CodeTableRef::Chunks(&self.tables.funcs)
     }
@@ -518,6 +522,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],
@@ -630,6 +635,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],
@@ -689,6 +695,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [lm_bytecode::NO_ROLE; lm_bytecode::CORE_ROLE_COUNT],
+            reflections: vec![],
             entry: 0,
             exports: vec![],
             bindings: vec![],

@@ -39,6 +39,8 @@ pub struct CoreIds {
 pub struct HirExport {
     pub kind: lm_bytecode::ExportKind,
     pub name: String,
+    /// True when this entry describes one top-level source declaration.
+    pub source: bool,
     /// The class index for a class-like export, the function index
     /// otherwise.
     pub def: u32,
@@ -63,6 +65,30 @@ pub enum HirImportDef {
     Ctor(u32),
     /// A compile-time constant has no runtime definition.
     Constant,
+}
+
+/// One relocated definition in a reflected source module.
+#[derive(Debug, Clone, Copy)]
+pub enum HirReflectionDef {
+    Function(u32),
+    Class(u32),
+    Interface(u32),
+}
+
+/// One source declaration in a reflected module.
+#[derive(Debug, Clone)]
+pub struct HirReflectionDeclaration {
+    pub kind: lm_bytecode::ExportKind,
+    pub name: String,
+    pub def: Option<HirReflectionDef>,
+    pub callable: Option<u32>,
+}
+
+/// One exact source module surface.
+#[derive(Debug, Clone)]
+pub struct HirReflectionModule {
+    pub name: String,
+    pub declarations: Vec<HirReflectionDeclaration>,
 }
 
 /// One import slot the module needs.
@@ -108,6 +134,8 @@ pub struct HirModule {
     pub reified_functions: BTreeSet<u32>,
     /// Local classes that enter the portable installation surface.
     pub reified_classes: BTreeSet<u32>,
+    /// Source module surfaces used by `codeof` expressions.
+    pub reflections: Vec<HirReflectionModule>,
 }
 
 /// One applied nominal interface before bytecode type interning.
@@ -223,6 +251,9 @@ pub enum NativeRepr {
     FunctionBinding,
     ClassBinding,
     DynValue,
+    ModuleCode,
+    DeclarationCode,
+    MemberCode,
     Regex,
     RegexMatch,
 }
@@ -637,6 +668,30 @@ pub enum HExprKind {
     ClassCode {
         class: u32,
     },
+    /// Describe one exact source module surface.
+    ModuleCode {
+        module: u32,
+    },
+    /// List one module's source declarations.
+    ReflectionDeclarations {
+        module: Box<HExpr>,
+    },
+    /// List one declaration's effective methods.
+    ReflectionMembers {
+        declaration: Box<HExpr>,
+    },
+    /// Read one reflection descriptor's source name.
+    ReflectionName {
+        descriptor: Box<HExpr>,
+    },
+    /// Read one declaration descriptor's kind.
+    ReflectionDeclarationKind {
+        declaration: Box<HExpr>,
+    },
+    /// Read one member descriptor's kind.
+    ReflectionMemberKind {
+        member: Box<HExpr>,
+    },
     /// Read optional source metadata from portable definition code.
     CodeSource {
         code: Box<HExpr>,
@@ -784,12 +839,18 @@ impl HExpr {
             | HExprKind::Capture(_)
             | HExprKind::FunctionCode { .. }
             | HExprKind::ClassCode { .. }
+            | HExprKind::ModuleCode { .. }
             | HExprKind::OpConst(_) => Flow::Normal,
             HExprKind::Not(value)
             | HExprKind::Neg(value)
             | HExprKind::AsCallback(value)
             | HExprKind::CodeSource { code: value, .. }
             | HExprKind::CodeDefinition { code: value }
+            | HExprKind::ReflectionDeclarations { module: value }
+            | HExprKind::ReflectionMembers { declaration: value }
+            | HExprKind::ReflectionName { descriptor: value }
+            | HExprKind::ReflectionDeclarationKind { declaration: value }
+            | HExprKind::ReflectionMemberKind { member: value }
             | HExprKind::TupleGet { tuple: value, .. }
             | HExprKind::IsType { value, .. }
             | HExprKind::CastType { value, .. }

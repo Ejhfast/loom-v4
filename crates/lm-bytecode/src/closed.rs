@@ -1837,6 +1837,7 @@ mod tests {
             imports: vec![],
             slots: vec![],
             core_roles: [crate::NO_ROLE; crate::CORE_ROLE_COUNT],
+            reflections: vec![],
             classes: vec![BcClass {
                 name: "C".to_string(),
                 key: "C".to_string(),

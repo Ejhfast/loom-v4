@@ -524,6 +524,16 @@ pub(crate) fn verify_func(
                             return Err(err(fidx, at("class code target out of range")));
                         }
                     }
+                    ExtendedInstr::ModuleCode { module: reflection } => {
+                        if module.reflections.get(*reflection as usize).is_none() {
+                            return Err(err(fidx, at("reflection module out of range")));
+                        }
+                    }
+                    ExtendedInstr::ReflectionDeclarations
+                    | ExtendedInstr::ReflectionMembers
+                    | ExtendedInstr::ReflectionName
+                    | ExtendedInstr::ReflectionDeclarationKind
+                    | ExtendedInstr::ReflectionMemberKind => {}
                     ExtendedInstr::OptionSome { ty }
                     | ExtendedInstr::OptionNone { ty }
                     | ExtendedInstr::OptionPayload { ty }

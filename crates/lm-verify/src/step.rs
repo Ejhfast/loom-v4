@@ -1014,6 +1014,56 @@ pub(crate) fn step(
                 .map_err(&fail)?;
             push(state, class_code)?;
         }
+        Instr::Extended(ExtendedInstr::ModuleCode { .. }) => {
+            let module_code = ctx
+                .plain_inst(ctx.core.module_code, "ModuleCode")
+                .map_err(&fail)?;
+            push(state, module_code)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionDeclarations) => {
+            let module_code = ctx
+                .plain_inst(ctx.core.module_code, "ModuleCode")
+                .map_err(&fail)?;
+            pop_expect(state, module_code)?;
+            let declaration_code = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            push(state, ctx.intern(BcType::List(declaration_code)))?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionMembers) => {
+            let declaration_code = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            pop_expect(state, declaration_code)?;
+            let member_code = ctx
+                .plain_inst(ctx.core.member_code, "MemberCode")
+                .map_err(&fail)?;
+            push(state, ctx.intern(BcType::List(member_code)))?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionName) => {
+            let descriptor = pop(state)?;
+            let Some((class, args)) = ctx.as_instance(descriptor) else {
+                return Err(fail("reflection name needs a descriptor".to_string()));
+            };
+            if !args.is_empty() || !ctx.is_reflection_descriptor_class(class) {
+                return Err(fail("reflection name needs a descriptor".to_string()));
+            }
+            push(state, TY_STR)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionDeclarationKind) => {
+            let declaration_code = ctx
+                .plain_inst(ctx.core.declaration_code, "DeclarationCode")
+                .map_err(&fail)?;
+            pop_expect(state, declaration_code)?;
+            push(state, TY_STR)?;
+        }
+        Instr::Extended(ExtendedInstr::ReflectionMemberKind) => {
+            let member_code = ctx
+                .plain_inst(ctx.core.member_code, "MemberCode")
+                .map_err(&fail)?;
+            pop_expect(state, member_code)?;
+            push(state, TY_STR)?;
+        }
         Instr::Extended(ExtendedInstr::CodeSource { ty }) => {
             let code = pop(state)?;
             let Some((class, _)) = ctx.as_instance(code) else {
@@ -1107,16 +1157,16 @@ pub(crate) fn step(
             push(state, ty)?;
         }
         Instr::New(class) => {
-            if ctx.is_native_core_class(*class) {
-                return Err(fail("New cannot allocate a native core class".to_string()));
+            if ctx.is_native_core_class(*class) || ctx.is_reflection_descriptor_class(*class) {
+                return Err(fail("New cannot allocate a sealed core class".to_string()));
             }
             let ty = ctx.class_ty[*class as usize]
                 .ok_or_else(|| fail("the class type is not in the type table".to_string()))?;
             push(state, ty)?;
         }
         Instr::NewG { class, app } => {
-            if ctx.is_native_core_class(*class) {
-                return Err(fail("NewG cannot allocate a native core class".to_string()));
+            if ctx.is_native_core_class(*class) || ctx.is_reflection_descriptor_class(*class) {
+                return Err(fail("NewG cannot allocate a sealed core class".to_string()));
             }
             let app = &module.apps[*app as usize];
             let inside_constructor = ctx.constructor_class(fidx) == Some(*class);
@@ -1138,6 +1188,11 @@ pub(crate) fn step(
             let Some((class, class_args)) = ctx.as_instance(recv) else {
                 return Err(fail(format!("field load on non-class type {recv}")));
             };
+            if ctx.is_reflection_descriptor_class(class) {
+                return Err(fail(
+                    "a reflection descriptor has no visible fields".to_string(),
+                ));
+            }
             if Some(class) == ctx.core.option_some {
                 return Err(fail(
                     "native Option payloads require OptionPayload".to_string(),
@@ -1156,6 +1211,11 @@ pub(crate) fn step(
             let Some((class, class_args)) = ctx.as_instance(recv) else {
                 return Err(fail(format!("field store on non-class type {recv}")));
             };
+            if ctx.is_reflection_descriptor_class(class) {
+                return Err(fail(
+                    "a reflection descriptor has no visible fields".to_string(),
+                ));
+            }
             if Some(class) == ctx.core.option_some {
                 return Err(fail("native Option payloads cannot be stored".to_string()));
             }

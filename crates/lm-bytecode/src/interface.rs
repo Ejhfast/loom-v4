@@ -28,7 +28,7 @@ pub use crate::ExportKind;
 
 const MAGIC: &[u8; 4] = b"LMIF";
 // The version covers every encoded interface field and type.
-const VERSION: u16 = 24;
+const VERSION: u16 = 25;
 const LINKAGE_MAGIC: &[u8; 4] = b"LMLK";
 
 /// The domain tag of the interface hash.
@@ -312,6 +312,8 @@ pub enum IfaceItem {
 pub struct ExportEntry {
     pub kind: ExportKind,
     pub name: String,
+    /// True when this entry describes one top-level source declaration.
+    pub source: bool,
     pub item: IfaceItem,
     /// The interface hash an import slot pins.
     pub iface_hash: [u8; 32],
@@ -391,16 +393,24 @@ pub fn interface_identity(interface: &Interface) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"lm-iface-set-v1\0");
     write_str(&mut bytes, &interface.module_path);
-    let mut exports: Vec<(u8, &str, [u8; 32])> = interface
+    let mut exports: Vec<(u8, &str, bool, [u8; 32])> = interface
         .exports
         .iter()
-        .map(|entry| (entry.kind.tag(), entry.name.as_str(), entry.iface_hash))
+        .map(|entry| {
+            (
+                entry.kind.tag(),
+                entry.name.as_str(),
+                entry.source,
+                entry.iface_hash,
+            )
+        })
         .collect();
     exports.sort();
     write_u32(&mut bytes, exports.len() as u32);
-    for (kind, name, hash) in exports {
+    for (kind, name, source, hash) in exports {
         bytes.push(kind);
         write_str(&mut bytes, name);
+        bytes.push(u8::from(source));
         bytes.extend_from_slice(&hash);
     }
     crate::hash::hash256(&bytes)
@@ -554,6 +564,7 @@ pub fn derive_interface_with_bundle(
         exports.push(ExportEntry {
             kind: export.kind,
             name: export.name.clone(),
+            source: export.source,
             iface_hash: interface_hash_with_bundle(bundle, export.kind, &export.name, &item),
             def_hash,
             item,
@@ -1473,6 +1484,7 @@ pub fn encode_interface(interface: &Interface) -> Vec<u8> {
     for entry in &interface.exports {
         out.push(entry.kind.tag());
         write_str(&mut out, &entry.name);
+        out.push(u8::from(entry.source));
         out.extend_from_slice(&entry.iface_hash);
         out.extend_from_slice(&entry.def_hash);
         encode_item(&mut out, &entry.item);
@@ -2003,6 +2015,7 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
     for _ in 0..count {
         let kind = ExportKind::from_tag(cur.u8()?).ok_or(DecodeError::BadExport)?;
         let name = cur.string()?;
+        let source = cur.flag()?;
         let mut iface_hash = [0u8; 32];
         iface_hash.copy_from_slice(cur.take(32)?);
         let mut def_hash = [0u8; 32];
@@ -2023,6 +2036,7 @@ pub fn decode_interface(bytes: &[u8]) -> Result<Interface, DecodeError> {
         exports.push(ExportEntry {
             kind,
             name,
+            source,
             item,
             iface_hash,
             def_hash,

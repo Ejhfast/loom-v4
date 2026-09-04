@@ -472,6 +472,12 @@ fn extended_treatment(operation: ExtendedInstr) -> InstructionTreatment {
         ExtendedInstr::DynRender
         | ExtendedInstr::FunctionCode { .. }
         | ExtendedInstr::ClassCode { .. }
+        | ExtendedInstr::ModuleCode { .. }
+        | ExtendedInstr::ReflectionDeclarations
+        | ExtendedInstr::ReflectionMembers
+        | ExtendedInstr::ReflectionName
+        | ExtendedInstr::ReflectionDeclarationKind
+        | ExtendedInstr::ReflectionMemberKind
         | ExtendedInstr::CodeSource { .. }
         | ExtendedInstr::CodeDefinition
         | ExtendedInstr::FaultSite { .. }
