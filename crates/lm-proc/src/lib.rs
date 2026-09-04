@@ -1037,7 +1037,7 @@ pub fn run_on_worker_with_engine(
     host: Box<dyn FnOnce() -> Box<dyn lm_vm::Host> + Send>,
     engine: std::sync::Arc<lm_vm::Engine>,
 ) -> Result<WorkerOutcome, String> {
-    run_on_worker_with_engine_and_activation_policy(
+    run_on_worker_with_engine_and_root_activation_policy(
         arena,
         namespace,
         config,
@@ -1050,9 +1050,9 @@ pub fn run_on_worker_with_engine(
     )
 }
 
-/// Run one program with an explicit activation policy.
+/// Run one program with an explicit root activation policy.
 #[allow(clippy::too_many_arguments)]
-pub fn run_on_worker_with_engine_and_activation_policy(
+pub fn run_on_worker_with_engine_and_root_activation_policy(
     arena: lm_vm::CodeArena,
     namespace: lm_vm::NamespaceId,
     config: lm_vm::VmConfig,
@@ -1075,7 +1075,7 @@ pub fn run_on_worker_with_engine_and_activation_policy(
                     host(),
                     engine,
                 );
-                world.set_activation_policy(activation_policy);
+                world.set_root_activation_policy(activation_policy);
                 for grant in grants {
                     world
                         .allow(grant)

@@ -603,6 +603,7 @@ pub(crate) struct MachineSlot {
     leased: Option<LeasedMachineMetadata>,
     worker_envs: Option<Box<lm_bytecode::closed::TypeEnvs>>,
     deferred_resource_closes: Vec<(crate::ResourceKind, u64)>,
+    activation_policy: ActivationPolicy,
 }
 
 impl MachineSlot {
@@ -613,6 +614,7 @@ impl MachineSlot {
             leased: None,
             worker_envs: None,
             deferred_resource_closes: Vec::new(),
+            activation_policy: ActivationPolicy::DefaultDeny,
         }
     }
 
@@ -806,8 +808,6 @@ pub struct World {
     /// restore never grows shared module state.
     pub(crate) envs: lm_bytecode::closed::TypeEnvs,
     host: Box<dyn Host>,
-    /// The host rule for policy tables created by `Vm.activate`.
-    activation_policy: ActivationPolicy,
     /// Open external resources, keyed by unforgeable world identifiers.
     bound_resources: std::collections::BTreeMap<u64, BoundResource>,
     /// The next resource identifier. Zero marks a closed handle.
@@ -896,7 +896,7 @@ pub struct World {
     poisoned: bool,
 }
 
-/// The host rule for policy tables created by `Vm.activate`.
+/// The host rule for child policy tables created by one machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActivationPolicy {
     /// Keep the new table empty.

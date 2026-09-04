@@ -1421,7 +1421,7 @@ impl World {
                     );
                     return;
                 }
-                if self.activation_policy == ActivationPolicy::PassDeclared {
+                if self.machines[vm as usize].activation_policy == ActivationPolicy::PassDeclared {
                     let (operations, groups) = self.declared_grants(target, func);
                     let table = &mut self.machines[target as usize].table;
                     for operation in operations {

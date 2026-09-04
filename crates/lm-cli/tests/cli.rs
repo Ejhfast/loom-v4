@@ -361,6 +361,47 @@ end
 }
 
 #[test]
+fn test_methods_keep_default_deny_for_their_children() {
+    let package = PackageProbe::new("clipolicy");
+    package.write(
+        "suite.lm",
+        r#"
+use std.test
+
+def write_from_child(): Int with Io.Write
+  print("unexpected output")
+  1
+end
+
+class PolicyTest implements Test
+  def child_is_denied(self): Result[(), test.TestFailure] with Vm, Io.Write
+    child = sys.vm.Vm().activate_or_fault(write_from_child, args: ())
+    case child.run()
+    in Err(_) then test.pass()
+    in Ok(_) then test.fail("the nested child inherited test policy")
+    end
+  end
+end
+"#,
+    );
+    let output = lm(&[
+        "test",
+        "--allow",
+        "Vm,Io.Write",
+        "--engine",
+        "native",
+        package.path(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "1 test, 0 failures\n");
+}
+
+#[test]
 fn args_effect_receives_exact_arguments() {
     let path = probe(
         "command-arguments",

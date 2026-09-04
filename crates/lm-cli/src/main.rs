@@ -545,7 +545,7 @@ fn run_test_program(options: Options) -> Result<ExitCode, String> {
     let grants: Vec<&str> = options.allow.iter().map(|grant| grant.as_str()).collect();
     let arguments = options.command_args;
     let engine = std::sync::Arc::new(Engine::new(options.engine));
-    let result = lm_proc::run_on_worker_with_engine_and_activation_policy(
+    let result = lm_proc::run_on_worker_with_engine_and_root_activation_policy(
         arena,
         namespace,
         options.config,
