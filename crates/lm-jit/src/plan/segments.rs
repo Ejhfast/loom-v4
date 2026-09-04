@@ -437,6 +437,9 @@ pub(super) fn analyze_segment(
         fuel_stacks.push((position, before.stack.clone()));
 
         let treatment = crate::instruction_treatment(instruction);
+        if next == segment.end && matches!(segment.exit, SegmentExit::Boundary { .. }) {
+            boundary_stack = before.stack.clone();
+        }
         if treatment.replays() {
             replay_stacks.push((position, before.stack.clone()));
         }

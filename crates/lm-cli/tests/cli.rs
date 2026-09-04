@@ -285,6 +285,15 @@ end
     );
     assert_eq!(stdout(&output), "1 test, 0 failures\n");
     assert!(!stdout(&output).contains("MAIN"));
+
+    let native = lm(&["test", "--engine", "native", package.path()]);
+    assert!(
+        native.status.success(),
+        "stdout: {}\nstderr: {}",
+        stdout(&native),
+        stderr(&native)
+    );
+    assert_eq!(stdout(&native), "1 test, 0 failures\n");
 }
 
 #[test]

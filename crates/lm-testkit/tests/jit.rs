@@ -163,6 +163,8 @@ mod heap;
 mod literals;
 #[path = "jit/maps.rs"]
 mod maps;
+#[path = "jit/reflection.rs"]
+mod reflection;
 #[path = "jit/regex.rs"]
 mod regex;
 #[path = "jit/scalar.rs"]
