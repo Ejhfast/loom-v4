@@ -162,11 +162,10 @@ fn run_cli(args: &[String]) -> Result<ExitCode, String> {
                 }
             }
             let report = build_test_package(&options.file, true)?;
-            options.file = report
+            let artifact = report
                 .artifact
-                .expect("a test package produces an artifact")
-                .display()
-                .to_string();
+                .ok_or_else(|| "error: the test build produced no artifact\n".to_string())?;
+            options.file = artifact.display().to_string();
             run_test_program(options)
         }
         "disasm" => {

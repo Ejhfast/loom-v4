@@ -2866,6 +2866,8 @@ A spawn payload contains a code hash and a typed tuple of sendable values. Versi
 
 ## 19. Reflection
 
+### 19.1 Syntax reflection
+
 ```lm
 parsed = sys.reflect.parse_syntax(source)
 ```
@@ -2873,6 +2875,62 @@ parsed = sys.reflect.parse_syntax(source)
 `Reflect.ParseSyntax` returns one lossless concrete syntax tree, parse status, and diagnostic list.
 
 The syntax values are immutable. They expose no writable compiler or VM state.
+
+### 19.2 Module descriptors
+
+`codeof(path)` can reify an exact visible module path as `ModuleCode`.
+
+The resolver treats its argument as a path. A local value with the same name does not become a module.
+
+`ModuleCode.name()` returns the exact module path.
+
+`ModuleCode.declarations()` returns source declarations from that module only.
+
+It returns no compiler-generated declarations. It also returns no declarations from linked modules.
+
+Each item is a sealed `DeclarationCode` value.
+
+`DeclarationCode.name()` returns its source name. `DeclarationCode.kind()` returns `class`, `enum`, `interface`, `function`, or `constant`.
+
+`DeclarationCode.members()` returns effective methods for classes and enums. The list includes inherited methods once.
+
+Other declaration kinds return an empty list.
+
+Each member is a sealed `MemberCode` value. Its `kind()` returns `method`.
+
+Programs cannot construct descriptors or access their storage fields. The verifier enforces this rule independently.
+
+### 19.3 Scoped descriptor refinement
+
+A reflection case can refine a descriptor to a typed value:
+
+```lm
+case declaration
+in Def[type T, (T) -> T](call)
+  call(value)
+in Const[Int](answer)
+  answer
+in _ then value
+end
+```
+
+`Def`, `Method`, and callable `Class` patterns match one callable signature.
+
+`Const` matches one constant type. `Class[type C](descriptor)` matches one monomorphic class and binds its exact instance type.
+
+Type parameters can have interface bounds. One fresh effect parameter can capture the unmatched part of a callable row.
+
+A concrete pattern row accepts a candidate row that is its subset.
+
+A mutable receiver pattern accepts mutable and immutable methods. An immutable receiver pattern accepts only immutable methods.
+
+Generic declarations do not produce first-class generic callables. Callable refinement therefore matches monomorphic declarations only.
+
+The arm shares its enclosing locals, loop targets, return target, and effect collection.
+
+Refined type and effect parameters exist only inside that arm. Values containing those parameters cannot escape the arm.
+
+The matched callable is an ordinary value. `Vm.activate_or_fault(call, args: values)` activates it without a wrapper closure.
 
 Version 0.2 has no general object mirror or dynamic invocation by name.
 
@@ -5490,7 +5548,7 @@ The reference `lm` tool provides:
 lm check [path]
 lm build [path] [--release]
 lm run [path|artifact] [-- arg...]
-lm test [path] [filters]
+lm test [options] [package] [-- filters...]
 lm inspect <artifact|snapshot>
 lm disasm <artifact>
 lm snapshot verify <file>
@@ -5510,13 +5568,51 @@ The entry can use `sys.args()` to read strings after `--`. The call needs the `A
 The runner accepts explicit machine, image, child, and wait limits.
 The CLI exposes these limits through the options in section 14.11.
 
-### 26.4 Root policy profiles
+### 26.4 Test execution
+
+The core `Test` interface marks test classes. It has no required methods.
+
+The `std.test` module provides assertions, discovery, execution, and reports.
+
+```lm
+use std.test
+
+class ArithmeticTest implements Test
+  def adds(self): Result[(), test.TestFailure]
+    test.equal(4, 2 + 2)
+  end
+end
+```
+
+`lm test` builds a generated entry. A package does not need a test `main` function.
+
+The entry gives `std.test` exact descriptors for root-package modules. Dependency tests do not run.
+
+Discovery identifies each monomorphic `Test` class. It then requires a pure zero-argument constructor.
+
+Each selected method has type `(C) -> Result[(),E] with e` or `(mut C) -> Result[(),E] with e`.
+
+`E` must implement `Error`. The runner creates a new class instance for each selected method.
+
+A marked class with no selected signature produces a failure. A class without a pure zero-argument constructor also produces a failure.
+
+Filters match substrings of fully qualified test names.
+
+The generated entry grants `Vm`, `Io.Write`, and `Args`. Other test effects need an explicit `--allow` option.
+
+The runner passes a discovered method's declared row to the root policy. This action does not grant an operation.
+
+Normal artifacts use entry reachability. Therefore, unused test classes and their support code do not enter program artifacts.
+
+A normal artifact retains a test class when program code references that class.
+
+### 26.5 Root policy profiles
 
 A CLI profile is host configuration, not guest authority. The default profile grants console I/O needed by the command, denies filesystem/network/process access unless requested, sets finite limits, and reports terminal faults. A reproducible/test profile mocks or manually drives clock/random/console operations.
 
 Rows may be displayed to help a human audit a requested profile, but row membership never automatically grants an operation.
 
-### 26.5 Artifact and interface files
+### 26.6 Artifact and interface files
 
 Conventional outputs:
 
@@ -5528,7 +5624,7 @@ build/<target>/<package>.map     optional debug/source map
 
 Debug maps are keyed by semantic code hash and excluded from semantic identity. Tools tolerate their absence.
 
-### 26.6 Embedding API
+### 26.7 Embedding API
 
 The Rust reference host exposes narrow APIs to initialize an ABI bundle, load/verify artifacts and snapshots, create root bindings, configure limits/tables, drive VMs, register host operation implementations, and resolve code hashes. An optional generated C ABI shim exposes opaque handles over the same Rust API. Embedders cannot install unverified executable bytes directly into a `VmState`.
 

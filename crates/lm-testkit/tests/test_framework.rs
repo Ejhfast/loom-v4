@@ -189,6 +189,10 @@ end
     let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
         .expect("the artifact reads");
     let artifact = lm_bytecode::artifact::decode(&bytes).expect("the artifact decodes");
+    assert!(artifact
+        .units()
+        .iter()
+        .all(|unit| unit.module_path() != "std.test"));
     assert!(artifact.units().iter().all(|unit| {
         unit.module()
             .classes

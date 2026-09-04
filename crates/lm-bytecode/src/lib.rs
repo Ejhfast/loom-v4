@@ -951,7 +951,7 @@ pub enum ExtendedInstr {
     RegexMatchNamed { ty: u32 },
 }
 
-/// One callable declaration family used by reflection refinement.
+/// One declaration family used by reflection refinement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ReflectionKind {

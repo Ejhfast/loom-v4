@@ -29,6 +29,7 @@ The build creates `target/debug/lm`.
 - `lm check <file.lm>` checks one source file.
 - `lm build [path]` builds a source file or package.
 - `lm run [options] [path]` builds or loads a program and runs it.
+- `lm test [options] [package] [-- filters...]` discovers and runs package tests.
 - `lm disasm <path>` prints decoded bytecode.
 - `lm inspect <path>` describes artifacts, snapshots, or live state.
 - `lm snapshot save` saves a snapshot.
