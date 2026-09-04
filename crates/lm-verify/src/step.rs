@@ -1145,7 +1145,7 @@ pub(crate) fn step(
             let Some((class, args)) = ctx.as_instance(descriptor) else {
                 return Err(fail("reflection name needs a descriptor".to_string()));
             };
-            if !args.is_empty() || !ctx.is_reflection_descriptor_class(class) {
+            if !args.is_empty() || !ctx.is_named_code_class(class) {
                 return Err(fail("reflection name needs a descriptor".to_string()));
             }
             push(state, TY_STR)?;

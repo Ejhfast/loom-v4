@@ -302,7 +302,7 @@ use tables::verify_tables;
 /// key: a rule change invalidates every cached admission.
 /// The verifier covers every bytecode instruction, table contract,
 /// core role, effect row, and exported constant.
-pub const VERIFIER_VERSION: u32 = 43;
+pub const VERIFIER_VERSION: u32 = 44;
 
 /// Verify a full module. Every table and every function must pass.
 ///

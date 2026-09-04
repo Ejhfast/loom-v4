@@ -533,7 +533,11 @@ The type universe has four strata.
 | `DynValue` | Explicit type/value package for dynamic APIs |
 | `Artifact` | Opaque untrusted bytecode container |
 | `VerifiedModule` | Portable verified module revision |
-| `FunctionCode[A,T]` | Portable verified function code |
+| `ModuleCode` | Holder-local linked module descriptor |
+| `DeclarationCode` | Portable declaration description |
+| `MemberCode` | Portable member description |
+| `OpenCode` | Holder-local descriptor opened against one linked module |
+| `FunctionCode[F]` | Portable verified function code with complete callable type `F` |
 | `ClassCode` | Portable verified class code |
 | `DefinitionIdentity` | Contract and implementation identities for one definition |
 | `DefinitionSpec` | Verified identity and slot contracts for one definition |
@@ -2881,17 +2885,29 @@ parsed = sys.reflect.parse_syntax(source)
 
 The syntax values are immutable. They expose no writable compiler or VM state.
 
-### 19.2 Module descriptors
+### 19.2 Portable descriptions and linked modules
 
-`codeof(path)` can reify an exact visible module path as `ModuleCode`.
+Reflection uses three explicit code states:
 
-The resolver treats its argument as a path. A local value with the same name does not become a module.
+```text
+Artifact  --verify-->  VerifiedModule  --sys.vm.link-->  ModuleCode
+```
 
-`ModuleCode.name()` returns the exact module path.
+`Artifact` contains untrusted bytes. `VerifiedModule` contains portable verified code.
 
-`ModuleCode.declarations()` returns source declarations from that module only.
+`ModuleCode` identifies one linked copy in the current VM image.
 
-It returns no compiler-generated declarations. It also returns no declarations from linked modules.
+`codeof(path)` returns `ModuleCode` because the build already verified and linked that path.
+
+The resolver treats the argument as a path. A local value cannot replace that path.
+
+`VerifiedModule` and `ModuleCode` provide the same description methods.
+
+Their `name()` method returns the exact module path.
+
+Their `declarations()` method returns source declarations from that module only.
+
+It excludes compiler-generated declarations and declarations from dependencies.
 
 Each item is a sealed `DeclarationCode` value.
 
@@ -2909,20 +2925,36 @@ It returns zero for other declaration kinds.
 
 It returns an empty list for other declaration kinds.
 
-`DeclarationCode.members()` returns effective methods for classes and enums. The list includes inherited methods once.
+`DeclarationCode.members()` returns effective methods for classes and enums.
 
-Other declaration kinds return an empty list.
+The list includes each inherited method once. Other declaration kinds return an empty list.
 
 Each member is a sealed `MemberCode` value. Its `kind()` returns `CodeKind.Method`.
 
-Programs cannot construct descriptors or access their storage fields. The verifier enforces this rule independently.
+`DeclarationCode` and `MemberCode` are inert, sendable, and snapshot-safe.
 
-### 19.3 Scoped descriptor refinement
+`ModuleCode` and `OpenCode` are holder-local and snapshot-safe.
 
-A reflection case can refine a descriptor to a typed value:
+Programs cannot construct these values or access their storage fields.
+
+The verifier enforces their sealed storage independently.
+
+A compiled module reference records the provider path and semantic identity.
+
+The linker rejects a provider with another identity. Runtime descriptions read the exact provider interface.
+
+### 19.3 Linked realization and scoped refinement
+
+`ModuleCode.open(descriptor)` opens a description against that linked module.
+
+It accepts `DeclarationCode` and `MemberCode`. It returns one sealed `OpenCode` value.
+
+A descriptor from another module matches no refinement arm.
+
+A reflection case refines an open descriptor to a typed value:
 
 ```lm
-case declaration
+case module.open(declaration)
 in Def[type T, (T) -> T](call)
   call(value)
 in Const[Int](answer)
@@ -2931,25 +2963,51 @@ in _ then value
 end
 ```
 
-`Def`, `Method`, and callable `Class` patterns match one callable signature.
+`Def`, `Method`, and callable `Class` patterns resolve the current image binding when an arm matches.
 
-`Const` matches one constant type. `Class[type C](descriptor)` matches one monomorphic class and binds its exact instance type.
+The matching arm captures the selected implementation.
 
-Type parameters can have interface bounds. One fresh effect parameter can capture the unmatched part of a callable row.
+A later replacement affects later matches. It does not change an earlier callable value.
+
+`Code[F]` matches a function, constructor, or method with complete callable type `F`.
+
+It binds exact portable `FunctionCode[F]` from the linked module revision.
+
+`Const` matches one constant type.
+
+`Class[type C](descriptor)` binds the exact linked instance type and its declaration descriptor.
+
+`Class[type C, () -> C](make)` also binds the current constructor as a callable value.
+
+Type parameters can have interface bounds.
+
+One fresh effect parameter can capture the unmatched part of a callable row.
 
 A concrete pattern row accepts a candidate row that is its subset.
 
-A mutable receiver pattern accepts mutable and immutable methods. An immutable receiver pattern accepts only immutable methods.
+A mutable receiver pattern accepts mutable and immutable methods.
 
-Generic declarations do not produce first-class generic callables. Callable refinement therefore matches monomorphic declarations only.
+An immutable receiver pattern accepts only immutable methods.
+
+Generic declarations do not produce first-class generic callables.
+
+Callable refinement therefore matches monomorphic declarations only.
 
 The arm shares its enclosing locals, loop targets, return target, and effect collection.
 
-Refined type and effect parameters exist only inside that arm. Values containing those parameters cannot escape the arm.
+Refined type and effect parameters exist only inside that arm.
+
+Values containing those parameters cannot escape the arm.
+
+An explicitly declared closure row can name every effect parameter visible at its definition.
+
+An inferred closure cannot move a scoped effect outside its refinement arm.
 
 Every reflection case ends with one wildcard arm.
 
-The matched callable is an ordinary value. `Vm.activate_or_fault(call, args: values)` activates it without a wrapper closure.
+The matched callable is an ordinary value.
+
+`Vm.activate_or_fault(call, args: values)` activates it without a wrapper closure.
 
 Version 0.2 has no general object mirror or dynamic invocation by name.
 
@@ -3010,6 +3068,10 @@ end
 
 The verifier decodes the container and checks every function before it creates `VerifiedModule`.
 
+`VerifiedModule` is unlinked, sendable, and snapshot-safe.
+
+It supports description and portable by-name code extraction. It cannot create values from unlinked nominal types.
+
 An artifact can contain definitions, an entry, both, or neither.
 
 Definitions have semantic hashes. The module and exact byte container have separate hashes.
@@ -3021,7 +3083,30 @@ An import slot includes name, full type/signature, effect row, mutability requir
 ### 20.4 Linking and typed entry values
 
 ```lm
-case image.install(module, LinkEnv(providers))
+verified = artifact.verify().expect("the module verifies")
+linked = sys.vm.link(verified).expect("the module links")
+```
+
+`sys.vm.link` adds a verified artifact graph to the caller's current VM image.
+
+The operation requires the `Vm` effect. It returns a holder-local `ModuleCode` descriptor.
+
+Linking the same root artifact again returns a descriptor for the same linked copy.
+
+The operation rejects an artifact when an existing module path has another semantic identity.
+
+The operation validates the complete extension before it changes the image.
+
+Machines that share the image receive its new namespace at one residency barrier.
+
+Other existing images keep their namespaces. A new image inherits its creator's current namespace.
+
+Linking creates no `Instance` and executes no code.
+
+Installation links code when necessary and creates an `Instance`:
+
+```lm
+case image.install(verified, LinkEnv(providers))
 in Ok(instance)
   entry = instance.entry[(String,), ()]()
   greeter = instance.class_def("Greeter")
@@ -3031,7 +3116,7 @@ in Err(_)
 end
 ```
 
-`Vm.install(module)` returns an `Instance`.
+`Vm.install(verified)` returns an `Instance`.
 
 `Vm.install(code)` returns the installed binding selected by that code value.
 
@@ -3039,13 +3124,15 @@ end
 
 The optional `LinkEnv` contains provider instances from that VM.
 
-`FunctionCode[A,T]` and `ClassCode` are portable views into shared verified bytes.
+`FunctionCode[F]` and `ClassCode` are portable views into shared verified bytes.
 
-`codeof(function)` creates `FunctionCode[A,T]` for a named monomorphic function.
+`codeof(function)` creates `FunctionCode[F]` for a named monomorphic function.
+
+`F` contains the complete function type, including its parameter modes and effect row.
 
 `codeof(Class)` creates `ClassCode` for a class definition.
 
-`codeof` does not install code and does not require a `Vm`.
+These two forms do not install code and do not require a `Vm`.
 
 Source, syntax, module, and command-line compilation use one binding publication rule.
 
@@ -3061,11 +3148,11 @@ Direct references to each named closure dependency become late in the same compi
 
 Definitions outside the closure remain static.
 
-`FunctionCode[A,T].source()` returns `Option[DefinitionSource]`.
+`FunctionCode[F].source()` returns `Option[DefinitionSource]`.
 
 `ClassCode.source()` returns `Option[DefinitionSource]`.
 
-`FunctionCode[A,T].definition()` returns `DefinitionSpec`.
+`FunctionCode[F].definition()` returns `DefinitionSpec`.
 
 `ClassCode.definition()` returns `DefinitionSpec`.
 
@@ -3113,13 +3200,13 @@ The `definition` field contains the same `DefinitionSpec` data that `code.defini
 
 The source attachment does not affect semantic or verification hashes.
 
-Source attachments contain diagnostic data and verified definition metadata. They do not affect semantic or verification hashes.
-
 Capturing closures cannot become portable code values.
 
-`VerifiedModule.entry_code[A,T]()` returns portable code for the entry function.
+`VerifiedModule.name()` and `VerifiedModule.declarations()` provide the description surface from section 19.2.
 
-`VerifiedModule.function_code[A,T](name)` returns portable code for a named function.
+`VerifiedModule.entry_code[F]()` returns portable code for the entry function.
+
+`VerifiedModule.function_code[F](name)` returns portable code for a named function.
 
 `VerifiedModule.class_code(name)` returns portable code for a named class.
 
@@ -4148,6 +4235,8 @@ Vm.ServeTcpListener[T]         (Run[T], PendingCall[SocketAddress,
                                 -> ResourceHandle
 Vm.ServeTlsStream[T]           (Run[T], PendingCall) -> ResourceHandle
 Vm.Artifact                    (Bytes) -> Artifact
+Vm.Link                        (VerifiedModule)
+                                -> Result[ModuleCode, CodeError]
 Vm.Install[X]                  (Vm, X)
                                 -> Result[Installed[X], CodeError]
 Vm.InstanceEntry[A,T]          (Instance)
@@ -4193,10 +4282,10 @@ Vm.SnapshotBytes               (VmSnapshot)
 Vm.SnapshotVm                  (Vm)
                                 -> Result[VmSnapshot, SnapshotError]
 Vm.RestoreVm                   (VmSnapshot) -> Result[Vm, RestoreError]
-Vm.ModuleEntryCode[A,T]        (VerifiedModule)
-                                -> Result[FunctionCode[A,T], CodeError]
-Vm.ModuleFunctionCode[A,T]     (VerifiedModule, String)
-                                -> Result[FunctionCode[A,T], CodeError]
+Vm.ModuleEntryCode[F]          (VerifiedModule)
+                                -> Result[FunctionCode[F], CodeError]
+Vm.ModuleFunctionCode[F]       (VerifiedModule, String)
+                                -> Result[FunctionCode[F], CodeError]
 Vm.ModuleClassCode             (VerifiedModule, String)
                                 -> Result[ClassCode, CodeError]
 Vm.InstanceEntryBinding[A,T]   (Instance)
@@ -4221,7 +4310,7 @@ This table is the complete public `Vm` operation set for version 0.2.
 
 `Installed[VerifiedModule]` is `Instance`.
 
-`Installed[FunctionCode[A,T]]` is `FunctionBinding[A,T]`.
+For `F = (A) -> T with e`, `Installed[FunctionCode[F]]` is `FunctionBinding[A,T]`.
 
 `Installed[ClassCode]` is `ClassBinding`.
 
@@ -5460,11 +5549,17 @@ This rule adds no variadic generics, tuple spreading, or dependent native rule.
 
 Installation helpers can build `LinkEnv` values from module instances. Dynamic tools must use `DynValue` explicitly.
 
-`std/reflect` formats syntax trees and diagnostics. Version 0.2 has no general value mirror or dynamic invocation.
+`std/reflect` formats syntax trees and diagnostics.
 
-`std/test` represents each test body as a frozen descriptor. The descriptor carries its function type, row, code hash, and captures.
+Linked module reflection uses the sealed core descriptors from section 19.
 
-The runner executes each case in a child VM. It configures an explicit table and records `Done` or `Fault`.
+`std/test` receives linked descriptors for the selected package modules.
+
+The runner opens `Test` classes and matching methods through typed refinement.
+
+The runner executes each selected method in a child VM.
+
+It configures an explicit table and records `Done` or `Fault`.
 
 The runner can use `drive` for deterministic operation transcripts.
 

@@ -132,6 +132,44 @@ fn bytecode_cannot_read_a_module_descriptor_field() {
     assert_rejected(&module, "a reflection descriptor has no visible fields");
 }
 
+#[test]
+fn a_verified_module_name_verifies() {
+    let mut module = lm_hir::core_image();
+    let class = module.core_roles[lm_bytecode::corepin::ROLE_VERIFIED_MODULE];
+    let descriptor = descriptor_type(&module, class);
+    let string = type_index(&module, BcType::Str);
+    add_function(
+        &mut module,
+        vec![descriptor],
+        string,
+        vec![
+            Instr::LoadLocal(0),
+            Instr::Extended(ExtendedInstr::ReflectionName),
+            Instr::Return,
+        ],
+    );
+    lm_verify::verify_module(&module).expect("the verified module name verifies");
+}
+
+#[test]
+fn an_open_descriptor_has_no_name() {
+    let mut module = lm_hir::core_image();
+    let class = module.core_roles[lm_bytecode::corepin::ROLE_OPEN_CODE];
+    let descriptor = descriptor_type(&module, class);
+    let string = type_index(&module, BcType::Str);
+    add_function(
+        &mut module,
+        vec![descriptor],
+        string,
+        vec![
+            Instr::LoadLocal(0),
+            Instr::Extended(ExtendedInstr::ReflectionName),
+            Instr::Return,
+        ],
+    );
+    assert_rejected(&module, "reflection name needs a descriptor");
+}
+
 fn reflection_scope_module() -> (Module, u32, u32) {
     let mut module = lm_hir::core_image();
     let open = module.core_roles[lm_bytecode::corepin::ROLE_OPEN_CODE];

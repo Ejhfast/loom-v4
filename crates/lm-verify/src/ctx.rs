@@ -165,6 +165,17 @@ impl<'m> Ctx<'m> {
         .contains(&Some(class))
     }
 
+    /// True when one code class provides a name.
+    pub(crate) fn is_named_code_class(&self, class: u32) -> bool {
+        [
+            self.core.verified_module,
+            self.core.module_code,
+            self.core.declaration_code,
+            self.core.member_code,
+        ]
+        .contains(&Some(class))
+    }
+
     /// Return the canonical self type of one class.
     pub(crate) fn class_self_type(&self, class: u32) -> Option<u32> {
         if self.core.unit == Some(class) {

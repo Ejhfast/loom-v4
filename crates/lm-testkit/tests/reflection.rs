@@ -429,7 +429,7 @@ fn a_runtime_module_links_and_opens_in_the_current_image() {
     );
     tree.write(
         "app/src/main.lm",
-        r#"
+        r##"
 def options(): CompileOptions
   CompileOptions(
     is_main: false,
@@ -488,7 +488,7 @@ def module_is_local(module: ModuleCode): Bool with Vm
   image.activate(program, args: ()).is_err()
 end
 
-def execute(): (String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
+def execute(): (String, String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
   old_image = sys.vm.Vm()
   env = CompileEnv(
     List[VerifiedModule](),
@@ -503,10 +503,12 @@ def execute(): (String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
     options()
   ).expect("the plugin compiles")
   verified = artifact.verify().expect("the plugin verifies")
+  described = "#{verified.name()}.#{verified.declarations().at(0).name()}"
   first = sys.vm.link(verified).expect("the plugin links")
   second = sys.vm.link(verified).expect("the plugin links once")
   new_image = sys.vm.Vm()
   (
+    described,
     first.name(),
     find_live(first),
     run_exact(first),
@@ -518,7 +520,7 @@ def execute(): (String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
 end
 
 execute()
-"#,
+"##,
     );
     let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
         .expect("the runtime link package builds");
@@ -544,7 +546,7 @@ execute()
         let shown = world.show_outcome(&outcome);
         let dump = world.dump_live(&outcome);
         assert_eq!(
-            shown, "Done((\"plugin\", 42, 42, 42, 42, -2, true))",
+            shown, "Done((\"plugin.twice\", \"plugin\", 42, 42, 42, 42, -2, true))",
             "mode {mode:?}\n{dump}"
         );
         let gate = world.next_gate();
