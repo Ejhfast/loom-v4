@@ -222,6 +222,129 @@ end
 }
 
 #[test]
+fn a_declared_closure_can_own_a_scoped_effect_row() {
+    let tree = TempTree::new("declared-scoped-closure");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "def effectful(): Int with Io.Write\n  1\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.cases
+
+def run(module_code: ModuleCode): Int with Vm
+  for declaration in module_code.declarations()
+    case declaration
+    in Def[effect e, () -> Int with e](call)
+      program = do ||: Int with e
+        call() + 100
+      end
+      child = sys.vm.Vm().activate_or_fault(program, args: ())
+      case child.run()
+      in Ok(value) then return value
+      in Err(_) then return -1
+      end
+    in _ then ()
+    end
+  end
+  0
+end
+
+run(codeof(cases))
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the declared closure package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(101)");
+}
+
+#[test]
+fn a_nested_closure_can_infer_an_owned_scoped_effect_row() {
+    let tree = TempTree::new("nested-scoped-closure");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/cases.lm",
+        "def effectful(): Int with Io.Write\n  1\nend\n",
+    );
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.cases
+
+def preserve[effect x](escaping f: () -> Int with x): () -> Int with x
+  f
+end
+
+def run(module_code: ModuleCode): Int with Vm
+  for declaration in module_code.declarations()
+    case declaration
+    in Def[effect e, () -> Int with e](call)
+      program = do ||: Int with e
+        nested = preserve(do || call() end)
+        nested() + 100
+      end
+      child = sys.vm.Vm().activate_or_fault(program, args: ())
+      case child.run()
+      in Ok(value) then return value
+      in Err(_) then return -1
+      end
+    in _ then ()
+    end
+  end
+  0
+end
+
+run(codeof(cases))
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the nested closure package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    let (arena, namespace) =
+        lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    world.allow("Vm").expect("the VM grant exists");
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(101)");
+}
+
+#[test]
 fn descriptor_fields_are_not_source_visible() {
     let source = "def read(value: ModuleCode): Int\n  value._module\nend\n1\n";
     let error = lm_testkit::compile_text("opaque-descriptor.lm", source)

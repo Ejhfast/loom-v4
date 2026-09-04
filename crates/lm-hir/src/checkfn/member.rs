@@ -1403,6 +1403,7 @@ impl<'o> FnChecker<'o> {
         row: &[ast::RowItem],
         expected_ret: Option<TypeId>,
         infer_row: bool,
+        row_explicit: bool,
         body: &[ast::Expr],
         span: Span,
     ) -> Result<HExpr, Diagnostic> {
@@ -1456,7 +1457,11 @@ impl<'o> FnChecker<'o> {
             ctor: None,
             env: env.clone(),
             declared_row: declared_row.clone(),
-            effect_arity: owned_effect_arity,
+            effect_arity: if row_explicit {
+                effect_param_count
+            } else {
+                owned_effect_arity
+            },
             collect_row: infer_row,
         };
         let (body_h, body_ty) = match declared_ret {

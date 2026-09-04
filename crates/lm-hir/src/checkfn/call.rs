@@ -865,6 +865,7 @@ impl<'o> FnChecker<'o> {
                             row,
                             expected_ret,
                             true,
+                            false,
                             body,
                             arg.span,
                         )?

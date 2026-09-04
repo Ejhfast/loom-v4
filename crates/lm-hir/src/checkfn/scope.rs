@@ -333,7 +333,7 @@ impl<'o> FnChecker<'o> {
                 params,
                 ret,
                 row,
-                row_explicit: _,
+                row_explicit,
                 body,
             } => {
                 let expected_ret = match (ret, ctx.store.get(expected)) {
@@ -347,6 +347,7 @@ impl<'o> FnChecker<'o> {
                     row,
                     expected_ret,
                     false,
+                    *row_explicit,
                     body,
                     expr.span,
                 )?;

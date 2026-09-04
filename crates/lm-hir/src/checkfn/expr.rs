@@ -486,9 +486,19 @@ impl<'o> FnChecker<'o> {
                 params,
                 ret,
                 row,
-                row_explicit: _,
+                row_explicit,
                 body,
-            } => self.check_closure(ctx, params, ret, row, None, false, body, expr.span),
+            } => self.check_closure(
+                ctx,
+                params,
+                ret,
+                row,
+                None,
+                false,
+                *row_explicit,
+                body,
+                expr.span,
+            ),
             ExprKind::If { arms, else_body } => {
                 self.check_if(ctx, arms, else_body, BlockMode::Synth, expr.span)
             }
