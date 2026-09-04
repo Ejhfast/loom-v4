@@ -90,7 +90,7 @@ impl Machine {
         for declaration in declarations {
             let value = self.alloc(Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                 kind: CodeDescriptorKind::Declaration,
-                module: module_ref,
+                module: Value::Obj(module_ref),
                 declaration,
                 member: None,
             })))?;
@@ -136,7 +136,8 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let artifact = self.description_artifact(module, descriptor.module)?;
+        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
+        let artifact = self.description_artifact(module, module_ref)?;
         let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let base = self.vm.operands.len();
         if !matches!(declaration.entry.kind, ExportKind::Class | ExportKind::Enum) {
@@ -199,7 +200,8 @@ impl Machine {
             Object::NativeCodeDescriptor(descriptor) => match descriptor.kind {
                 CodeDescriptorKind::Declaration => {
                     let descriptor = (**descriptor).clone();
-                    let artifact = self.description_artifact(module, descriptor.module)?;
+                    let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
+                    let artifact = self.description_artifact(module, module_ref)?;
                     portable_declaration_source(&artifact, descriptor.declaration as usize)?
                         .entry
                         .name
@@ -220,7 +222,8 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let artifact = self.description_artifact(module, descriptor.module)?;
+        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
+        let artifact = self.description_artifact(module, module_ref)?;
         let role = declaration_kind_role(
             portable_declaration_source(&artifact, descriptor.declaration as usize)?
                 .entry
@@ -246,7 +249,8 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let artifact = self.description_artifact(module, descriptor.module)?;
+        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
+        let artifact = self.description_artifact(module, module_ref)?;
         let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let count = match &declaration.entry.item {
             IfaceItem::Class(class) => class.type_params,
@@ -262,7 +266,8 @@ impl Machine {
     ) -> Result<(), FaultCode> {
         let descriptor = self.pop()?.as_obj().ok_or(BAD_TYPE)?;
         let descriptor = self.code_descriptor(descriptor, CodeDescriptorKind::Declaration)?;
-        let artifact = self.description_artifact(module, descriptor.module)?;
+        let module_ref = descriptor.module.as_obj().ok_or(BAD_STATE)?;
+        let artifact = self.description_artifact(module, module_ref)?;
         let declaration = portable_declaration_source(&artifact, descriptor.declaration as usize)?;
         let base = self.vm.operands.len();
         let IfaceItem::Class(class) = &declaration.entry.item else {
@@ -341,7 +346,8 @@ impl Machine {
         let Some(source) = linked_source(module, unit_id) else {
             return Ok(None);
         };
-        let artifact = self.description_artifact(module, open.descriptor.module)?;
+        let module_ref = open.descriptor.module.as_obj().ok_or(BAD_STATE)?;
+        let artifact = self.description_artifact(module, module_ref)?;
         if artifact.id() != unit_id {
             return Ok(None);
         }

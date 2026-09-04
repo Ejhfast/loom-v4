@@ -760,7 +760,7 @@ fn encode_object(out: &mut Out, object: &Object) {
                 CodeDescriptorKind::Declaration => 0,
                 CodeDescriptorKind::Member => 1,
             });
-            out.value(Value::Obj(descriptor.module));
+            out.value(descriptor.module);
             out.leb(u64::from(descriptor.declaration));
             match &descriptor.member {
                 Some(member) => {
@@ -2596,7 +2596,8 @@ fn decode_object(cur: &mut Cursor<'_, '_>, ctx: &Ctx, objects: u32) -> Read<Obje
                 1 => CodeDescriptorKind::Member,
                 _ => return err(ImageReason::Layout, "a code descriptor kind is invalid"),
             };
-            let module = decode_value(cur, objects, 0)?.as_obj().ok_or_else(|| {
+            let module = decode_value(cur, objects, 0)?;
+            module.as_obj().ok_or_else(|| {
                 ImageError::new(
                     ImageReason::Layout,
                     "a code descriptor module is not an object",

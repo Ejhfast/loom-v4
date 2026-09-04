@@ -367,8 +367,8 @@ fn payload(object: &Object) -> String {
             )
         }
         Object::NativeCodeDescriptor(descriptor) => format!(
-            "code {:?} declaration {} member {:?} module #{}",
-            descriptor.kind, descriptor.declaration, descriptor.member, descriptor.module.slot
+            "code {:?} declaration {} member {:?} module {:?}",
+            descriptor.kind, descriptor.declaration, descriptor.member, descriptor.module
         ),
         Object::NativeLinkedCode(linked) => format!(
             "linked {:?} unit {} module #{} descriptor {:?}",

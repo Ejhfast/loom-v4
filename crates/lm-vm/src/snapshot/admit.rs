@@ -832,7 +832,13 @@ impl Admit<'_> {
         descriptor: &CodeDescriptor,
         location: &str,
     ) -> Result<(), ImageError> {
-        let artifact = self.verified_module_artifact(objects, descriptor.module, location)?;
+        let module = descriptor.module.as_obj().ok_or_else(|| {
+            ImageError::admission(
+                ImageReason::Code,
+                format!("{location} has no verified module"),
+            )
+        })?;
+        let artifact = self.verified_module_artifact(objects, module, location)?;
         let unit = artifact.root();
         let declaration = descriptor.declaration as usize;
         let Some(entry) = unit

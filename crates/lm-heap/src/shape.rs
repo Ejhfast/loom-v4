@@ -447,8 +447,8 @@ pub enum CodeDescriptorKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeDescriptor {
     pub kind: CodeDescriptorKind,
-    /// A `VerifiedModule` object in this heap.
-    pub module: ObjRef,
+    /// A `VerifiedModule` value in this heap.
+    pub module: Value,
     /// The source export index in the root module interface.
     pub declaration: u32,
     /// The method name for a member descriptor.
@@ -1359,7 +1359,10 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: map(descriptor.module),
+                    module: match descriptor.module {
+                        Value::Obj(reference) => Value::Obj(map(reference)),
+                        other => other,
+                    },
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -1576,7 +1579,7 @@ impl Object {
             | Object::NativeHostResource { .. } => {}
             Object::NativeRegex(_) | Object::NativeRegexMatch(_) => {}
             Object::Substring(_) => {}
-            Object::NativeCodeDescriptor(descriptor) => out.push(descriptor.module),
+            Object::NativeCodeDescriptor(descriptor) => visit(&descriptor.module),
             Object::NativeLinkedCode(linked) => {
                 out.push(linked.module);
                 if let Some(descriptor) = linked.descriptor {
@@ -1645,7 +1648,7 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: descriptor.module,
+                    module: Value::Unit,
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -1749,7 +1752,7 @@ impl Object {
             Object::NativeCodeDescriptor(descriptor) => {
                 Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
                     kind: descriptor.kind,
-                    module: map(descriptor.module),
+                    module: value(descriptor.module),
                     declaration: descriptor.declaration,
                     member: descriptor.member.clone(),
                 }))
@@ -2019,6 +2022,18 @@ mod tests {
                 groups: vec![Some(RegexCaptureRange { start: 0, end: 1 })].into(),
                 names: vec![("whole".to_string(), 0)].into(),
             })),
+            Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                kind: CodeDescriptorKind::Declaration,
+                module: Value::Obj(a),
+                declaration: 3,
+                member: None,
+            })),
+            Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: LinkedCodeKind::Module,
+                unit: [4; 32],
+                module: a,
+                descriptor: None,
+            })),
         ]
     }
 
@@ -2240,6 +2255,24 @@ mod tests {
                 groups: vec![Some(RegexCaptureRange { start: 0, end: 1 })].into(),
                 names: vec![("whole".to_string(), 0)].into(),
             })),
+            Object::NativeCodeDescriptor(Box::new(CodeDescriptor {
+                kind: CodeDescriptorKind::Declaration,
+                module: Value::Obj(ObjRef {
+                    slot: 0,
+                    generation: 0,
+                }),
+                declaration: 0,
+                member: None,
+            })),
+            Object::NativeLinkedCode(Box::new(LinkedCode {
+                kind: LinkedCodeKind::Module,
+                unit: [0; 32],
+                module: ObjRef {
+                    slot: 0,
+                    generation: 0,
+                },
+                descriptor: None,
+            })),
         ];
         assert_eq!(objects.len(), SHAPES.len());
         for (tag, object) in objects.iter().enumerate() {
@@ -2382,6 +2415,7 @@ mod tests {
                 "UdpSocket",
                 "Regex",
                 "RegexMatch",
+                "CodeDescriptor",
             ]
         );
         // A builder holds a private mutable buffer.
@@ -2402,6 +2436,7 @@ mod tests {
                 "SlotChange",
                 "HostResource",
                 "DynRef",
+                "LinkedCode",
             ]
         );
     }
