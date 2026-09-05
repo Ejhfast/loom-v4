@@ -181,6 +181,115 @@ out
 }
 
 #[test]
+fn descriptors_from_another_module_miss_and_survive_a_snapshot() {
+    let tree = TempTree::new("foreign-open");
+    tree.write(
+        "lib/lm.package",
+        "[package]\nname = \"lib\"\nversion = \"0.1.0\"\n",
+    );
+    tree.write(
+        "lib/src/first.lm",
+        r#"
+class Sample
+  def value(self): Int
+    1
+  end
+end
+
+def answer(): Int
+  42
+end
+"#,
+    );
+    tree.write("lib/src/second.lm", "def answer(): Int\n  7\nend\n");
+    tree.write(
+        "app/lm.package",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\nlib = { path = \"../lib\" }\n",
+    );
+    tree.write(
+        "app/src/main.lm",
+        r#"
+use lib.first
+use lib.first.Sample
+use lib.second
+
+first_module = codeof(first)
+second_module = codeof(second)
+declarations = first_module.declarations()
+opened_declaration = second_module.open(declarations.at(1))
+opened_member = second_module.open(declarations.at(0).members().at(0))
+
+declaration_miss = case opened_declaration
+in Def[() -> Int](_) then 0
+in _ then 1
+end
+member_miss = case opened_member
+in Method[(Sample) -> Int](_) then 0
+in _ then 1
+end
+
+(declaration_miss, member_miss, opened_declaration, opened_member)
+"#,
+    );
+    let report = build_package(&tree.root.join("app"), &tree.root.join("build"))
+        .expect("the foreign open package builds");
+    let bytes = std::fs::read(report.artifact.expect("the program artifact exists"))
+        .expect("the artifact reads");
+    for mode in [
+        EngineMode::Interpreter,
+        EngineMode::Auto,
+        EngineMode::Native,
+    ] {
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact publishes");
+        let mut world = World::new_with_engine(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+            Arc::new(Engine::new(mode)),
+        );
+        let outcome = lm_proc::run_world(&mut world);
+        let shown = world.show_outcome(&outcome);
+        let dump = world.dump_live(&outcome);
+        assert_eq!(
+            shown, "Done((1, 1, <opened code>, <opened code>))",
+            "mode {mode:?}\n{dump}"
+        );
+
+        let gate = world.next_gate();
+        let snapshot = world
+            .capture_snapshot(gate, 0, false)
+            .expect("the foreign open result captures");
+        let encoded = snapshot.bytes().expect("the foreign open snapshot encodes");
+        let admitted =
+            lm_testkit::load_snapshot_for_artifact_bytes(&bytes, encoded, LoadLimits::default())
+                .expect("the foreign open snapshot admits");
+
+        let (arena, namespace) =
+            lm_testkit::publish_artifact_bytes(&bytes).expect("the artifact republishes");
+        let mut restored = World::new(
+            arena,
+            namespace,
+            VmConfig::default(),
+            Box::new(RecordingHost::new(1)),
+        );
+        let target = restored.new_child(0).expect("the restore target exists");
+        let vm = restored
+            .restore_image(0, target, &admitted)
+            .expect("the snapshot restores");
+        let RootEvent::Done(value) = restored.run_machine(vm) else {
+            panic!("the restored program does not finish");
+        };
+        assert_eq!(
+            restored.show_value_of(vm, value),
+            "(1, 1, <opened code>, <opened code>)"
+        );
+    }
+}
+
+#[test]
 fn an_exact_open_returns_portable_function_code() {
     let tree = TempTree::new("exact-open");
     tree.write(
@@ -428,8 +537,14 @@ fn a_runtime_module_links_and_opens_in_the_current_image() {
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
     );
     tree.write(
+        "app/src/baseline.lm",
+        "def triple(value: Int): Int\n  value * 3\nend\n",
+    );
+    tree.write(
         "app/src/main.lm",
         r##"
+use baseline
+
 def options(): CompileOptions
   CompileOptions(
     is_main: false,
@@ -488,7 +603,14 @@ def module_is_local(module: ModuleCode): Bool with Vm
   image.activate(program, args: ()).is_err()
 end
 
-def execute(): (String, String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
+def misses_static_module(declaration: DeclarationCode): Bool
+  case codeof(baseline).open(declaration)
+  in Def[(Int) -> Int](_) then false
+  in _ then true
+  end
+end
+
+def execute(): (String, String, Int, Int, Int, Int, Int, Bool, Bool) with Compiler, Vm
   old_image = sys.vm.Vm()
   env = CompileEnv(
     List[VerifiedModule](),
@@ -504,6 +626,7 @@ def execute(): (String, String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
   ).expect("the plugin compiles")
   verified = artifact.verify().expect("the plugin verifies")
   described = "#{verified.name()}.#{verified.declarations().at(0).name()}"
+  foreign_miss = misses_static_module(verified.declarations().at(0))
   first = sys.vm.link(verified).expect("the plugin links")
   second = sys.vm.link(verified).expect("the plugin links once")
   new_image = sys.vm.Vm()
@@ -515,7 +638,8 @@ def execute(): (String, String, Int, Int, Int, Int, Int, Bool) with Compiler, Vm
     find_live(second),
     run_live_in(first, new_image),
     run_live_in(first, old_image),
-    module_is_local(first)
+    module_is_local(first),
+    foreign_miss
   )
 end
 
@@ -546,7 +670,7 @@ execute()
         let shown = world.show_outcome(&outcome);
         let dump = world.dump_live(&outcome);
         assert_eq!(
-            shown, "Done((\"plugin.twice\", \"plugin\", 42, 42, 42, 42, -2, true))",
+            shown, "Done((\"plugin.twice\", \"plugin\", 42, 42, 42, 42, -2, true, true))",
             "mode {mode:?}\n{dump}"
         );
         let gate = world.next_gate();

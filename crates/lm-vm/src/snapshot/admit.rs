@@ -891,11 +891,7 @@ impl Admit<'_> {
                     .get(descriptor.slot as usize)
                     .map(|entry| &entry.object)
                 {
-                    Some(Object::NativeCodeDescriptor(descriptor))
-                        if descriptor.artifact.artifact().id() == unit =>
-                    {
-                        Ok(())
-                    }
+                    Some(Object::NativeCodeDescriptor(_)) => Ok(()),
                     _ => fail(
                         ImageReason::Code,
                         format!("{location} has an invalid opened descriptor"),

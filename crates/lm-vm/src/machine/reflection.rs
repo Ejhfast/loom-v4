@@ -721,9 +721,6 @@ impl Machine {
             Object::NativeCodeDescriptor(descriptor) => (**descriptor).clone(),
             _ => return Err(BAD_TYPE),
         };
-        if descriptor.artifact.artifact().id().into_bytes() != linked.unit {
-            return Err(BAD_STATE);
-        }
         if linked_source(module, ArtifactId::from_bytes(linked.unit)).is_none() {
             return Err(BAD_STATE);
         }
