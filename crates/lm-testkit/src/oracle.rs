@@ -155,6 +155,13 @@ impl<'m> Oracle<'m> {
                 frame.set(*slot, value);
                 Ok(())
             }
+            HStmt::Destructure { value, pattern } => {
+                let value = self.eval(value, frame, depth)?;
+                if !self.pattern_matches(pattern, &value, frame)? {
+                    return Err(Stop::Limit("an irrefutable tuple pattern did not match"));
+                }
+                Ok(())
+            }
             HStmt::AssignField { recv, field, value } => {
                 let recv = self.eval(recv, frame, depth)?;
                 let value = self.eval(value, frame, depth)?;

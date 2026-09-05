@@ -84,3 +84,50 @@ fn a_tuple_pattern_refines_inside_a_constructor() {
                   end\n";
     assert_eq!(run(source), "Done(10)");
 }
+
+#[test]
+fn positional_projection_reads_heterogeneous_tuples() {
+    assert_eq!(
+        run("pair = ((7, \"hi\"), true)\n(pair.0.1, pair.1)\n"),
+        "Done((\"hi\", true))"
+    );
+}
+
+#[test]
+fn positional_projection_checks_the_receiver_and_position() {
+    let receiver = run_allowed("tuple.lm", "value = 1\nvalue.0\n", &[]).expect_err("not a tuple");
+    assert!(
+        receiver.contains("tuple projection requires a tuple"),
+        "{receiver}"
+    );
+
+    let position =
+        run_allowed("tuple.lm", "pair = (1, 2)\npair.2\n", &[]).expect_err("out of range");
+    assert!(position.contains("index 2 is out of range"), "{position}");
+}
+
+#[test]
+fn tuple_assignment_evaluates_its_value_once() {
+    let source = "final class Source\n\
+                    calls: Int = 0\n\
+                    def next(mut self): (Int, (String, Bool))\n\
+                      self.calls = self.calls + 1\n\
+                      (7, (\"hi\", true))\n\
+                    end\n\
+                  end\n\
+                  source = Source()\n\
+                  (number, (text, flag)) = source.next()\n\
+                  (number, text, flag, source.calls)\n";
+    assert_eq!(run(source), "Done((7, \"hi\", true, 1))");
+}
+
+#[test]
+fn tuple_assignment_checks_arity_and_freshness() {
+    let arity =
+        run_allowed("tuple.lm", "(left, right) = (1, 2, 3)\nleft\n", &[]).expect_err("arity");
+    assert!(arity.contains("value size is 3"), "{arity}");
+
+    let existing = run_allowed("tuple.lm", "left = 1\n(left, right) = (2, 3)\nright\n", &[])
+        .expect_err("existing name");
+    assert!(existing.contains("already has a declaration"), "{existing}");
+}

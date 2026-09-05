@@ -384,6 +384,11 @@ pub enum ExprKind {
         ty: Option<TypeExpr>,
         value: Box<Expr>,
     },
+    /// `(left, right) = value` binds one irrefutable tuple pattern.
+    Destructure {
+        pattern: Box<Pattern>,
+        value: Box<Expr>,
+    },
     /// `receiver.field = value`.
     AssignField {
         recv: Box<Expr>,
@@ -492,6 +497,12 @@ pub enum ExprKind {
     Index {
         recv: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// `tuple.0` reads one tuple element by static position.
+    TupleGet {
+        tuple: Box<Expr>,
+        index: i64,
+        index_span: Span,
     },
     /// `value?` returns an error from the enclosing callable.
     Propagate(Box<Expr>),
@@ -798,6 +809,10 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             }
             dump_expr(out, value, depth + 1);
         }
+        ExprKind::Destructure { pattern, value } => {
+            let _ = writeln!(out, "destructure {}", dump_pattern(pattern));
+            dump_expr(out, value, depth + 1);
+        }
         ExprKind::AssignField {
             recv, field, value, ..
         } => {
@@ -973,6 +988,10 @@ fn dump_expr(out: &mut String, expr: &Expr, depth: usize) {
             out.push_str("index\n");
             dump_expr(out, recv, depth + 1);
             dump_expr(out, index, depth + 1);
+        }
+        ExprKind::TupleGet { tuple, index, .. } => {
+            let _ = writeln!(out, "tuple-get {index}");
+            dump_expr(out, tuple, depth + 1);
         }
         ExprKind::Propagate(value) => {
             out.push_str("propagate\n");

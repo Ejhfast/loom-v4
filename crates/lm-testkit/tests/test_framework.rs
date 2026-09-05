@@ -200,3 +200,49 @@ end
             .all(|class| class.name != "HiddenTest")
     }));
 }
+
+#[test]
+fn the_failure_helper_infers_fixture_result_types() {
+    let source = r#"
+use std.test
+
+def inferred(): Result[Int, test.TestFailure]
+  test.fail("inferred")
+end
+
+def explicit(): Result[String, test.TestFailure]
+  test.fail[String]("explicit")
+end
+
+left = case inferred()
+in Err(problem) then problem.message
+in Ok(_) then "unexpected"
+end
+right = case explicit()
+in Err(problem) then problem.message
+in Ok(_) then "unexpected"
+end
+(left, right)
+"#;
+    assert_eq!(
+        lm_testkit::run_allowed("generic-test-fail.lm", source, &[])
+            .expect("the generic failure helper runs"),
+        "Done((\"inferred\", \"explicit\"))"
+    );
+}
+
+#[test]
+fn an_unconstrained_failure_result_needs_a_type_argument() {
+    let source = r#"
+use std.test
+
+def fixture(): Result[Int, test.TestFailure]
+  value = test.fail("missing")?
+  Ok(value)
+end
+fixture()
+"#;
+    let error = lm_testkit::compile_text("generic-test-fail.lm", source)
+        .expect_err("the result type is unconstrained");
+    assert!(error.contains("E1045"), "{error}");
+}

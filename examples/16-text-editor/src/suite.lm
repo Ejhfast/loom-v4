@@ -12,7 +12,7 @@ use text
 # Render one search result as text, so a test can compare it.
 def at(found: Option[(Int, Int)]): String
   case found
-  in Some((row, column)) then "#{row},#{column}"
+  in Some(position) then "#{position.0},#{position.1}"
   in None then "none"
   end
 end
@@ -20,7 +20,7 @@ end
 def sample(): Result[document.Document, test.TestFailure]
   case document.parse(b"abc\nb\n", None)
   in Ok(doc) then Ok(doc)
-  in Err(message) then Err(test.TestFailure(message))
+  in Err(message) then test.fail(message)
   end
 end
 

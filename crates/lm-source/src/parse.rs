@@ -38,6 +38,78 @@ pub(crate) fn parse_tokens(text: &str, tokens: &[Token]) -> Result<Module, Diagn
     parser.module()
 }
 
+/// Convert one tuple assignment target to an irrefutable pattern.
+fn assignment_pattern(expr: Expr) -> Result<Pattern, Diagnostic> {
+    let span = expr.span;
+    let kind = match expr.kind {
+        ExprKind::Name(name) if name == "_" => PatternKind::Wildcard,
+        ExprKind::Name(name) => PatternKind::Name(name),
+        ExprKind::TupleLit(items) => PatternKind::Tuple(
+            items
+                .into_iter()
+                .map(assignment_pattern)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        _ => {
+            return Err(Diagnostic::new(
+                "E1002",
+                "a tuple binding can contain only names, `_`, and nested tuples",
+                span,
+            ));
+        }
+    };
+    Ok(Pattern { kind, span })
+}
+
+/// Build one assignment after its recursive value parse finishes.
+fn finish_assignment(target: Expr, value: Expr) -> Result<Expr, Diagnostic> {
+    let span = target.span.to(value.span);
+    if matches!(&target.kind, ExprKind::TupleLit(_)) {
+        let pattern = assignment_pattern(target)?;
+        return Ok(Expr {
+            kind: ExprKind::Destructure {
+                pattern: Box::new(pattern),
+                value: Box::new(value),
+            },
+            span,
+        });
+    }
+    match target.kind {
+        ExprKind::Name(name) => Ok(Expr {
+            kind: ExprKind::Assign {
+                name,
+                name_span: target.span,
+                ty: None,
+                value: Box::new(value),
+            },
+            span,
+        }),
+        ExprKind::Field {
+            recv,
+            name,
+            name_span,
+        } => Ok(Expr {
+            kind: ExprKind::AssignField {
+                recv,
+                field: name,
+                field_span: name_span,
+                value: Box::new(value),
+            },
+            span,
+        }),
+        ExprKind::Index { .. } => Err(Diagnostic::new(
+            "E1002",
+            "index assignment is not supported. Use `put` for a map.",
+            target.span,
+        )),
+        _ => Err(Diagnostic::new(
+            "E1002",
+            "this expression is not a valid assignment target",
+            target.span,
+        )),
+    }
+}
+
 struct Parser<'t> {
     /// The source text. The trailing-closure rule reads it to decide
     /// whether a newline separates a call from a following closure.
@@ -1357,41 +1429,7 @@ impl Parser<'_> {
         }
         self.pos += 1;
         let value = self.expr()?;
-        let span = target.span.to(value.span);
-        match target.kind {
-            ExprKind::Name(name) => Ok(Expr {
-                kind: ExprKind::Assign {
-                    name,
-                    name_span: target.span,
-                    ty: None,
-                    value: Box::new(value),
-                },
-                span,
-            }),
-            ExprKind::Field {
-                recv,
-                name,
-                name_span,
-            } => Ok(Expr {
-                kind: ExprKind::AssignField {
-                    recv,
-                    field: name,
-                    field_span: name_span,
-                    value: Box::new(value),
-                },
-                span,
-            }),
-            ExprKind::Index { .. } => Err(Diagnostic::new(
-                "E1002",
-                "index assignment is not supported. Use `put` for a map.",
-                target.span,
-            )),
-            _ => Err(Diagnostic::new(
-                "E1002",
-                "this expression is not a valid assignment target",
-                target.span,
-            )),
-        }
+        finish_assignment(target, value)
     }
 
     /// Record one more nesting level, or reject input that is too deep.
@@ -1664,16 +1702,43 @@ impl Parser<'_> {
                 }
                 Tok::Dot => {
                     self.pos += 1;
-                    let (name, name_span) = self.ident("a field or method name")?;
-                    let span = expr.span.to(name_span);
-                    expr = Expr {
-                        kind: ExprKind::Field {
-                            recv: Box::new(expr),
-                            name,
-                            name_span,
-                        },
-                        span,
-                    };
+                    if matches!(self.peek(), Tok::Int(_)) {
+                        let token = self.next();
+                        let Tok::Int(index) = token.tok else {
+                            unreachable!();
+                        };
+                        let text = &self.text[token.span.lo as usize..token.span.hi as usize];
+                        if !text
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || byte == b'_')
+                        {
+                            return Err(Diagnostic::new(
+                                "E1048",
+                                "a tuple position must use a decimal integer literal",
+                                token.span,
+                            ));
+                        }
+                        let span = expr.span.to(token.span);
+                        expr = Expr {
+                            kind: ExprKind::TupleGet {
+                                tuple: Box::new(expr),
+                                index,
+                                index_span: token.span,
+                            },
+                            span,
+                        };
+                    } else {
+                        let (name, name_span) = self.ident("a field or method name")?;
+                        let span = expr.span.to(name_span);
+                        expr = Expr {
+                            kind: ExprKind::Field {
+                                recv: Box::new(expr),
+                                name,
+                                name_span,
+                            },
+                            span,
+                        };
+                    }
                 }
                 Tok::Question => {
                     let question = self.next();
@@ -2818,6 +2883,35 @@ mod tests {
             ExprKind::Unit => {}
             other => panic!("expected unit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_tuple_projections() {
+        let module = parse("pair = ((1, 2), 3)\npair.0.1\n").unwrap();
+        let ExprKind::TupleGet { tuple, index, .. } = &module.entry[1].kind else {
+            panic!("expected a tuple projection");
+        };
+        assert_eq!(*index, 1);
+        assert!(matches!(tuple.kind, ExprKind::TupleGet { index: 0, .. }));
+
+        let error = parse("pair = (1, 2)\npair.0x1\n").unwrap_err();
+        assert_eq!(error.code, "E1048");
+    }
+
+    #[test]
+    fn parses_tuple_destructuring_assignments() {
+        let module = parse("(left, (middle, _)) = (1, (2, 3))\nleft\n").unwrap();
+        let ExprKind::Destructure { pattern, .. } = &module.entry[0].kind else {
+            panic!("expected a tuple binding");
+        };
+        assert!(matches!(pattern.kind, PatternKind::Tuple(_)));
+    }
+
+    #[test]
+    fn rejects_refutable_destructuring_assignments() {
+        let error = parse("(Some(value), other) = pair\n").unwrap_err();
+        assert_eq!(error.code, "E1002");
+        assert!(error.message.contains("tuple binding"), "{}", error.message);
     }
 
     #[test]

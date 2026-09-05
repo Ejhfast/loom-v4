@@ -335,6 +335,11 @@ pub enum HStmt {
         slot: u32,
         value: HExpr,
     },
+    /// Evaluate one value and bind one irrefutable tuple pattern.
+    Destructure {
+        value: HExpr,
+        pattern: Box<HPattern>,
+    },
     /// `receiver.field = value` with a resolved layout index.
     AssignField {
         recv: HExpr,
@@ -967,6 +972,7 @@ impl HStmt {
     pub fn flow(&self) -> Flow {
         match self {
             HStmt::Assign { value, .. } => value.flow,
+            HStmt::Destructure { value, .. } => value.flow,
             HStmt::AssignField { recv, value, .. } => Flow::strict([recv.flow, value.flow]),
             HStmt::While { cond, .. } => cond.flow,
             HStmt::For { source, .. } => source.flow,

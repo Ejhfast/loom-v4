@@ -223,6 +223,7 @@ impl CoreDemand {
                 self.add_optional_type(ty.as_ref());
                 self.add_expr(bundle, value);
             }
+            ExprKind::Destructure { value, .. } => self.add_expr(bundle, value),
             ExprKind::AssignField { recv, value, .. } => {
                 self.add_expr(bundle, recv);
                 self.add_expr(bundle, value);
@@ -395,6 +396,7 @@ impl CoreDemand {
                 self.add_expr(bundle, recv);
                 self.add_expr(bundle, index);
             }
+            ExprKind::TupleGet { tuple, .. } => self.add_expr(bundle, tuple),
             ExprKind::Propagate(value) => {
                 self.name("Result");
                 self.add_expr(bundle, value);

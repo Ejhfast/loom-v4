@@ -6,6 +6,120 @@
 use super::*;
 
 impl<'o> FnChecker<'o> {
+    /// Check one tuple binding and add its fresh names to this scope.
+    pub(super) fn check_destructure(
+        &mut self,
+        ctx: &mut Ctx,
+        pattern: &ast::Pattern,
+        value: &ast::Expr,
+    ) -> Result<HStmt, Diagnostic> {
+        let value = self.synth_expr(ctx, value)?;
+        let mut binds = Vec::new();
+        let pattern =
+            self.check_binding_pattern(ctx, pattern, value.ty, value.mutable, &mut binds)?;
+        Ok(HStmt::Destructure {
+            value,
+            pattern: Box::new(pattern),
+        })
+    }
+
+    /// Check an irrefutable tuple binding pattern.
+    fn check_binding_pattern(
+        &mut self,
+        ctx: &mut Ctx,
+        pattern: &ast::Pattern,
+        value_ty: TypeId,
+        value_mutable: bool,
+        binds: &mut Vec<String>,
+    ) -> Result<HPattern, Diagnostic> {
+        match &pattern.kind {
+            PatternKind::Wildcard => Ok(HPattern::Wildcard),
+            PatternKind::Tuple(elements) => {
+                let Type::Tuple(element_tys) = ctx.store.get(value_ty).clone() else {
+                    return Err(Diagnostic::new(
+                        "E1048",
+                        format!(
+                            "a tuple binding requires a tuple value; found {}",
+                            ctx.display_type(&self.env, value_ty)
+                        ),
+                        pattern.span,
+                    ));
+                };
+                if elements.len() != element_tys.len() {
+                    return Err(Diagnostic::new(
+                        "E1048",
+                        format!(
+                            "the tuple binding size is {}, but the value size is {}",
+                            elements.len(),
+                            element_tys.len()
+                        ),
+                        pattern.span,
+                    ));
+                }
+                let mut checked = Vec::with_capacity(elements.len());
+                for (element, element_ty) in elements.iter().zip(element_tys.iter()) {
+                    checked.push(self.check_binding_pattern(
+                        ctx,
+                        element,
+                        *element_ty,
+                        value_mutable,
+                        binds,
+                    )?);
+                }
+                Ok(HPattern::Tuple {
+                    elems: checked,
+                    elem_tys: element_tys,
+                })
+            }
+            PatternKind::Name(name) => {
+                if binds.contains(name) {
+                    return Err(Diagnostic::new(
+                        "E1020",
+                        format!("the name `{name}` appears twice in this tuple binding"),
+                        pattern.span,
+                    ));
+                }
+                if self.resolve_name(name)?.is_some() {
+                    return Err(Diagnostic::new(
+                        "E1020",
+                        format!("the name `{name}` already has a declaration"),
+                        pattern.span,
+                    ));
+                }
+                if self.module_func(ctx, name).is_some()
+                    || ctx.lookup_type(name, &self.env).is_some()
+                    || ctx.constant_names.contains(name)
+                {
+                    return Err(Diagnostic::new(
+                        "E1019",
+                        format!("cannot bind the existing declaration `{name}`"),
+                        pattern.span,
+                    ));
+                }
+                if ctx.store.contains_callback(value_ty) {
+                    return Err(Diagnostic::new(
+                        "E1064",
+                        "a nonescaping callback cannot be stored in a local",
+                        pattern.span,
+                    ));
+                }
+                binds.push(name.clone());
+                let slot = self.locals.len() as u32;
+                self.locals.push((value_ty, value_mutable));
+                self.scopes
+                    .last_mut()
+                    .expect("a scope is always open")
+                    .insert(name.clone(), slot);
+                Ok(HPattern::Bind(slot))
+            }
+            _ => Err(Diagnostic::new(
+                "E1002",
+                "a tuple binding can contain only names, `_`, and nested tuples",
+                pattern.span,
+            )),
+        }
+    }
+
     /// Check one pattern against a scrutinee type and bind its names.
     pub(super) fn check_pattern(
         &mut self,

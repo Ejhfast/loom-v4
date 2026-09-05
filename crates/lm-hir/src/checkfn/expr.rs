@@ -28,6 +28,12 @@ impl<'o> FnChecker<'o> {
                 mutable: true,
                 kind: HExprKind::Block(vec![self.check_assign(ctx, name, *name_span, ty, value)?]),
             }),
+            ExprKind::Destructure { pattern, value } => Ok(HExpr {
+                flow: Flow::Normal,
+                ty: UNIT,
+                mutable: true,
+                kind: HExprKind::Block(vec![self.check_destructure(ctx, pattern, value)?]),
+            }),
             ExprKind::AssignField {
                 recv,
                 field,
@@ -391,6 +397,11 @@ impl<'o> FnChecker<'o> {
                 args,
             } => self.synth_super_call(ctx, name, *name_span, args, expr.span),
             ExprKind::Index { recv, index } => self.synth_index(ctx, recv, index, expr.span),
+            ExprKind::TupleGet {
+                tuple,
+                index,
+                index_span,
+            } => self.synth_tuple_get(ctx, tuple, *index, *index_span),
             ExprKind::Propagate(value) => self.check_propagate(ctx, value, expr.span),
             ExprKind::TupleLit(items) => {
                 let mut checked = Vec::new();

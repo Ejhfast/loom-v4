@@ -905,6 +905,7 @@ fn collect_dependency_block(body: &[HStmt], out: &mut DependencyReferences) {
 fn collect_dependency_stmt(statement: &HStmt, out: &mut DependencyReferences) {
     match statement {
         HStmt::Assign { value, .. } => collect_dependency_expr(value, out),
+        HStmt::Destructure { value, .. } => collect_dependency_expr(value, out),
         HStmt::AssignField { recv, value, .. } => {
             collect_dependency_expr(recv, out);
             collect_dependency_expr(value, out);

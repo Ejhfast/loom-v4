@@ -6,6 +6,48 @@
 use super::*;
 
 impl<'o> FnChecker<'o> {
+    /// Read one tuple element through a source positional projection.
+    pub(super) fn synth_tuple_get(
+        &mut self,
+        ctx: &mut Ctx,
+        tuple: &ast::Expr,
+        index: i64,
+        index_span: Span,
+    ) -> Result<HExpr, Diagnostic> {
+        let tuple_span = tuple.span;
+        let tuple = self.synth_expr(ctx, tuple)?;
+        let Type::Tuple(elements) = ctx.store.get(tuple.ty).clone() else {
+            return Err(Diagnostic::new(
+                "E1048",
+                format!(
+                    "tuple projection requires a tuple; found {}",
+                    ctx.display_type(&self.env, tuple.ty)
+                ),
+                tuple_span,
+            ));
+        };
+        if index < 0 || index as usize >= elements.len() {
+            return Err(Diagnostic::new(
+                "E1048",
+                format!(
+                    "the tuple size is {}; index {index} is out of range",
+                    elements.len()
+                ),
+                index_span,
+            ));
+        }
+        let mutable = tuple.mutable;
+        Ok(HExpr {
+            flow: Flow::Normal,
+            ty: elements[index as usize],
+            mutable,
+            kind: HExprKind::TupleGet {
+                tuple: Box::new(tuple),
+                index: index as u32,
+            },
+        })
+    }
+
     pub(super) fn synth_field(
         &mut self,
         ctx: &mut Ctx,

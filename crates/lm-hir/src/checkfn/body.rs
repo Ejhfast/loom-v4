@@ -84,6 +84,7 @@ impl<'o> FnChecker<'o> {
                 ty,
                 value,
             } => self.check_assign(ctx, name, *name_span, ty, value),
+            ExprKind::Destructure { pattern, value } => self.check_destructure(ctx, pattern, value),
             ExprKind::AssignField {
                 recv,
                 field,

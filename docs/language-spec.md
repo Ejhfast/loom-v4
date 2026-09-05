@@ -788,9 +788,22 @@ Tuples are fixed-arity immutable structural values:
 ```lm
 point = (10, 20)
 single = ("only",)
+column = point.1
 ```
 
-`()` is unit, not a zero-field heap tuple. Tuple elements are covariant and addressed only by compile-time position. Tuples are used for lightweight returns, map entries, and typed operation argument packs. Their maximum portable arity is 16; larger records must be classes.
+`()` is unit, not a zero-field heap tuple. Tuple elements are covariant and addressed only by compile-time position.
+
+`tuple.N` reads position `N`. `N` is a decimal literal below the tuple arity.
+
+An irrefutable tuple assignment binds fresh names. It can contain names, `_`, and nested tuple patterns.
+
+```lm
+(row, column) = point
+```
+
+Tuples support lightweight returns, map entries, and typed operation argument packs. Their maximum portable arity is 16.
+
+Larger records must be classes.
 
 Core declares native carriers named `Tuple2` through `Tuple16`.
 
@@ -1303,7 +1316,13 @@ counts = {"a": 1, "b": 2}
 
 A one-element tuple requires a trailing comma: `(value,)`. Parentheses without a comma remain grouping.
 
-List elements and map keys/values require a common non-`Any` type unless the literal is explicitly expected as an `Any`-containing collection. Unrelated members do not silently produce `List[Any]` or `Map[K,Any]`. Empty literals need an expected type. Maps preserve insertion order. `list[index]` and `map[key]` are faulting access; non-faulting `get` returns `Option`. Indexing a tuple is allowed only with a compile-time integer literal.
+List elements and map keys/values require a common non-`Any` type unless the expected collection contains `Any`.
+
+Unrelated members do not silently produce `List[Any]` or `Map[K,Any]`. Empty literals need an expected type.
+
+Maps preserve insertion order. `list[index]` and `map[key]` are faulting access. Non-faulting `get` returns `Option`.
+
+Tuple indexing requires a compile-time integer literal. Positional projection uses `tuple.N`.
 
 ### 6.6 Precedence
 
@@ -5706,6 +5725,12 @@ class ArithmeticTest implements Test
 end
 ```
 
+`test.fail[T](message)` returns `Result[T,TestFailure]`. The checker infers `T` from an expected result type.
+
+Use an explicit type argument when no expected type exists.
+
+Use `map_error` to convert a structured source error into `TestFailure`.
+
 `lm test` builds a generated entry. A package does not need a test `main` function.
 
 The entry gives `std.test` exact descriptors for root-package modules. Dependency tests do not run.
@@ -5915,8 +5940,12 @@ opt_separators  = { NL | ";" } ;
 
 expression      = assignment ;
 assignment      = IDENT, [ ":", type ], "=", assignment
+                | tuple_binding, "=", assignment
                 | postfix, "=", assignment
                 | logic_or ;
+tuple_binding   = "(", binding_item, ",",
+                  [ binding_item, { ",", binding_item } ], ")" ;
+binding_item    = IDENT | "_" | tuple_binding ;
 
 logic_or        = logic_and, { "or", logic_and } ;
 logic_and       = equality, { "and", equality } ;
@@ -5933,12 +5962,13 @@ multiplicative  = unary, { ( "*" | "/" | "%" ), unary } ;
 unary           = ( "not" | "-" | "~" ), unary | postfix ;
 
 postfix         = primary,
-                  { generic_apply_suffix | call_suffix | field_suffix | index_suffix
+                  { generic_apply_suffix | call_suffix | field_suffix | tuple_suffix | index_suffix
                   | propagate_suffix },
                   [ trailing_closure, { propagate_suffix } ] ;
 generic_apply_suffix = "[", type, { ",", type }, "]" ;
 call_suffix     = "(", [ arguments ], ")" ;
 field_suffix    = ".", IDENT ;
+tuple_suffix    = ".", INT ;
 index_suffix    = "[", expression, "]" ;
 propagate_suffix= "?" ;
 trailing_closure= closure ;

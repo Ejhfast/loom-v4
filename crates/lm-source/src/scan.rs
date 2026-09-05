@@ -515,6 +515,7 @@ impl<'a> Scanner<'a> {
     }
 
     fn scan_number(&mut self, start: usize) -> Result<(), Diagnostic> {
+        let after_dot = matches!(self.tokens.last().map(|token| &token.tok), Some(Tok::Dot));
         let radix: u32;
         if self.peek_byte(0) == b'0'
             && matches!(self.peek_byte(1), b'x' | b'o' | b'b')
@@ -552,7 +553,7 @@ impl<'a> Scanner<'a> {
             self.pos = digits_start.max(self.pos);
             return Err(self.error("E0007", "invalid numeric literal", start));
         }
-        if radix == 10 {
+        if radix == 10 && !after_dot {
             let next = self.peek_byte(0);
             let exponent = (next == b'e' || next == b'E')
                 && (self.peek_byte(1).is_ascii_digit()
@@ -1096,6 +1097,21 @@ mod tests {
                 Tok::Float(1e9f64.to_bits()),
                 Tok::Float(2.5e-3f64.to_bits()),
                 Tok::Float(9_223_372_036_854_775_808.0f64.to_bits()),
+                Tok::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_chained_tuple_projections_as_integer_positions() {
+        assert_eq!(
+            kinds("value.0.1"),
+            vec![
+                Tok::Ident("value".to_string()),
+                Tok::Dot,
+                Tok::Int(0),
+                Tok::Dot,
+                Tok::Int(1),
                 Tok::Eof,
             ]
         );

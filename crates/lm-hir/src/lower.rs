@@ -1245,6 +1245,14 @@ impl<'a, 'm> Lowerer<'a, 'm> {
                 }
                 self.emit(Instr::StoreLocal(*slot));
             }
+            HStmt::Destructure { value, pattern } => {
+                if !self.lower_operand(value) {
+                    return;
+                }
+                let source = self.scratch_of(value.ty);
+                self.emit(Instr::StoreLocal(source));
+                self.lower_pattern(pattern, source, None);
+            }
             HStmt::AssignField { recv, field, value } => {
                 if !self.lower_operand(recv) || !self.lower_operand(value) {
                     return;
@@ -3485,6 +3493,10 @@ fn shift_stmt_in_place(stmt: &mut HStmt, base: u32, max: &mut u32) {
         HStmt::Assign { slot, value } => {
             shift_slot(slot, base, max);
             shift_expr_in_place(value, base, max);
+        }
+        HStmt::Destructure { value, pattern } => {
+            shift_expr_in_place(value, base, max);
+            shift_pattern_in_place(pattern, base, max);
         }
         HStmt::AssignField { recv, value, .. } => {
             shift_expr_in_place(recv, base, max);

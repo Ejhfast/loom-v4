@@ -51,7 +51,7 @@ def pass(): Result[(), TestFailure]
   Ok(())
 end
 
-def fail(message: Text): Result[(), TestFailure]
+def fail[T](message: Text): Result[T, TestFailure]
   Err(TestFailure(message.to_string()))
 end
 
