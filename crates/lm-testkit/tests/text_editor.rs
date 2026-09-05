@@ -134,6 +134,8 @@ fn the_editor_package_tests_pass() {
     for grant in ["Vm", "Args", "Io.Write"] {
         world.allow(grant).expect("the test grant exists");
     }
+    // `lm test` passes each method's declared row to its child VM.
+    world.set_root_activation_policy(lm_vm::ActivationPolicy::PassDeclared);
     let outcome = lm_proc::run_world(&mut world);
     assert_eq!(world.show_outcome(&outcome), "Done(0)");
 }

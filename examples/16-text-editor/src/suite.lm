@@ -7,6 +7,7 @@
 use std.test
 use document
 use editor
+use main
 use text
 
 # Render one search result as text, so a test can compare it.
@@ -183,5 +184,180 @@ class EditorTest implements Test
     state.move_home()
     state.insert_tab()
     test.equal("    abcb", state.doc.line(0))
+  end
+end
+
+# ---- end-to-end sessions --------------------------------------
+#
+# The tests below run the real editor loop in a child VM. The test
+# drives that VM and answers every operation itself. It supplies the
+# keys one read at a time, reports one terminal size, keeps every
+# frame, and refuses the file system. No terminal and no file exist,
+# and each run gives the same frames.
+
+# One editor session over one document. The entry that `lm run`
+# uses adds the terminal checks and raw mode around this loop.
+def session(doc: document.Document): (Bytes, String) with Clock.Sleep, Fs, Io, Tty, Wait
+  state = editor.Editor(doc)
+  main.edit_loop(state, Tty())
+  (state.doc.bytes(), state.message)
+end
+
+# What one driven session produced.
+final class SessionReport
+  bytes: Bytes
+  message: String
+  frames: List[Bytes]
+  transcript: List[String]
+
+  def init(mut self, bytes: Bytes, message: String, frames: List[Bytes], transcript: List[String])
+    self.bytes = bytes
+    self.message = message
+    self.frames = frames
+    self.transcript = transcript
+  end
+
+  # The document text after the session.
+  def text(self): String
+    case self.bytes.utf8()
+    in Ok(value) then value.to_string()
+    in Err(_) then ""
+    end
+  end
+
+  # One drawn frame as text. Frame 0 precedes the first key.
+  def frame(self, index: Int): String
+    case self.frames.get(index)
+    in None then ""
+    in Some(bytes)
+      case bytes.utf8()
+      in Ok(value) then value.to_string()
+      in Err(_) then ""
+      end
+    end
+  end
+
+  # Report whether any drawn frame contains `needle`.
+  def drew(self, needle: Text): Bool
+    index = 0
+    while index < self.frames.len()
+      if self.frame(index).contains(needle) then return true end
+      index = index + 1
+    end
+    false
+  end
+
+  def performed(self, name: Text): Int
+    count = 0
+    for entry in self.transcript
+      if entry == name then count = count + 1 end
+    end
+    count
+  end
+end
+
+# Drive one session. Each read receives the next chunk of `script`.
+# After the last chunk a read receives no bytes, which ends the
+# editor loop. Each write is one frame. A save reaches no file: the
+# driver answers the open request with an error.
+def drive_session(doc: document.Document, script: List[Bytes]): Result[SessionReport, test.TestFailure] with Vm
+  run = sys.vm.Vm().activate_or_fault(session, args: (doc,))
+  frames = List[Bytes]()
+  transcript = List[String]()
+  next = 0
+  loop do
+    case run.drive()
+    in Asked(request)
+      transcript.push(request.op_name())
+      case request
+      in Call(Io.ReadBytes, call, (_count,))
+        chunk = if next < script.len() then script.at(next) else Bytes("") end
+        next = next + 1
+        run.answer(call, Ok(chunk))
+      in Call(Io.Write, call, (bytes,))
+        frames.push(bytes)
+        run.answer(call, Ok(bytes.len()))
+      in Call(Tty.Size, call, (_stream,))
+        run.answer(call, Ok(TtySize(40, 6)))
+      in Call(Fs.Open, call, (_path, _options))
+        run.answer(call, Err(FsError.Failed("the test has no file system")))
+      in _
+        run.dispatch(request)
+      end
+    in Done((bytes, message))
+      return Ok(SessionReport(bytes, message, frames, transcript))
+    in Fault(problem)
+      return test.fail("the session faulted with #{problem.code()}")
+    end
+  end
+end
+
+def sample_file(): Result[document.Document, test.TestFailure]
+  document.parse(b"alpha\nbeta\ngamma\n", Some("notes.txt")).map_error() { |m: String| test.TestFailure(m) }
+end
+
+class SessionTest implements Test
+  # Down, Ctrl-E, `!`, Enter, `gamma`, Ctrl-S, one key for each read.
+  # The editor draws one frame after each key. The status line shows
+  # the cursor, the modified marker, and the line count.
+  def each_key_draws_one_frame(self): Result[(), test.TestFailure] with Vm
+    report = drive_session(
+      sample_file()?,
+      [b"\x1b[B", b"\x05", b"!", b"\r", b"gamma", b"\x13"]
+    )?
+    test.equal(7, report.frames.len())?
+    test.equal(7, report.performed("Io.ReadBytes"))?
+    test.equal("Tty.Size", report.transcript.at(0))?
+    test.expect(report.frame(0).contains("1:1  3 lines"), "the first frame is not at the start")?
+    test.expect(report.frame(1).contains("2:1  3 lines"), "Down did not move to the second line")?
+    test.expect(report.frame(2).contains("2:5  3 lines"), "Ctrl-E did not reach the line end")?
+    test.expect(report.frame(3).contains("beta!"), "the typed character is not drawn")?
+    test.expect(report.frame(3).contains("(modified)"), "the edit did not mark the file")?
+    test.expect(report.frame(4).contains("3:1  4 lines"), "Enter did not split the line")?
+    test.expect(report.frame(5).contains("3:6  4 lines"), "typing did not advance the cursor")?
+    test.expect(report.frame(6).contains("save failed"), "the refused save left no message")?
+    test.equal(1, report.performed("Fs.Open"))?
+    test.equal("alpha\nbeta!\ngamma\ngamma\n", report.text())
+  end
+
+  # The same keys in one read are a burst. The editor applies the
+  # burst first and draws one frame after it.
+  def a_burst_draws_one_frame_after_the_keys(self): Result[(), test.TestFailure] with Vm
+    report = drive_session(sample_file()?, [b"\x1b[B\x05!\rgamma\x13"])?
+    test.equal(2, report.frames.len())?
+    test.expect(report.frame(1).contains("save failed"), "the burst frame lacks the last message")?
+    test.equal("alpha\nbeta!\ngamma\ngamma\n", report.text())
+  end
+
+  # Ctrl-F, then `beta` one key at a time. The prompt grows with
+  # each key, and the frame inverts the current match.
+  def an_incremental_search_marks_each_match(self): Result[(), test.TestFailure] with Vm
+    report = drive_session(sample_file()?, [b"\x06", b"b", b"e", b"t", b"a"])?
+    test.equal(6, report.frames.len())?
+    test.expect(report.frame(1).contains("Find:    arrows"), "Ctrl-F drew no empty prompt")?
+    test.expect(report.frame(2).contains("Find: b "), "the first key did not reach the prompt")?
+    test.expect(report.frame(2).contains("\x1b[7mb\x1b[0m"), "the first match is not inverted")?
+    test.expect(report.frame(5).contains("\x1b[7mbeta\x1b[0m"), "the full match is not inverted")?
+    test.equal(0, report.performed("Fs.Open"))
+  end
+
+  # One Ctrl-Q on a changed document asks for confirmation. A second
+  # Ctrl-Q ends the loop before the editor reads or draws again.
+  def quitting_a_changed_document_needs_confirmation(self): Result[(), test.TestFailure] with Vm
+    once = drive_session(sample_file()?, [b"x", b"\x11"])?
+    test.expect(once.frame(2).contains("unsaved changes"), "the first Ctrl-Q asked nothing")?
+    test.equal(3, once.performed("Io.ReadBytes"))?
+    twice = drive_session(sample_file()?, [b"x", b"\x11", b"\x11"])?
+    test.equal(3, twice.performed("Io.ReadBytes"))?
+    test.equal(3, twice.frames.len())?
+    test.equal("xalpha\nbeta\ngamma\n", twice.text())
+  end
+
+  # A session with no keys draws one frame and ends when input ends.
+  def an_empty_session_draws_once_and_ends(self): Result[(), test.TestFailure] with Vm
+    report = drive_session(sample_file()?, List[Bytes]())?
+    test.equal(1, report.frames.len())?
+    test.equal(1, report.performed("Io.ReadBytes"))?
+    test.equal("alpha\nbeta\ngamma\n", report.text())
   end
 end

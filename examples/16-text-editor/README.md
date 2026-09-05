@@ -111,3 +111,10 @@ its own child VM. The tests never enter the program artifact.
 ```sh
 ./target/release/lm test examples/16-text-editor
 ```
+
+The suite also drives complete editing sessions. Each session runs the
+real editor loop in a child VM. The test answers every operation from
+the loop. It feeds one key per read and reports one terminal size. It
+keeps each drawn frame and refuses the save request. The test then
+checks the frame after each key. The run needs no terminal and no file.
+It gives the same frames every time.
