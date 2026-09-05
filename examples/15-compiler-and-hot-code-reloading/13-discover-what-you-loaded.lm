@@ -1,0 +1,147 @@
+# Discover what you loaded, then decide what to run.
+#
+# Run with `--allow Compiler,Vm`.
+#
+# Code compiled at run time passes through three states. Each state
+# has its own type:
+#
+# - `verify` gives a `VerifiedModule`. It is portable and sendable.
+#   Its descriptions name each declaration, its kind, and its
+#   members. Nothing in it can run.
+# - `sys.vm.link` adds the module to this image. It gives a
+#   `ModuleCode`, which stays in this machine.
+# - `open` refines one description against the linked module. A
+#   matching arm binds a typed value: a callable, a constant, a
+#   class type, or exact portable code.
+#
+# The host below knows no name from the plugin source. It reads the
+# descriptions first, then opens each declaration by shape.
+
+def build(text: String): Result[VerifiedModule, CodeError] with Compiler
+  # An empty compile environment. The plugin can name no module of
+  # this program. Core names such as `Display` stay available.
+  env = CompileEnv(
+    List[VerifiedModule](),
+    List[(String, String)](),
+    List[(String, DefinitionSpec)]()
+  )
+  options = CompileOptions(
+    is_main: false,
+    dynamic_result: false,
+    late_definitions: false,
+    late_functions: List[String](),
+    late_classes: List[String]()
+  )
+  artifact = case sys.compiler.compile("plugin", "plugin.lm", text, env, options)
+  in Ok(value) then value
+  in Err(problem) then return Err(CodeError(problem.message))
+  end
+  artifact.verify()
+end
+
+# The plugin declares a constant, three functions, and one class.
+def plugin_source(): String
+  "const NAME: String = \"arith\"\n" +
+    "def add(n: Int): Int\n  n + 1\nend\n" +
+    "def double(n: Int): Int\n  n * 2\nend\n" +
+    "def shout(): Int with Io.Write\n  print(\"loud\\n\")\n  1\nend\n" +
+    "final class Counter implements Display\n" +
+    "  count: Int = 0\n" +
+    "  def bump(mut self): Int\n" +
+    "    self.count = self.count + 1\n" +
+    "    self.count\n" +
+    "  end\n" +
+    "  def append_to(self, mut builder: StringBuilder)\n" +
+    "    builder.append(\"Counter(\")\n" +
+    "    builder.append_int(self.count)\n" +
+    "    builder.append(\")\")\n" +
+    "  end\n" +
+    "end\n"
+end
+
+# Describe the module before it is linked. This step needs no `Vm`.
+def describe(module: VerifiedModule): List[String]
+  out = List[String]()
+  for declaration in module.declarations()
+    kind = case declaration.kind()
+    in CodeKind.Class then "class"
+    in CodeKind.Enum then "enum"
+    in CodeKind.Interface then "interface"
+    in CodeKind.Function then "function"
+    in CodeKind.Constant then "constant"
+    in CodeKind.Method then "method"
+    end
+    out.push("#{kind} #{declaration.name()}")
+  end
+  out
+end
+
+# Open each declaration by shape. Pure code runs here. Effectful
+# code runs in a child VM with the default-deny table.
+def exercise(linked: ModuleCode): List[String] with Vm
+  out = List[String]()
+  for declaration in linked.declarations()
+    case linked.open(declaration)
+    in Const[String](name)
+      out.push("name = #{name}")
+    in Def[(Int) -> Int](f)
+      out.push("#{declaration.name()}(20) = #{f(20)}")
+    in Def[effect e, () -> Int with e](f)
+      # The row `e` is unknown here, so this arm cannot call `f`.
+      # A child VM can run it. The empty table stops every effect.
+      child = sys.vm.Vm().activate_or_fault(f, args: ())
+      case child.run()
+      in Ok(value) then out.push("#{declaration.name()} ran: #{value}")
+      in Err(problem) then out.push("#{declaration.name()} stopped: #{problem.code()}")
+      end
+    in Class[type C: Display, () -> C](make)
+      # `C` is the plugin class. The bound is the only thing the host
+      # knows about it, and the bound is enough to print it.
+      instance = make()
+      for member in declaration.members()
+        case linked.open(member)
+        in Method[(mut C) -> Int](bump)
+          bump(instance)
+          bump(instance)
+        in _ then ()
+        end
+      end
+      out.push("#{declaration.name()} -> #{display(instance)}")
+    in _ then ()
+    end
+  end
+  out
+end
+
+# Take exact portable code for `double` and run it in another image.
+# The exact form names one verified implementation. It never follows
+# a later replacement.
+def export_double(linked: ModuleCode): Result[Int, CodeError] with Vm
+  image = sys.vm.Vm()
+  for declaration in linked.declarations()
+    if declaration.name() == "double"
+      case linked.open(declaration)
+      in Code[(Int) -> Int](code)
+        binding = image.install(code)?
+        run = image.activate(binding, args: (21,))?
+        case run.run()
+        in Ok(value) then return Ok(value)
+        in Err(problem) then return Err(CodeError(problem.code()))
+        end
+      in _ then ()
+      end
+    end
+  end
+  Err(CodeError("the plugin has no `double`"))
+end
+
+def main(): Result[(List[String], List[String], Int), CodeError] with Compiler, Vm
+  verified = build(plugin_source())?
+  described = describe(verified)
+  linked = sys.vm.link(verified)?
+  exercised = exercise(linked)
+  exported = export_double(linked)?
+  Ok((described, exercised, exported))
+end
+
+main()

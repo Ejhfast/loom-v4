@@ -101,3 +101,13 @@ undo and no syntax colors.
 
 The save writes the file in place. It does not write a temporary file
 first. `std.fs.durable_replace` supplies that stronger contract.
+
+## Run the tests
+
+The package carries unit tests for its pure parts in `src/suite.lm`.
+The test runner finds each `Test` class and runs every test method in
+its own child VM. The tests never enter the program artifact.
+
+```sh
+./target/release/lm test examples/16-text-editor
+```

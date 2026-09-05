@@ -108,3 +108,32 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .windows(needle.len())
         .any(|window| window == needle)
 }
+
+/// The package's own unit tests pass under the generated test entry.
+///
+/// The test build reflects every module of the package, finds each
+/// `Test` class, and runs its methods. A zero result is zero failures.
+#[test]
+fn the_editor_package_tests_pass() {
+    let report = lm_compiler::build_test_package(
+        &repo_root().join("examples/16-text-editor"),
+        &repo_root().join("target/test-text-editor"),
+    )
+    .expect("the editor test package builds");
+    let path = report
+        .artifact
+        .expect("the test build produces one artifact");
+    let bytes = std::fs::read(path).expect("the test artifact reads");
+    let (arena, namespace) = publish_artifact_bytes(&bytes).expect("the test artifact loads");
+    let mut world = World::new(
+        arena,
+        namespace,
+        VmConfig::default(),
+        Box::new(RecordingHost::new(1)),
+    );
+    for grant in ["Vm", "Args", "Io.Write"] {
+        world.allow(grant).expect("the test grant exists");
+    }
+    let outcome = lm_proc::run_world(&mut world);
+    assert_eq!(world.show_outcome(&outcome), "Done(0)");
+}

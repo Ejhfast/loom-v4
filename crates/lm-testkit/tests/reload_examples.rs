@@ -491,3 +491,20 @@ fn a_debugger_that_holds_a_foreign_result_snapshots_and_restores() {
         .expect("the repeated image restores");
     finish_restored(&mut fresh, root);
 }
+
+#[test]
+fn a_host_discovers_what_it_loaded() {
+    // The host reads the descriptions before linking, opens each
+    // declaration by shape after linking, runs the effectful one in
+    // a child VM that grants nothing, and exports exact code.
+    assert_eq!(
+        run_example(
+            "examples/15-compiler-and-hot-code-reloading/13-discover-what-you-loaded.lm",
+            &["Compiler", "Vm"],
+        ),
+        "Done(Ok(([\"class Counter\", \"function add\", \"function double\", \
+         \"function shout\", \"constant NAME\"], [\"Counter -> Counter(2)\", \
+         \"add(20) = 21\", \"double(20) = 40\", \"shout stopped: PolicyDenied\", \
+         \"name = arith\"], 42)))"
+    );
+}
